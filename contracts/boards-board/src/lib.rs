@@ -398,6 +398,104 @@ impl BoardsBoard {
         threads
     }
 
+    /// Hide a thread (moderator action)
+    pub fn hide_thread(env: Env, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
+
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            thread.is_hidden = true;
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Unhide a thread (moderator action)
+    pub fn unhide_thread(env: Env, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
+
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            thread.is_hidden = false;
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Edit thread title (author or moderator)
+    pub fn edit_thread_title(env: Env, thread_id: u64, new_title: String, caller: Address) {
+        caller.require_auth();
+
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            // Verify caller is author or moderator
+            let is_author = thread.creator == caller;
+            let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
+                let board_id: u64 = env
+                    .storage()
+                    .instance()
+                    .get(&BoardKey::BoardId)
+                    .expect("Not initialized");
+                let permissions: Address = env
+                    .storage()
+                    .instance()
+                    .get(&BoardKey::Permissions)
+                    .unwrap();
+                let args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [board_id.into_val(&env), caller.into_val(&env)],
+                );
+                let fn_name = Symbol::new(&env, "can_moderate");
+                env.invoke_contract(&permissions, &fn_name, args)
+            } else {
+                false
+            };
+
+            if !is_author && !is_moderator {
+                panic!("Only author or moderator can edit title");
+            }
+
+            thread.title = new_title;
+            thread.updated_at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
     /// Increment reply count for a thread (called by content contract)
     pub fn increment_reply_count(env: Env, thread_id: u64) {
         if let Some(mut thread) = env
@@ -495,5 +593,63 @@ mod test {
         client.lock_thread(&thread_id, &moderator);
         let thread = client.get_thread(&thread_id).unwrap();
         assert!(thread.is_locked);
+    }
+
+    #[test]
+    fn test_hide_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "General discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let title = String::from_str(&env, "Test Thread");
+
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Hide thread
+        client.hide_thread(&thread_id, &moderator);
+        let thread = client.get_thread(&thread_id).unwrap();
+        assert!(thread.is_hidden);
+
+        // Unhide thread
+        client.unhide_thread(&thread_id, &moderator);
+        let thread = client.get_thread(&thread_id).unwrap();
+        assert!(!thread.is_hidden);
+    }
+
+    #[test]
+    fn test_edit_thread_title() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "General discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Original Title");
+
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Edit title as author
+        let new_title = String::from_str(&env, "Updated Title");
+        client.edit_thread_title(&thread_id, &new_title, &creator);
+
+        let thread = client.get_thread(&thread_id).unwrap();
+        assert_eq!(thread.title, new_title);
     }
 }

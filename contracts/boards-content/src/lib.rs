@@ -19,8 +19,12 @@ pub enum ContentKey {
     Reply(u64, u64, u64),
     /// Next reply ID for a thread
     NextReplyId(u64, u64),
-    /// Flags on a post (board_id, thread_id, reply_id) -> Vec<Flag>
+    /// Flags on a reply (board_id, thread_id, reply_id) -> Vec<Flag>
     Flags(u64, u64, u64),
+    /// Flags on a thread (board_id, thread_id) -> Vec<Flag>
+    ThreadFlags(u64, u64),
+    /// Thread flag count (board_id, thread_id) -> u32
+    ThreadFlagCount(u64, u64),
     /// List of reply IDs for a thread (board_id, thread_id) -> Vec<u64>
     ThreadReplies(u64, u64),
     /// List of child reply IDs for a parent (board_id, thread_id, parent_id) -> Vec<u64>
@@ -31,6 +35,8 @@ pub enum ContentKey {
     ThreadBodyChonk(u64, u64),
     /// Reply content chonk symbol (board_id, thread_id, reply_id) -> Symbol
     ReplyChonk(u64, u64, u64),
+    /// List of flagged content for a board (board_id) -> Vec<FlaggedItem>
+    FlaggedContent(u64),
 }
 
 /// Reply metadata
@@ -57,6 +63,28 @@ pub struct Flag {
     pub flagger: Address,
     pub reason: String,
     pub created_at: u64,
+    pub resolved: bool,
+}
+
+/// Type of flagged content
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FlaggedType {
+    Thread = 0,
+    Reply = 1,
+}
+
+/// Reference to flagged content
+#[contracttype]
+#[derive(Clone)]
+pub struct FlaggedItem {
+    pub board_id: u64,
+    pub thread_id: u64,
+    pub reply_id: u64,       // 0 for threads
+    pub item_type: FlaggedType,
+    pub flag_count: u32,
+    pub first_flagged_at: u64,
 }
 
 #[contract]
@@ -470,9 +498,10 @@ impl BoardsContent {
         flagger.require_auth();
 
         let flag = Flag {
-            flagger,
+            flagger: flagger.clone(),
             reason,
             created_at: env.ledger().timestamp(),
+            resolved: false,
         };
 
         // Get existing flags
@@ -482,21 +511,269 @@ impl BoardsContent {
             .get(&ContentKey::Flags(board_id, thread_id, reply_id))
             .unwrap_or(Vec::new(&env));
 
+        // Check if this user already flagged
+        for i in 0..flags.len() {
+            if flags.get(i).unwrap().flagger == flagger {
+                panic!("Already flagged by this user");
+            }
+        }
+
+        let is_first_flag = flags.is_empty();
         flags.push_back(flag);
+        let flag_count = flags.len() as u32;
+
         env.storage()
             .persistent()
             .set(&ContentKey::Flags(board_id, thread_id, reply_id), &flags);
 
-        // Update flag count on reply
+        // Update flag count on reply and check for auto-hide
         if let Some(mut reply) = env
             .storage()
             .persistent()
             .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
         {
-            reply.flag_count = flags.len() as u32;
+            reply.flag_count = flag_count;
+
+            // Check auto-hide threshold
+            let threshold = Self::get_flag_threshold(&env, board_id);
+            if flag_count >= threshold && !reply.is_hidden {
+                reply.is_hidden = true;
+            }
+
             env.storage()
                 .persistent()
                 .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+        }
+
+        // Add to flagged content list (for moderation queue)
+        if is_first_flag {
+            Self::add_to_flagged_content(&env, board_id, thread_id, reply_id, FlaggedType::Reply);
+        } else {
+            Self::update_flagged_content_count(&env, board_id, thread_id, reply_id, FlaggedType::Reply, flag_count);
+        }
+    }
+
+    /// Flag a thread
+    pub fn flag_thread(env: Env, board_id: u64, thread_id: u64, reason: String, flagger: Address) {
+        flagger.require_auth();
+
+        let flag = Flag {
+            flagger: flagger.clone(),
+            reason,
+            created_at: env.ledger().timestamp(),
+            resolved: false,
+        };
+
+        // Get existing flags
+        let mut flags: Vec<Flag> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ThreadFlags(board_id, thread_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Check if this user already flagged
+        for i in 0..flags.len() {
+            if flags.get(i).unwrap().flagger == flagger {
+                panic!("Already flagged by this user");
+            }
+        }
+
+        let is_first_flag = flags.is_empty();
+        flags.push_back(flag);
+        let flag_count = flags.len() as u32;
+
+        env.storage()
+            .persistent()
+            .set(&ContentKey::ThreadFlags(board_id, thread_id), &flags);
+        env.storage()
+            .persistent()
+            .set(&ContentKey::ThreadFlagCount(board_id, thread_id), &flag_count);
+
+        // Add to flagged content list
+        if is_first_flag {
+            Self::add_to_flagged_content(&env, board_id, thread_id, 0, FlaggedType::Thread);
+        } else {
+            Self::update_flagged_content_count(&env, board_id, thread_id, 0, FlaggedType::Thread, flag_count);
+        }
+
+        // Note: Auto-hide for threads is handled by board contract
+    }
+
+    /// Get flags for a reply
+    pub fn get_reply_flags(env: Env, board_id: u64, thread_id: u64, reply_id: u64) -> Vec<Flag> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::Flags(board_id, thread_id, reply_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get flags for a thread
+    pub fn get_thread_flags(env: Env, board_id: u64, thread_id: u64) -> Vec<Flag> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::ThreadFlags(board_id, thread_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get thread flag count
+    pub fn get_thread_flag_count(env: Env, board_id: u64, thread_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::ThreadFlagCount(board_id, thread_id))
+            .unwrap_or(0)
+    }
+
+    /// Clear/resolve flags on a reply (moderator action)
+    pub fn clear_reply_flags(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
+        caller.require_auth();
+        Self::check_can_moderate(&env, board_id, &caller);
+
+        // Mark all flags as resolved
+        if let Some(mut flags) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Flag>>(&ContentKey::Flags(board_id, thread_id, reply_id))
+        {
+            for i in 0..flags.len() {
+                let mut flag = flags.get(i).unwrap();
+                flag.resolved = true;
+                flags.set(i, flag);
+            }
+            env.storage()
+                .persistent()
+                .set(&ContentKey::Flags(board_id, thread_id, reply_id), &flags);
+        }
+
+        // Update reply flag count to 0 (cleared)
+        if let Some(mut reply) = env
+            .storage()
+            .persistent()
+            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
+        {
+            reply.flag_count = 0;
+            env.storage()
+                .persistent()
+                .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+        }
+
+        // Remove from flagged content list
+        Self::remove_from_flagged_content(&env, board_id, thread_id, reply_id, FlaggedType::Reply);
+    }
+
+    /// Clear/resolve flags on a thread (moderator action)
+    pub fn clear_thread_flags(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+        Self::check_can_moderate(&env, board_id, &caller);
+
+        // Mark all flags as resolved
+        if let Some(mut flags) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Flag>>(&ContentKey::ThreadFlags(board_id, thread_id))
+        {
+            for i in 0..flags.len() {
+                let mut flag = flags.get(i).unwrap();
+                flag.resolved = true;
+                flags.set(i, flag);
+            }
+            env.storage()
+                .persistent()
+                .set(&ContentKey::ThreadFlags(board_id, thread_id), &flags);
+        }
+
+        env.storage()
+            .persistent()
+            .set(&ContentKey::ThreadFlagCount(board_id, thread_id), &0u32);
+
+        // Remove from flagged content list
+        Self::remove_from_flagged_content(&env, board_id, thread_id, 0, FlaggedType::Thread);
+    }
+
+    /// Get all flagged content for a board (moderation queue)
+    pub fn list_flagged_content(env: Env, board_id: u64) -> Vec<FlaggedItem> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::FlaggedContent(board_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Helper: Get flag threshold from permissions contract
+    fn get_flag_threshold(env: &Env, board_id: u64) -> u32 {
+        if !env.storage().instance().has(&ContentKey::Permissions) {
+            return 3; // Default threshold
+        }
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Permissions)
+            .unwrap();
+
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let fn_name = Symbol::new(env, "get_flag_threshold");
+        env.invoke_contract(&permissions, &fn_name, args)
+    }
+
+    /// Helper: Add item to flagged content list
+    fn add_to_flagged_content(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType) {
+        let mut flagged: Vec<FlaggedItem> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::FlaggedContent(board_id))
+            .unwrap_or(Vec::new(env));
+
+        flagged.push_back(FlaggedItem {
+            board_id,
+            thread_id,
+            reply_id,
+            item_type,
+            flag_count: 1,
+            first_flagged_at: env.ledger().timestamp(),
+        });
+
+        env.storage()
+            .persistent()
+            .set(&ContentKey::FlaggedContent(board_id), &flagged);
+    }
+
+    /// Helper: Update flag count in flagged content list
+    fn update_flagged_content_count(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType, count: u32) {
+        if let Some(mut flagged) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<FlaggedItem>>(&ContentKey::FlaggedContent(board_id))
+        {
+            for i in 0..flagged.len() {
+                let mut item = flagged.get(i).unwrap();
+                if item.thread_id == thread_id && item.reply_id == reply_id && item.item_type == item_type {
+                    item.flag_count = count;
+                    flagged.set(i, item);
+                    break;
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&ContentKey::FlaggedContent(board_id), &flagged);
+        }
+    }
+
+    /// Helper: Remove item from flagged content list
+    fn remove_from_flagged_content(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType) {
+        if let Some(flagged) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<FlaggedItem>>(&ContentKey::FlaggedContent(board_id))
+        {
+            let mut new_flagged = Vec::new(env);
+            for i in 0..flagged.len() {
+                let item = flagged.get(i).unwrap();
+                if !(item.thread_id == thread_id && item.reply_id == reply_id && item.item_type == item_type) {
+                    new_flagged.push_back(item);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&ContentKey::FlaggedContent(board_id), &new_flagged);
         }
     }
 
@@ -769,5 +1046,67 @@ mod test {
 
         let reply = client.get_reply(&0, &0, &reply_id).unwrap();
         assert_eq!(reply.flag_count, 1);
+
+        // Check flags list
+        let flags = client.get_reply_flags(&0, &0, &reply_id);
+        assert_eq!(flags.len(), 1);
+        assert!(!flags.get(0).unwrap().resolved);
+    }
+
+    #[test]
+    fn test_flag_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let flagger1 = Address::generate(&env);
+        let flagger2 = Address::generate(&env);
+
+        // Flag thread
+        let reason = String::from_str(&env, "Inappropriate");
+        client.flag_thread(&0, &0, &reason, &flagger1);
+        assert_eq!(client.get_thread_flag_count(&0, &0), 1);
+
+        // Another user flags
+        client.flag_thread(&0, &0, &reason, &flagger2);
+        assert_eq!(client.get_thread_flag_count(&0, &0), 2);
+
+        // Check flagged content list
+        let flagged = client.list_flagged_content(&0);
+        assert_eq!(flagged.len(), 1);
+        assert_eq!(flagged.get(0).unwrap().flag_count, 2);
+    }
+
+    #[test]
+    fn test_auto_hide_on_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        // No permissions contract means default threshold of 3
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+        let content = Bytes::from_slice(&env, b"Some content");
+        let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
+
+        // Flag 3 times (default threshold)
+        for _ in 0..3 {
+            let flagger = Address::generate(&env);
+            let reason = String::from_str(&env, "Bad");
+            client.flag_reply(&0, &0, &reply_id, &reason, &flagger);
+        }
+
+        // Should be auto-hidden
+        let reply = client.get_reply(&0, &0, &reply_id).unwrap();
+        assert!(reply.is_hidden);
     }
 }

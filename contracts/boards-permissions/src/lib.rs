@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
 
 /// Role levels (hierarchical - higher includes lower permissions)
 #[contracttype]
@@ -61,6 +61,8 @@ pub enum PermKey {
     BoardModerators(u64),
     /// List of members for a board
     BoardMembers(u64),
+    /// List of banned users for a board
+    BannedUsers(u64),
 }
 
 /// Permission check result with all relevant permissions
@@ -157,9 +159,69 @@ impl BoardsPermissions {
             }
         }
 
+        // Get old role to update membership lists
+        let old_role = Self::get_role(env.clone(), board_id, user.clone());
+
+        // Remove from old role list
+        Self::remove_from_role_list(&env, board_id, &user, old_role);
+
+        // Add to new role list
+        Self::add_to_role_list(&env, board_id, &user, role.clone());
+
         env.storage()
             .persistent()
             .set(&PermKey::BoardRole(board_id, user), &role);
+    }
+
+    /// Add user to appropriate role list
+    fn add_to_role_list(env: &Env, board_id: u64, user: &Address, role: Role) {
+        let key = match role {
+            Role::Admin => PermKey::BoardAdmins(board_id),
+            Role::Moderator => PermKey::BoardModerators(board_id),
+            Role::Member => PermKey::BoardMembers(board_id),
+            _ => return, // Owner and Guest don't have lists
+        };
+
+        let mut list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        // Check if already in list
+        let mut found = false;
+        for i in 0..list.len() {
+            if list.get(i).unwrap() == *user {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            list.push_back(user.clone());
+            env.storage().persistent().set(&key, &list);
+        }
+    }
+
+    /// Remove user from role list
+    fn remove_from_role_list(env: &Env, board_id: u64, user: &Address, role: Role) {
+        let key = match role {
+            Role::Admin => PermKey::BoardAdmins(board_id),
+            Role::Moderator => PermKey::BoardModerators(board_id),
+            Role::Member => PermKey::BoardMembers(board_id),
+            _ => return, // Owner and Guest don't have lists
+        };
+
+        if let Some(list) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
+            let mut new_list = Vec::new(env);
+            for i in 0..list.len() {
+                let addr = list.get(i).unwrap();
+                if addr != *user {
+                    new_list.push_back(addr);
+                }
+            }
+            env.storage().persistent().set(&key, &new_list);
+        }
     }
 
     /// Get a user's role for a board
@@ -230,7 +292,29 @@ impl BoardsPermissions {
 
         env.storage()
             .persistent()
-            .set(&PermKey::BoardBan(board_id, user), &ban);
+            .set(&PermKey::BoardBan(board_id, user.clone()), &ban);
+
+        // Add to banned users list
+        let mut banned: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::BannedUsers(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Check if already in list
+        let mut found = false;
+        for i in 0..banned.len() {
+            if banned.get(i).unwrap() == user {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            banned.push_back(user);
+            env.storage()
+                .persistent()
+                .set(&PermKey::BannedUsers(board_id), &banned);
+        }
     }
 
     /// Unban a user from a board
@@ -248,7 +332,25 @@ impl BoardsPermissions {
 
         env.storage()
             .persistent()
-            .remove(&PermKey::BoardBan(board_id, user));
+            .remove(&PermKey::BoardBan(board_id, user.clone()));
+
+        // Remove from banned users list
+        if let Some(banned) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&PermKey::BannedUsers(board_id))
+        {
+            let mut new_banned = Vec::new(&env);
+            for i in 0..banned.len() {
+                let addr = banned.get(i).unwrap();
+                if addr != user {
+                    new_banned.push_back(addr);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&PermKey::BannedUsers(board_id), &new_banned);
+        }
     }
 
     /// Check if a user is banned from a board
@@ -313,6 +415,98 @@ impl BoardsPermissions {
             .persistent()
             .get(&PermKey::FlagThreshold(board_id))
             .unwrap_or(3)
+    }
+
+    // Membership list functions
+
+    /// Get list of admins for a board
+    pub fn list_admins(env: Env, board_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::BoardAdmins(board_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get list of moderators for a board
+    pub fn list_moderators(env: Env, board_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::BoardModerators(board_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get list of members for a board
+    pub fn list_members(env: Env, board_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::BoardMembers(board_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get count of members with a specific role
+    pub fn role_count(env: Env, board_id: u64, role: Role) -> u32 {
+        match role {
+            Role::Admin => Self::list_admins(env, board_id).len(),
+            Role::Moderator => Self::list_moderators(env, board_id).len(),
+            Role::Member => Self::list_members(env, board_id).len(),
+            _ => 0,
+        }
+    }
+
+    /// Get list of banned users for a board (with active bans only)
+    pub fn list_banned(env: Env, board_id: u64) -> Vec<Address> {
+        let banned: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::BannedUsers(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Filter out expired bans
+        let mut active_banned = Vec::new(&env);
+        let now = env.ledger().timestamp();
+
+        for i in 0..banned.len() {
+            let user = banned.get(i).unwrap();
+            if let Some(ban) = env
+                .storage()
+                .persistent()
+                .get::<_, Ban>(&PermKey::BoardBan(board_id, user.clone()))
+            {
+                let is_active = match ban.expires_at {
+                    Some(expires) => now < expires,
+                    None => true, // Permanent ban
+                };
+                if is_active {
+                    active_banned.push_back(user);
+                }
+            }
+        }
+
+        active_banned
+    }
+
+    /// Get list of all bans for a board (with ban details)
+    pub fn list_bans(env: Env, board_id: u64) -> Vec<Ban> {
+        let banned: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::BannedUsers(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut bans = Vec::new(&env);
+
+        for i in 0..banned.len() {
+            let user = banned.get(i).unwrap();
+            if let Some(ban) = env
+                .storage()
+                .persistent()
+                .get::<_, Ban>(&PermKey::BoardBan(board_id, user))
+            {
+                bans.push_back(ban);
+            }
+        }
+
+        bans
     }
 
     // Permission check helpers
@@ -477,5 +671,84 @@ mod test {
         assert!(!guest_perms.can_post);
         assert!(!guest_perms.can_moderate);
         assert!(!guest_perms.can_admin);
+    }
+
+    #[test]
+    fn test_membership_lists() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let mod1 = Address::generate(&env);
+        let mod2 = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &admin, &Role::Admin, &owner);
+        client.set_role(&0, &mod1, &Role::Moderator, &owner);
+        client.set_role(&0, &mod2, &Role::Moderator, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        // Check lists
+        let admins = client.list_admins(&0);
+        assert_eq!(admins.len(), 1);
+        assert_eq!(admins.get(0).unwrap(), admin);
+
+        let mods = client.list_moderators(&0);
+        assert_eq!(mods.len(), 2);
+
+        let members = client.list_members(&0);
+        assert_eq!(members.len(), 1);
+        assert_eq!(members.get(0).unwrap(), member);
+
+        // Promote mod1 to admin - should move from mod list to admin list
+        client.set_role(&0, &mod1, &Role::Admin, &owner);
+        let admins = client.list_admins(&0);
+        assert_eq!(admins.len(), 2);
+        let mods = client.list_moderators(&0);
+        assert_eq!(mods.len(), 1);
+    }
+
+    #[test]
+    fn test_banned_list() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Ban users
+        let reason = String::from_str(&env, "Spam");
+        client.ban_user(&0, &user1, &reason, &None, &owner); // Permanent
+        client.ban_user(&0, &user2, &reason, &Some(24), &owner); // 24 hours
+
+        // Check banned list
+        let banned = client.list_banned(&0);
+        assert_eq!(banned.len(), 2);
+
+        // Check bans list with details
+        let bans = client.list_bans(&0);
+        assert_eq!(bans.len(), 2);
+
+        // Unban one
+        client.unban_user(&0, &user1, &owner);
+        let banned = client.list_banned(&0);
+        assert_eq!(banned.len(), 1);
     }
 }

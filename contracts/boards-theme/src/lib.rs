@@ -69,6 +69,63 @@ pub struct ReplyMeta {
     pub flag_count: u32,
 }
 
+/// Ban record from permissions contract
+#[contracttype]
+#[derive(Clone)]
+pub struct Ban {
+    pub user: Address,
+    pub board_id: u64,
+    pub issuer: Address,
+    pub reason: String,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
+/// Role levels from permissions contract
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Role {
+    Guest = 0,
+    Member = 1,
+    Moderator = 2,
+    Admin = 3,
+    Owner = 4,
+}
+
+/// Type of flagged content
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum FlaggedType {
+    Thread = 0,
+    Reply = 1,
+}
+
+/// Flagged content item from content contract
+#[contracttype]
+#[derive(Clone)]
+pub struct FlaggedItem {
+    pub board_id: u64,
+    pub thread_id: u64,
+    pub reply_id: u64,
+    pub item_type: FlaggedType,
+    pub flag_count: u32,
+    pub first_flagged_at: u64,
+}
+
+/// Permission set from permissions contract
+#[contracttype]
+#[derive(Clone)]
+pub struct PermissionSet {
+    pub role: Role,
+    pub can_view: bool,
+    pub can_post: bool,
+    pub can_moderate: bool,
+    pub can_admin: bool,
+    pub is_banned: bool,
+}
+
 #[contract]
 pub struct BoardsTheme;
 
@@ -117,6 +174,23 @@ impl BoardsTheme {
             .or_handle(b"/help", |_| Self::render_help(&env))
             // Create board form
             .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
+            // Moderation routes (must be before simpler board routes)
+            .or_handle(b"/b/{id}/members", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_members(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/banned", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_banned(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/flags", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_flag_queue(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/settings", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_settings(&env, board_id, &viewer)
+            })
             // Thread reply form (must be before thread view to match first)
             .or_handle(b"/b/{id}/t/{tid}/reply", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
@@ -616,6 +690,329 @@ impl BoardsTheme {
                 .text(" | ")
                 .tx_link("Flag", "flag_reply", "");
         }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render members list page
+    fn render_members(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Permissions)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env)
+            .render_link("< Back to Board", "")
+            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .newline()
+            .h1("Board Members");
+
+        // Check if viewer has permission to view members (moderator+)
+        let can_view = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_moderate
+        } else {
+            false
+        };
+
+        if !can_view {
+            md = md.warning("You must be a moderator to view this page.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Fetch owner
+        let owner_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let owner_opt: Option<Address> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "get_board_owner"),
+            owner_args,
+        );
+
+        md = md.h2("Owner");
+        if let Some(_owner) = owner_opt {
+            // Address display - in production, use address shortener or full display
+            md = md.text("- ").code("[owner address]").newline();
+        } else {
+            md = md.paragraph("*No owner set*");
+        }
+
+        // Fetch admins
+        md = md.h2("Admins");
+        let admins: Vec<Address> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "list_admins"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if admins.is_empty() {
+            md = md.paragraph("*No admins*");
+        } else {
+            for i in 0..admins.len() {
+                let _addr = admins.get(i).unwrap();
+                md = md.text("- ").code("[admin ").number(i as u32).code("]").newline();
+            }
+        }
+
+        // Fetch moderators
+        md = md.h2("Moderators");
+        let mods: Vec<Address> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "list_moderators"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if mods.is_empty() {
+            md = md.paragraph("*No moderators*");
+        } else {
+            for i in 0..mods.len() {
+                let _addr = mods.get(i).unwrap();
+                md = md.text("- ").code("[moderator ").number(i as u32).code("]").newline();
+            }
+        }
+
+        // Fetch members
+        md = md.h2("Members");
+        let members: Vec<Address> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "list_members"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if members.is_empty() {
+            md = md.paragraph("*No members*");
+        } else {
+            for i in 0..members.len() {
+                let _addr = members.get(i).unwrap();
+                md = md.text("- ").code("[member ").number(i as u32).code("]").newline();
+            }
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render banned users page
+    fn render_banned(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Permissions)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env)
+            .render_link("< Back to Board", "")
+            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .newline()
+            .h1("Banned Users");
+
+        // Check if viewer has permission (moderator+)
+        let can_view = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_moderate
+        } else {
+            false
+        };
+
+        if !can_view {
+            md = md.warning("You must be a moderator to view this page.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Fetch bans
+        let bans: Vec<Ban> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "list_bans"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if bans.is_empty() {
+            md = md.paragraph("No banned users.");
+        } else {
+            for i in 0..bans.len() {
+                let ban = bans.get(i).unwrap();
+                md = md.h3("Banned User #").number(i as u32);
+                md = md.text("**Reason:** ").text_string(&ban.reason).newline();
+                md = md.text("**Issued by:** ").code("[issuer address]").newline();
+
+                if let Some(expires) = ban.expires_at {
+                    md = md.text("**Expires:** ").number(expires as u32).text(" (timestamp)").newline();
+                } else {
+                    md = md.text("**Expires:** *Permanent*").newline();
+                }
+
+                // Unban link
+                md = md.tx_link("Unban", "unban_user", "").newline().newline();
+            }
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render flag queue page
+    fn render_flag_queue(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Permissions)
+            .expect("Not initialized");
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env)
+            .render_link("< Back to Board", "")
+            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .newline()
+            .h1("Flag Queue");
+
+        // Check if viewer has permission (moderator+)
+        let can_view = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_moderate
+        } else {
+            false
+        };
+
+        if !can_view {
+            md = md.warning("You must be a moderator to view this page.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Fetch flagged content
+        let flagged: Vec<FlaggedItem> = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "list_flagged_content"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if flagged.is_empty() {
+            md = md.tip("No flagged content. Good work!");
+        } else {
+            md = md.paragraph("Review flagged content and take appropriate action.");
+
+            for i in 0..flagged.len() {
+                let item = flagged.get(i).unwrap();
+
+                md = md.hr();
+
+                let type_str = if item.item_type == FlaggedType::Thread { "Thread" } else { "Reply" };
+                md = md.h3("").text(type_str).text(" #").number(item.thread_id as u32);
+
+                if item.item_type == FlaggedType::Reply {
+                    md = md.text(" / Reply #").number(item.reply_id as u32);
+                }
+
+                md = md.newline()
+                    .text("**Flags:** ").number(item.flag_count).newline();
+
+                // View link
+                if item.item_type == FlaggedType::Thread {
+                    md = md.render_link("View Thread", "")
+                        .raw_str("/b/").number(board_id as u32)
+                        .raw_str("/t/").number(item.thread_id as u32)
+                        .raw_str(")");
+                } else {
+                    md = md.render_link("View Reply", "")
+                        .raw_str("/b/").number(board_id as u32)
+                        .raw_str("/t/").number(item.thread_id as u32)
+                        .raw_str("/r/").number(item.reply_id as u32)
+                        .raw_str(")");
+                }
+
+                // Actions
+                md = md.text(" | ").tx_link("Hide", "hide_content", "");
+                md = md.text(" | ").tx_link("Clear Flags", "clear_flags", "");
+                md = md.newline();
+            }
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render board settings page
+    fn render_settings(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Permissions)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env)
+            .render_link("< Back to Board", "")
+            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .newline()
+            .h1("Board Settings");
+
+        // Check if viewer has admin permission
+        let can_admin = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_admin
+        } else {
+            false
+        };
+
+        if !can_admin {
+            md = md.warning("You must be an admin to view this page.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get flag threshold
+        let threshold: u32 = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "get_flag_threshold"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        md = md.h2("Moderation Settings");
+        md = md.text("**Flag threshold for auto-hide:** ").number(threshold).newline();
+        md = md.input("threshold", "New threshold")
+            .newline()
+            .form_link("Update Threshold", "set_flag_threshold")
+            .newline()
+            .newline();
+
+        md = md.h2("Role Management");
+        md = md.paragraph("Assign roles to users on this board.");
+        md = md.input("user_address", "User wallet address")
+            .newline()
+            .text("Select role: ")
+            .text("[").tx_link("Member", "set_role_member", "").text("] ")
+            .text("[").tx_link("Moderator", "set_role_mod", "").text("] ")
+            .text("[").tx_link("Admin", "set_role_admin", "").text("]")
+            .newline()
+            .newline();
+
+        md = md.h2("Quick Links");
+        md = md.render_link("View Members", "")
+            .raw_str("/b/").number(board_id as u32).raw_str("/members)")
+            .text(" | ");
+        md = md.render_link("View Banned", "")
+            .raw_str("/b/").number(board_id as u32).raw_str("/banned)")
+            .text(" | ");
+        md = md.render_link("View Flag Queue", "")
+            .raw_str("/b/").number(board_id as u32).raw_str("/flags)");
 
         Self::render_footer_into(md).build()
     }
