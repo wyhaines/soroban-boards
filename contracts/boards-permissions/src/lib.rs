@@ -751,4 +751,282 @@ mod test {
         let banned = client.list_banned(&0);
         assert_eq!(banned.len(), 1);
     }
+
+    #[test]
+    fn test_flag_threshold() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        client.set_board_owner(&0, &owner);
+
+        // Default threshold is 3
+        assert_eq!(client.get_flag_threshold(&0), 3);
+
+        // Set a new threshold
+        client.set_flag_threshold(&0, &5, &owner);
+        assert_eq!(client.get_flag_threshold(&0), 5);
+    }
+
+    #[test]
+    fn test_role_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        client.set_board_owner(&0, &owner);
+
+        // Initially no one in role lists
+        assert_eq!(client.role_count(&0, &Role::Admin), 0);
+        assert_eq!(client.role_count(&0, &Role::Moderator), 0);
+        assert_eq!(client.role_count(&0, &Role::Member), 0);
+
+        // Add users to roles
+        let admin = Address::generate(&env);
+        let mod1 = Address::generate(&env);
+        let mod2 = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        client.set_role(&0, &admin, &Role::Admin, &owner);
+        client.set_role(&0, &mod1, &Role::Moderator, &owner);
+        client.set_role(&0, &mod2, &Role::Moderator, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        assert_eq!(client.role_count(&0, &Role::Admin), 1);
+        assert_eq!(client.role_count(&0, &Role::Moderator), 2);
+        assert_eq!(client.role_count(&0, &Role::Member), 1);
+    }
+
+    #[test]
+    fn test_helper_functions() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let member = Address::generate(&env);
+        let guest = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        // Test helper permission check functions
+        assert!(client.can_create_thread(&0, &owner));
+        assert!(client.can_create_thread(&0, &member));
+        assert!(!client.can_create_thread(&0, &guest));
+
+        assert!(client.can_reply(&0, &owner));
+        assert!(client.can_reply(&0, &member));
+        assert!(!client.can_reply(&0, &guest));
+
+        assert!(client.can_moderate(&0, &owner));
+        assert!(!client.can_moderate(&0, &member));
+        assert!(!client.can_moderate(&0, &guest));
+
+        assert!(client.can_admin(&0, &owner));
+        assert!(!client.can_admin(&0, &member));
+    }
+
+    #[test]
+    fn test_has_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let member = Address::generate(&env);
+        let guest = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &moderator, &Role::Moderator, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        // Owner has all roles
+        assert!(client.has_role(&0, &owner, &Role::Owner));
+        assert!(client.has_role(&0, &owner, &Role::Admin));
+        assert!(client.has_role(&0, &owner, &Role::Moderator));
+        assert!(client.has_role(&0, &owner, &Role::Member));
+        assert!(client.has_role(&0, &owner, &Role::Guest));
+
+        // Moderator has moderator and below
+        assert!(!client.has_role(&0, &moderator, &Role::Owner));
+        assert!(!client.has_role(&0, &moderator, &Role::Admin));
+        assert!(client.has_role(&0, &moderator, &Role::Moderator));
+        assert!(client.has_role(&0, &moderator, &Role::Member));
+        assert!(client.has_role(&0, &moderator, &Role::Guest));
+
+        // Member has member and below
+        assert!(!client.has_role(&0, &member, &Role::Moderator));
+        assert!(client.has_role(&0, &member, &Role::Member));
+        assert!(client.has_role(&0, &member, &Role::Guest));
+
+        // Guest only has guest
+        assert!(!client.has_role(&0, &guest, &Role::Member));
+        assert!(client.has_role(&0, &guest, &Role::Guest));
+    }
+
+    #[test]
+    #[should_panic(expected = "Only owner can set admin")]
+    fn test_unauthorized_set_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Moderator cannot set admin - should panic
+        client.set_role(&0, &user, &Role::Admin, &moderator);
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot ban user with equal or higher role")]
+    fn test_cannot_ban_higher_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let moderator = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &admin, &Role::Admin, &owner);
+        client.set_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Moderator cannot ban admin - should panic
+        let reason = String::from_str(&env, "Test");
+        client.ban_user(&0, &admin, &reason, &None, &moderator);
+    }
+
+    #[test]
+    fn test_multiple_boards() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        // Set up two boards with different owners
+        client.set_board_owner(&0, &owner1);
+        client.set_board_owner(&1, &owner2);
+
+        // Owner1 is owner of board 0 only
+        assert_eq!(client.get_role(&0, &owner1), Role::Owner);
+        assert_eq!(client.get_role(&1, &owner1), Role::Guest);
+
+        // Owner2 is owner of board 1 only
+        assert_eq!(client.get_role(&0, &owner2), Role::Guest);
+        assert_eq!(client.get_role(&1, &owner2), Role::Owner);
+
+        // Make user a member of board 0 but not board 1
+        client.set_role(&0, &user, &Role::Member, &owner1);
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+        assert_eq!(client.get_role(&1, &user), Role::Guest);
+    }
+
+    #[test]
+    fn test_get_ban_details() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Ban user with reason
+        let reason = String::from_str(&env, "Violating community guidelines");
+        client.ban_user(&0, &user, &reason, &Some(48), &owner);
+
+        // Get ban details
+        let ban = client.get_ban(&0, &user).unwrap();
+        assert_eq!(ban.user, user);
+        assert_eq!(ban.issuer, owner);
+        assert_eq!(ban.reason, reason);
+        assert!(ban.expires_at.is_some());
+    }
+
+    #[test]
+    fn test_demote_user() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Promote user to admin
+        client.set_role(&0, &user, &Role::Admin, &owner);
+        assert_eq!(client.get_role(&0, &user), Role::Admin);
+        assert_eq!(client.list_admins(&0).len(), 1);
+
+        // Demote to member
+        client.set_role(&0, &user, &Role::Member, &owner);
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+        assert_eq!(client.list_admins(&0).len(), 0);
+        assert_eq!(client.list_members(&0).len(), 1);
+
+        // Demote to guest (remove from board)
+        client.set_role(&0, &user, &Role::Guest, &owner);
+        assert_eq!(client.get_role(&0, &user), Role::Guest);
+        assert_eq!(client.list_members(&0).len(), 0);
+    }
 }

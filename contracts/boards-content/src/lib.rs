@@ -1109,4 +1109,304 @@ mod test {
         let reply = client.get_reply(&0, &0, &reply_id).unwrap();
         assert!(reply.is_hidden);
     }
+
+    #[test]
+    fn test_edit_reply() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+        let original_content = Bytes::from_slice(&env, b"Original content");
+        let reply_id = client.create_reply(&0, &0, &0, &1, &original_content, &author);
+
+        // Edit the reply
+        let new_content = Bytes::from_slice(&env, b"Updated content");
+        client.edit_reply(&0, &0, &reply_id, &new_content, &author);
+
+        let content = client.get_reply_content(&0, &0, &reply_id);
+        assert_eq!(content, new_content);
+
+        // Verify updated_at changed
+        let reply = client.get_reply(&0, &0, &reply_id).unwrap();
+        assert!(reply.updated_at >= reply.created_at);
+    }
+
+    #[test]
+    fn test_nested_replies() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author1 = Address::generate(&env);
+        let author2 = Address::generate(&env);
+        let author3 = Address::generate(&env);
+
+        // Create top-level reply
+        let content1 = Bytes::from_slice(&env, b"Top level reply");
+        let reply1 = client.create_reply(&0, &0, &0, &0, &content1, &author1);
+
+        // Create nested reply to reply1
+        let content2 = Bytes::from_slice(&env, b"Reply to reply 1");
+        let reply2 = client.create_reply(&0, &0, &reply1, &1, &content2, &author2);
+
+        // Create deeply nested reply
+        let content3 = Bytes::from_slice(&env, b"Reply to reply 2");
+        let reply3 = client.create_reply(&0, &0, &reply2, &2, &content3, &author3);
+
+        // Verify depths
+        assert_eq!(client.get_reply(&0, &0, &reply1).unwrap().depth, 0);
+        assert_eq!(client.get_reply(&0, &0, &reply2).unwrap().depth, 1);
+        assert_eq!(client.get_reply(&0, &0, &reply3).unwrap().depth, 2);
+
+        // Verify parent relationships
+        assert_eq!(client.get_reply(&0, &0, &reply2).unwrap().parent_id, reply1);
+        assert_eq!(client.get_reply(&0, &0, &reply3).unwrap().parent_id, reply2);
+
+        // Verify child counts
+        assert_eq!(client.get_children_count(&0, &0, &reply1), 1);
+        assert_eq!(client.get_children_count(&0, &0, &reply2), 1);
+        assert_eq!(client.get_children_count(&0, &0, &reply3), 0);
+    }
+
+    #[test]
+    fn test_list_replies() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+
+        // Create multiple replies
+        let contents = [b"Reply 0", b"Reply 1", b"Reply 2", b"Reply 3", b"Reply 4"];
+        for content_bytes in contents.iter() {
+            let content = Bytes::from_slice(&env, *content_bytes);
+            client.create_reply(&0, &0, &0, &1, &content, &author);
+        }
+
+        // Test pagination
+        let page1 = client.list_replies(&0, &0, &0, &2);
+        assert_eq!(page1.len(), 2);
+
+        let page2 = client.list_replies(&0, &0, &2, &2);
+        assert_eq!(page2.len(), 2);
+
+        let page3 = client.list_replies(&0, &0, &4, &2);
+        assert_eq!(page3.len(), 1);
+    }
+
+    #[test]
+    fn test_progressive_loading() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+
+        // Create a large thread body that will be chunked
+        let mut large_content = [0u8; 8192];
+        for i in 0..large_content.len() {
+            large_content[i] = (i % 256) as u8;
+        }
+        let content = Bytes::from_slice(&env, &large_content);
+
+        client.set_thread_body(&0, &0, &content, &author);
+
+        // Verify we can get chunks
+        let chunk_count = client.get_thread_body_chunk_count(&0, &0);
+        assert!(chunk_count > 1); // Should be multiple chunks
+
+        // Verify full content can be assembled
+        let assembled = client.get_thread_body(&0, &0);
+        assert_eq!(assembled, content);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already flagged by this user")]
+    fn test_double_flag_prevented() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+        let flagger = Address::generate(&env);
+        let content = Bytes::from_slice(&env, b"Content");
+        let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
+
+        // Flag once
+        let reason = String::from_str(&env, "Spam");
+        client.flag_reply(&0, &0, &reply_id, &reason, &flagger);
+
+        // Try to flag again - should panic
+        client.flag_reply(&0, &0, &reply_id, &reason, &flagger);
+    }
+
+    #[test]
+    fn test_hide_unhide_reply() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        // Note: Without permissions contract, hide/unhide won't check moderator status
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let content = Bytes::from_slice(&env, b"Content");
+        let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
+
+        // Initially not hidden
+        let reply = client.get_reply(&0, &0, &reply_id).unwrap();
+        assert!(!reply.is_hidden);
+
+        // Hide
+        client.hide_reply(&0, &0, &reply_id, &moderator);
+        let reply = client.get_reply(&0, &0, &reply_id).unwrap();
+        assert!(reply.is_hidden);
+
+        // Unhide
+        client.unhide_reply(&0, &0, &reply_id, &moderator);
+        let reply = client.get_reply(&0, &0, &reply_id).unwrap();
+        assert!(!reply.is_hidden);
+    }
+
+    #[test]
+    fn test_list_children_replies() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+
+        // Create parent reply
+        let parent_content = Bytes::from_slice(&env, b"Parent");
+        let parent_id = client.create_reply(&0, &0, &0, &0, &parent_content, &author);
+
+        // Create children
+        let child_contents = [b"Child 0", b"Child 1", b"Child 2"];
+        for content_bytes in child_contents.iter() {
+            let content = Bytes::from_slice(&env, *content_bytes);
+            client.create_reply(&0, &0, &parent_id, &1, &content, &author);
+        }
+
+        // List children
+        let children = client.list_children_replies(&0, &0, &parent_id);
+        assert_eq!(children.len(), 3);
+
+        // All children should have parent_id set correctly
+        for i in 0..children.len() {
+            assert_eq!(children.get(i).unwrap().parent_id, parent_id);
+        }
+    }
+
+    #[test]
+    fn test_get_nonexistent_reply() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        // Get reply that doesn't exist
+        let reply = client.get_reply(&0, &0, &999);
+        assert!(reply.is_none());
+    }
+
+    #[test]
+    fn test_list_flagged_content() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+
+        // Create replies and flag them
+        let content = Bytes::from_slice(&env, b"Content");
+        let reply1 = client.create_reply(&0, &0, &0, &1, &content, &author);
+        let reply2 = client.create_reply(&0, &0, &0, &1, &content, &author);
+
+        // Flag reply1 once
+        let flagger1 = Address::generate(&env);
+        let reason = String::from_str(&env, "Spam");
+        client.flag_reply(&0, &0, &reply1, &reason, &flagger1);
+
+        // Flag reply2 twice
+        let flagger2 = Address::generate(&env);
+        let flagger3 = Address::generate(&env);
+        client.flag_reply(&0, &0, &reply2, &reason, &flagger2);
+        client.flag_reply(&0, &0, &reply2, &reason, &flagger3);
+
+        // Flag a thread
+        let thread_flagger = Address::generate(&env);
+        client.flag_thread(&0, &0, &reason, &thread_flagger);
+
+        // List all flagged content
+        let flagged = client.list_flagged_content(&0);
+        assert_eq!(flagged.len(), 3); // 2 replies + 1 thread
+    }
+
+    #[test]
+    fn test_edit_thread_body() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsContent, ());
+        let client = BoardsContentClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None);
+
+        let author = Address::generate(&env);
+
+        // Set initial content
+        let original = Bytes::from_slice(&env, b"Original thread content");
+        client.set_thread_body(&0, &0, &original, &author);
+        assert_eq!(client.get_thread_body(&0, &0), original);
+
+        // Edit content
+        let updated = Bytes::from_slice(&env, b"Updated thread content");
+        client.edit_thread_body(&0, &0, &updated, &author);
+        assert_eq!(client.get_thread_body(&0, &0), updated);
+    }
 }

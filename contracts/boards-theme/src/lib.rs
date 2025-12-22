@@ -1049,30 +1049,70 @@ impl BoardsTheme {
             .var("success", "#30a46c")
             .var("warning", "#ffc53d")
             .var("danger", "#e5484d")
+            // Spacing
+            .var("space-xs", "0.25rem")
+            .var("space-sm", "0.5rem")
+            .var("space-md", "1rem")
+            .var("space-lg", "1.5rem")
+            .var("space-xl", "2rem")
+            // Container max width
+            .var("container-max", "48rem")
             .root_vars_end()
+            // Base styles
+            .rule("*", "box-sizing: border-box;")
+            .rule("body", "font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); background: var(--bg); line-height: 1.6; margin: 0; padding: var(--space-md);")
+            // Container
+            .rule(".container", "max-width: var(--container-max); margin: 0 auto; padding: 0 var(--space-md);")
             // Typography
-            .rule("body", "font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); background: var(--bg); line-height: 1.6;")
-            .rule("h1", "font-size: 1.875rem; font-weight: 600; margin: 0 0 1rem 0;")
-            .rule("h2", "font-size: 1.5rem; font-weight: 600; margin: 2rem 0 1rem 0;")
-            .rule("h3", "font-size: 1.25rem; font-weight: 600; margin: 1.5rem 0 0.75rem 0;")
+            .rule("h1", "font-size: 1.875rem; font-weight: 600; margin: 0 0 var(--space-md) 0; word-wrap: break-word;")
+            .rule("h2", "font-size: 1.5rem; font-weight: 600; margin: var(--space-xl) 0 var(--space-md) 0;")
+            .rule("h3", "font-size: 1.25rem; font-weight: 600; margin: var(--space-lg) 0 var(--space-sm) 0;")
+            .rule("p", "margin: 0 0 var(--space-md) 0;")
             // Links
             .rule("a", "color: var(--primary); text-decoration: none;")
             .rule("a:hover", "color: var(--primary-hover); text-decoration: underline;")
             // Code
-            .rule("code", "font-family: 'Inconsolata', 'Monaco', monospace; background: var(--bg-muted); padding: 0.15rem 0.4rem; border-radius: 4px;")
+            .rule("code", "font-family: 'Inconsolata', 'Monaco', monospace; background: var(--bg-muted); padding: 0.15rem 0.4rem; border-radius: 4px; word-break: break-all;")
+            .rule("pre", "overflow-x: auto; padding: var(--space-md); background: var(--bg-muted); border-radius: 4px;")
             // Thread items
-            .rule(".thread-item", "padding: 1rem; border-bottom: 1px solid var(--border);")
+            .rule(".thread-item", "padding: var(--space-md); border-bottom: 1px solid var(--border);")
             .rule(".thread-title", "font-weight: 600; color: var(--text);")
             .rule(".thread-meta", "color: var(--text-muted); font-size: 0.875rem;")
-            // Replies
-            .rule(".reply", "margin-left: 1.5rem; padding: 0.75rem; border-left: 2px solid var(--border);")
-            .rule(".reply-nested", "margin-left: 1.5rem;")
+            // Replies - responsive nesting
+            .rule(".reply", "margin-left: var(--space-lg); padding: var(--space-sm); border-left: 2px solid var(--border);")
+            .rule(".reply-nested", "margin-left: var(--space-md);")
+            // Blockquotes (for replies)
+            .rule("blockquote", "margin: 0 0 var(--space-md) 0; padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--primary); background: var(--bg-muted);")
             // Forms
-            .rule("input, textarea", "width: 100%; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px; font-size: 1rem;")
+            .rule("input, textarea", "width: 100%; padding: var(--space-sm); border: 1px solid var(--border); border-radius: 4px; font-size: 1rem; background: var(--bg);")
             .rule("input:focus, textarea:focus", "outline: none; border-color: var(--primary);")
+            .rule("textarea", "resize: vertical; min-height: 100px;")
             // Buttons
-            .rule("button, .btn", "background: var(--primary); color: white; padding: 0.5rem 1rem; border: none; border-radius: 4px; cursor: pointer;")
+            .rule("button, .btn", "background: var(--primary); color: white; padding: var(--space-sm) var(--space-md); border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;")
             .rule("button:hover, .btn:hover", "background: var(--primary-hover);")
+            .rule(".btn-secondary", "background: var(--bg-muted); color: var(--text);")
+            .rule(".btn-secondary:hover", "background: var(--border);")
+            // Alerts/Notices
+            .rule(".alert", "padding: var(--space-md); border-radius: 4px; margin-bottom: var(--space-md);")
+            .rule(".alert-success", "background: #d3f9d8; color: #1e7a34;")
+            .rule(".alert-warning", "background: #fff3bf; color: #946c00;")
+            .rule(".alert-danger", "background: #ffd8d8; color: #c41d1d;")
+            .rule(".alert-info", "background: #e8e4fd; color: #5c4bad;")
+            // Navigation
+            .rule(".nav", "display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; padding: var(--space-md) 0; border-bottom: 1px solid var(--border);")
+            // Cards/Boards
+            .rule(".card", "background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: var(--space-md); margin-bottom: var(--space-md);")
+            // Horizontal rule
+            .rule("hr", "border: none; border-top: 1px solid var(--border); margin: var(--space-lg) 0;")
+            // Lists
+            .rule("ul, ol", "padding-left: var(--space-lg); margin: 0 0 var(--space-md) 0;")
+            .rule("li", "margin-bottom: var(--space-xs);")
+            // Action links
+            .rule(".actions", "display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.875rem;")
+            // Badge/Tag
+            .rule(".badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--bg-muted); border-radius: 9999px; font-size: 0.75rem;")
+            .rule(".badge-pinned", "background: #ffeeba; color: #856404;")
+            .rule(".badge-locked", "background: #f8d7da; color: #721c24;")
             // Dark mode
             .dark_mode_start()
             .rule_start(":root")
@@ -1082,6 +1122,33 @@ impl BoardsTheme {
             .prop("--bg-muted", "#1c1c1c")
             .prop("--border", "#3e3e3e")
             .rule_end()
+            .rule(".alert-success", "background: #1e3a28; color: #6fdd8b;")
+            .rule(".alert-warning", "background: #3a3019; color: #ffd859;")
+            .rule(".alert-danger", "background: #3a1c1c; color: #ff8080;")
+            .rule(".alert-info", "background: #2a2644; color: #b8a8e8;")
+            .rule(".badge-pinned", "background: #3a3019; color: #ffd859;")
+            .rule(".badge-locked", "background: #3a1c1c; color: #ff8080;")
+            .media_end()
+            // Mobile responsive styles
+            .media_start("(max-width: 640px)")
+            .rule_start(":root")
+            .prop("--space-lg", "1rem")
+            .prop("--space-xl", "1.5rem")
+            .rule_end()
+            .rule("body", "padding: var(--space-sm);")
+            .rule("h1", "font-size: 1.5rem;")
+            .rule("h2", "font-size: 1.25rem;")
+            .rule("h3", "font-size: 1.125rem;")
+            .rule(".reply", "margin-left: var(--space-sm);")
+            .rule(".reply-nested", "margin-left: var(--space-xs);")
+            .rule("blockquote", "padding: var(--space-xs) var(--space-sm);")
+            .rule(".nav", "font-size: 0.875rem;")
+            .media_end()
+            // Very small screens
+            .media_start("(max-width: 375px)")
+            .rule("body", "font-size: 0.9375rem;")
+            .rule("h1", "font-size: 1.25rem;")
+            .rule(".reply", "margin-left: var(--space-xs);")
             .media_end()
             .build()
     }

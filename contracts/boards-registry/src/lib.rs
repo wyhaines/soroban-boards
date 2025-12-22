@@ -354,4 +354,173 @@ mod test {
         let boards = client.list_boards(&3, &10);
         assert_eq!(boards.len(), 2);
     }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        // Verify initially not paused
+        assert!(!client.is_paused());
+
+        // Pause
+        client.set_paused(&true);
+        assert!(client.is_paused());
+
+        // Unpause
+        client.set_paused(&false);
+        assert!(!client.is_paused());
+    }
+
+    #[test]
+    #[should_panic(expected = "Registry is paused")]
+    fn test_create_board_when_paused() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        // Pause the registry
+        client.set_paused(&true);
+
+        // Try to create a board - should panic
+        let creator = Address::generate(&env);
+        let name = String::from_str(&env, "Test");
+        let desc = String::from_str(&env, "Test desc");
+        client.create_board(&name, &desc, &creator, &false);
+    }
+
+    #[test]
+    fn test_get_nonexistent_board() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        // Try to get a board that doesn't exist
+        let board = client.get_board(&999);
+        assert!(board.is_none());
+    }
+
+    #[test]
+    fn test_get_contracts() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        let contracts = client.get_contracts();
+        assert_eq!(contracts.permissions, permissions);
+        assert_eq!(contracts.content, content);
+        assert_eq!(contracts.theme, theme);
+    }
+
+    #[test]
+    fn test_private_board() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        let creator = Address::generate(&env);
+        let name = String::from_str(&env, "Private Board");
+        let desc = String::from_str(&env, "Secret discussions");
+
+        let board_id = client.create_board(&name, &desc, &creator, &true);
+        let board = client.get_board(&board_id).unwrap();
+
+        assert!(board.is_private);
+        assert!(!board.is_readonly);
+    }
+
+    #[test]
+    fn test_board_count_increment() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        assert_eq!(client.board_count(), 0);
+
+        let creator = Address::generate(&env);
+        let desc = String::from_str(&env, "Desc");
+
+        // Create boards and verify count increments
+        for i in 0..5 {
+            let name = String::from_str(&env, "Board");
+            let id = client.create_board(&name, &desc, &creator, &false);
+            assert_eq!(id, i);
+            assert_eq!(client.board_count(), i + 1);
+        }
+    }
+
+    #[test]
+    fn test_empty_list_boards() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme);
+
+        // List boards when none exist
+        let boards = client.list_boards(&0, &10);
+        assert_eq!(boards.len(), 0);
+    }
 }

@@ -652,4 +652,276 @@ mod test {
         let thread = client.get_thread(&thread_id).unwrap();
         assert_eq!(thread.title, new_title);
     }
+
+    #[test]
+    fn test_list_threads() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "General discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+
+        // Create multiple threads
+        let titles = ["Thread 0", "Thread 1", "Thread 2", "Thread 3", "Thread 4"];
+        for title_str in titles.iter() {
+            let title = String::from_str(&env, title_str);
+            client.create_thread(&title, &creator);
+        }
+
+        // List threads (should return newest first)
+        let threads = client.list_threads(&0, &3);
+        assert_eq!(threads.len(), 3);
+        // First thread should be the newest (id 4)
+        assert_eq!(threads.get(0).unwrap().id, 4);
+
+        // Get remaining threads
+        let more_threads = client.list_threads(&3, &10);
+        assert_eq!(more_threads.len(), 2);
+    }
+
+    #[test]
+    fn test_get_config() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "Private Board");
+        let desc = String::from_str(&env, "Secret discussions");
+
+        client.init(&0, &registry, &None, &name, &desc, &true);
+
+        let config = client.get_config();
+        assert_eq!(config.name, name);
+        assert_eq!(config.description, desc);
+        assert!(config.is_private);
+        assert!(!config.is_readonly);
+        assert_eq!(config.max_reply_depth, 10);
+    }
+
+    #[test]
+    fn test_get_nonexistent_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        // Get thread that doesn't exist
+        let thread = client.get_thread(&999);
+        assert!(thread.is_none());
+    }
+
+    #[test]
+    fn test_increment_reply_count() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Test Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Initially 0 replies
+        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 0);
+
+        // Increment reply count
+        client.increment_reply_count(&thread_id);
+        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 1);
+
+        client.increment_reply_count(&thread_id);
+        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 2);
+    }
+
+    #[test]
+    fn test_unpin_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let title = String::from_str(&env, "Pinned Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Pin thread
+        client.pin_thread(&thread_id, &moderator);
+        assert!(client.get_thread(&thread_id).unwrap().is_pinned);
+        assert_eq!(client.get_pinned_threads().len(), 1);
+
+        // Unpin thread
+        client.unpin_thread(&thread_id, &moderator);
+        assert!(!client.get_thread(&thread_id).unwrap().is_pinned);
+        assert_eq!(client.get_pinned_threads().len(), 0);
+    }
+
+    #[test]
+    fn test_unlock_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Lock thread
+        client.lock_thread(&thread_id, &moderator);
+        assert!(client.get_thread(&thread_id).unwrap().is_locked);
+
+        // Unlock thread
+        client.unlock_thread(&thread_id, &moderator);
+        assert!(!client.get_thread(&thread_id).unwrap().is_locked);
+    }
+
+    #[test]
+    fn test_multiple_pinned_threads() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let moderator = Address::generate(&env);
+
+        // Create and pin multiple threads
+        let titles = ["Pinned 0", "Pinned 1", "Pinned 2"];
+        for title_str in titles.iter() {
+            let title = String::from_str(&env, title_str);
+            let thread_id = client.create_thread(&title, &creator);
+            client.pin_thread(&thread_id, &moderator);
+        }
+
+        // All should be in pinned list
+        let pinned = client.get_pinned_threads();
+        assert_eq!(pinned.len(), 3);
+
+        // All should be marked as pinned
+        for i in 0..pinned.len() {
+            assert!(pinned.get(i).unwrap().is_pinned);
+        }
+    }
+
+    #[test]
+    fn test_thread_timestamps() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        let thread = client.get_thread(&thread_id).unwrap();
+
+        // created_at and updated_at should be equal when first created
+        assert_eq!(thread.created_at, thread.updated_at);
+
+        // Increment reply count should update updated_at
+        client.increment_reply_count(&thread_id);
+        let updated_thread = client.get_thread(&thread_id).unwrap();
+        assert!(updated_thread.updated_at >= thread.updated_at);
+    }
+
+    #[test]
+    fn test_empty_pinned_list() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        // No pinned threads initially
+        let pinned = client.get_pinned_threads();
+        assert_eq!(pinned.len(), 0);
+    }
+
+    #[test]
+    fn test_thread_defaults() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "New Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        let thread = client.get_thread(&thread_id).unwrap();
+
+        // Default values
+        assert_eq!(thread.reply_count, 0);
+        assert!(!thread.is_locked);
+        assert!(!thread.is_pinned);
+        assert!(!thread.is_hidden);
+    }
 }
