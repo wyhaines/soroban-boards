@@ -1,6 +1,7 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
+use soroban_render_sdk::bytes::string_to_bytes;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 // Declare render capabilities
@@ -270,11 +271,16 @@ impl BoardsTheme {
                 for i in 0..boards.len() {
                     if let Some(board) = boards.get(i) {
                         // Format: **[Board Name](/b/0)** - Description (X threads)
-                        md = md.bold("").raw_str("[");
-                        md = md.text_string(&board.name);
-                        md = md.raw_str("](render:/b/").number(board.id as u32).raw_str(")");
-                        md = md.text(" - ").text_string(&board.description);
-                        md = md.text(" (").number(board.thread_count as u32).text(" threads)");
+                        md = md.raw_str("**[")
+                            .text_string(&board.name)
+                            .raw_str("](render:/b/")
+                            .number(board.id as u32)
+                            .raw_str(")**")
+                            .text(" - ")
+                            .text_string(&board.description)
+                            .text(" (")
+                            .number(board.thread_count as u32)
+                            .text(" threads)");
                         if board.is_private {
                             md = md.text(" ").italic("[private]");
                         }
@@ -344,6 +350,7 @@ impl BoardsTheme {
         md = md
             .paragraph("Create a new discussion board.")
             .newline()
+            .redirect("/")  // Return to board list after creating board
             .input("name", "Board name")
             .newline()
             .textarea("description", 3, "Board description")
@@ -384,14 +391,19 @@ impl BoardsTheme {
         let mut md = Self::render_nav(env)
             .render_link("< Back", "/")
             .newline()
-            .h1("").text_string(&board.name)
-            .paragraph("").text_string(&board.description)
+            .raw_str("# ")
+            .text_string(&board.name)
+            .newline()
+            .newline()
+            .text_string(&board.description)
+            .newline()
             .hr();
 
         // Show create thread button if logged in
         if viewer.is_some() && !board.is_readonly {
-            md = md.render_link("+ New Thread", "")
-                .raw_str("/b/").number(board_id as u32).raw_str("/new)")
+            md = md.raw_str("[+ New Thread](render:/b/")
+                .number(board_id as u32)
+                .raw_str("/new)")
                 .newline()
                 .newline();
         }
@@ -447,8 +459,9 @@ impl BoardsTheme {
     /// Render create thread form
     fn render_create_thread(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("New Thread");
 
@@ -457,7 +470,16 @@ impl BoardsTheme {
             return Self::render_footer_into(md).build();
         }
 
+        // Hidden inputs for form metadata
         md = md
+            // Redirect to board page after creating thread
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            // Board ID for the contract
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
             .input("title", "Thread title")
             .newline()
             .textarea("body", 10, "Write your post content here...")
@@ -466,8 +488,9 @@ impl BoardsTheme {
             .form_link("Create Thread", "create_thread")
             .newline()
             .newline()
-            .render_link("Cancel", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")");
+            .raw_str("[Cancel](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")");
 
         Self::render_footer_into(md).build()
     }
@@ -481,8 +504,9 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("Thread")  // In production, we'd fetch title from board contract
             .hr();
@@ -505,9 +529,10 @@ impl BoardsTheme {
 
         // Reply button
         if viewer.is_some() {
-            md = md.render_link("Reply", "")
-                .raw_str("/b/").number(board_id as u32)
-                .raw_str("/t/").number(thread_id as u32)
+            md = md.raw_str("[Reply](render:/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
                 .raw_str("/reply)")
                 .newline()
                 .newline();
@@ -589,10 +614,12 @@ impl BoardsTheme {
 
         if viewer.is_some() {
             md = md.text(" | ")
-                .render_link("Reply", "")
-                .raw_str("/b/").number(board_id as u32)
-                .raw_str("/t/").number(thread_id as u32)
-                .raw_str("/r/").number(reply.id as u32)
+                .raw_str("[Reply](render:/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/r/")
+                .number(reply.id as u32)
                 .raw_str("/reply)");
 
             md = md.text(" | ")
@@ -629,9 +656,10 @@ impl BoardsTheme {
     /// Render reply form
     fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Thread", "")
-            .raw_str("/b/").number(board_id as u32)
-            .raw_str("/t/").number(thread_id as u32)
+            .raw_str("[< Back to Thread](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread_id as u32)
             .raw_str(")")
             .newline();
 
@@ -646,16 +674,39 @@ impl BoardsTheme {
             return Self::render_footer_into(md).build();
         }
 
+        // Hidden inputs for board_id, thread_id, parent_id, depth
+        // Depth: 0 for top-level replies, 1 for nested (simplified)
+        let depth: u32 = if parent_id > 0 { 1 } else { 0 };
         md = md
-            .textarea("content", 6, "Write your reply...")
+            // Redirect to thread view after posting reply
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread_id as u32)
+            .raw_str("\" />\n")
+            // Form data for contract
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"thread_id\" value=\"")
+            .number(thread_id as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"parent_id\" value=\"")
+            .number(parent_id as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"depth\" value=\"")
+            .number(depth)
+            .raw_str("\" />\n")
+            .textarea("content_str", 6, "Write your reply...")
             .newline()
             .newline()
             .form_link("Post Reply", "create_reply")
             .newline()
             .newline()
-            .render_link("Cancel", "")
-            .raw_str("/b/").number(board_id as u32)
-            .raw_str("/t/").number(thread_id as u32)
+            .raw_str("[Cancel](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread_id as u32)
             .raw_str(")");
 
         Self::render_footer_into(md).build()
@@ -670,12 +721,15 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Thread", "")
-            .raw_str("/b/").number(board_id as u32)
-            .raw_str("/t/").number(thread_id as u32)
+            .raw_str("[< Back to Thread](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread_id as u32)
             .raw_str(")")
             .newline()
-            .h1("Reply #").number(reply_id as u32)
+            .raw_str("# Reply #")
+            .number(reply_id as u32)
+            .newline()
             .hr();
 
         // Fetch reply metadata
@@ -711,10 +765,12 @@ impl BoardsTheme {
         // Actions
         if viewer.is_some() {
             md = md.hr()
-                .render_link("Reply", "")
-                .raw_str("/b/").number(board_id as u32)
-                .raw_str("/t/").number(thread_id as u32)
-                .raw_str("/r/").number(reply_id as u32)
+                .raw_str("[Reply](render:/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/r/")
+                .number(reply_id as u32)
                 .raw_str("/reply)")
                 .text(" | ")
                 .tx_link("Flag", "flag_reply", "");
@@ -732,8 +788,9 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("Board Members");
 
@@ -834,8 +891,9 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("Banned Users");
 
@@ -901,8 +959,9 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("Flag Queue");
 
@@ -953,15 +1012,18 @@ impl BoardsTheme {
 
                 // View link
                 if item.item_type == FlaggedType::Thread {
-                    md = md.render_link("View Thread", "")
-                        .raw_str("/b/").number(board_id as u32)
-                        .raw_str("/t/").number(item.thread_id as u32)
+                    md = md.raw_str("[View Thread](render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("/t/")
+                        .number(item.thread_id as u32)
                         .raw_str(")");
                 } else {
-                    md = md.render_link("View Reply", "")
-                        .raw_str("/b/").number(board_id as u32)
-                        .raw_str("/t/").number(item.thread_id as u32)
-                        .raw_str("/r/").number(item.reply_id as u32)
+                    md = md.raw_str("[View Reply](render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("/t/")
+                        .number(item.thread_id as u32)
+                        .raw_str("/r/")
+                        .number(item.reply_id as u32)
                         .raw_str(")");
                 }
 
@@ -984,8 +1046,9 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
-            .render_link("< Back to Board", "")
-            .raw_str("/b/").number(board_id as u32).raw_str(")")
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
             .newline()
             .h1("Board Settings");
 
@@ -1034,14 +1097,17 @@ impl BoardsTheme {
             .newline();
 
         md = md.h2("Quick Links");
-        md = md.render_link("View Members", "")
-            .raw_str("/b/").number(board_id as u32).raw_str("/members)")
+        md = md.raw_str("[View Members](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/members)")
             .text(" | ");
-        md = md.render_link("View Banned", "")
-            .raw_str("/b/").number(board_id as u32).raw_str("/banned)")
+        md = md.raw_str("[View Banned](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/banned)")
             .text(" | ");
-        md = md.render_link("View Flag Queue", "")
-            .raw_str("/b/").number(board_id as u32).raw_str("/flags)");
+        md = md.raw_str("[View Flag Queue](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/flags)");
 
         Self::render_footer_into(md).build()
     }
@@ -1192,6 +1258,160 @@ impl BoardsTheme {
         registry.require_auth();
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    // ========================================================================
+    // Write Operations (proxy methods for forms)
+    // ========================================================================
+
+    /// Create a new board (proxies to registry)
+    pub fn create_board(
+        env: Env,
+        name: String,
+        description: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+
+        // Call registry.create_board
+        let args: Vec<Val> = Vec::from_array(&env, [
+            name.into_val(&env),
+            description.into_val(&env),
+            caller.into_val(&env),
+            false.into_val(&env),  // is_private = false by default
+        ]);
+
+        env.invoke_contract(&registry, &Symbol::new(&env, "create_board"), args)
+    }
+
+    /// Create a new thread (proxies to board contract)
+    pub fn create_thread(
+        env: Env,
+        board_id: u64,
+        title: String,
+        body: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        // Get board contract from registry
+        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                board_args,
+            )
+            .expect("Board contract not found");
+
+        // Create thread on board contract
+        let create_args: Vec<Val> = Vec::from_array(&env, [
+            title.into_val(&env),
+            caller.clone().into_val(&env),
+        ]);
+        let thread_id: u64 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(&env, "create_thread"),
+            create_args,
+        );
+
+        // Increment thread count in registry
+        let inc_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "increment_thread_count"),
+            inc_args,
+        );
+
+        // Set thread body on content contract
+        let body_bytes = string_to_bytes(&env, &body);
+
+        let body_args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            body_bytes.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &content,
+            &Symbol::new(&env, "set_thread_body"),
+            body_args,
+        );
+
+        thread_id
+    }
+
+    /// Create a reply (proxies to content contract)
+    pub fn create_reply(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        parent_id: u64,
+        depth: u32,
+        content_str: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        // Convert content string to bytes
+        let content_bytes = string_to_bytes(&env, &content_str);
+
+        // Call content.create_reply
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            parent_id.into_val(&env),
+            depth.into_val(&env),
+            content_bytes.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        let reply_id: u64 = env.invoke_contract(&content, &Symbol::new(&env, "create_reply"), args);
+
+        // Increment reply count in board contract
+        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        if let Some(board_contract) = env.invoke_contract::<Option<Address>>(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            board_args,
+        ) {
+            let inc_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
+            env.invoke_contract::<()>(
+                &board_contract,
+                &Symbol::new(&env, "increment_reply_count"),
+                inc_args,
+            );
+        }
+
+        reply_id
     }
 }
 

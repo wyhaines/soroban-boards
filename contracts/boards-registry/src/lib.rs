@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 /// Storage keys for the registry contract
 #[contracttype]
@@ -22,6 +22,8 @@ pub enum RegistryKey {
     Contracts,
     /// Global pause flag
     Paused,
+    /// WASM hash for deploying board contracts
+    BoardWasmHash,
 }
 
 /// Addresses of shared service contracts
@@ -80,6 +82,25 @@ impl BoardsRegistry {
         );
     }
 
+    /// Set the WASM hash for deploying board contracts (admin only)
+    pub fn set_board_wasm_hash(env: Env, wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&RegistryKey::BoardWasmHash, &wasm_hash);
+    }
+
+    /// Get the board WASM hash
+    pub fn get_board_wasm_hash(env: Env) -> Option<BytesN<32>> {
+        env.storage().instance().get(&RegistryKey::BoardWasmHash)
+    }
+
     /// Create a new board
     pub fn create_board(
         env: Env,
@@ -111,7 +132,7 @@ impl BoardsRegistry {
         let board = BoardMeta {
             id: board_id,
             name: name.clone(),
-            description,
+            description: description.clone(),
             creator: creator.clone(),
             created_at: env.ledger().timestamp(),
             thread_count: 0,
@@ -129,19 +150,60 @@ impl BoardsRegistry {
             .instance()
             .set(&RegistryKey::BoardCount, &(board_id + 1));
 
-        // Set board owner in permissions contract
-        // Note: This call may fail in unit tests where the permissions contract
-        // is not a real contract. In production, this will work correctly.
-        // We use try_invoke_contract to handle this gracefully.
+        // Get service contract addresses
         let contracts: ContractAddresses = env
             .storage()
             .instance()
             .get(&RegistryKey::Contracts)
             .expect("Not initialized");
 
-        // Call permissions.set_board_owner(board_id, creator)
+        // Deploy a board contract for this board if WASM hash is set
+        if let Some(wasm_hash) = env
+            .storage()
+            .instance()
+            .get::<_, BytesN<32>>(&RegistryKey::BoardWasmHash)
+        {
+            // Generate a unique salt based on board_id
+            let mut salt_bytes = [0u8; 32];
+            let id_bytes = board_id.to_be_bytes();
+            salt_bytes[24..32].copy_from_slice(&id_bytes);
+            let salt = BytesN::from_array(&env, &salt_bytes);
+
+            // Deploy the board contract
+            let board_contract = env.deployer().with_current_contract(salt).deploy_v2(
+                wasm_hash,
+                (),  // No constructor args - we'll init separately
+            );
+
+            // Initialize the board contract
+            // Pass None for permissions to allow thread creation without permission checks
+            // (permission checks happen at the theme level instead)
+            let init_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    board_id.into_val(&env),
+                    env.current_contract_address().into_val(&env),  // registry
+                    Option::<Address>::None.into_val(&env),  // permissions (None to skip checks)
+                    name.into_val(&env),
+                    description.into_val(&env),
+                    is_private.into_val(&env),
+                ],
+            );
+            env.invoke_contract::<()>(
+                &board_contract,
+                &Symbol::new(&env, "init"),
+                init_args,
+            );
+
+            // Store the board contract address
+            env.storage()
+                .persistent()
+                .set(&RegistryKey::BoardContract(board_id), &board_contract);
+        }
+
+        // Set board owner in permissions contract
         // In tests without a real permissions contract, this will be a no-op
-        let args: Vec<soroban_sdk::Val> = Vec::from_array(
+        let args: Vec<Val> = Vec::from_array(
             &env,
             [board_id.into_val(&env), creator.into_val(&env)],
         );
@@ -306,6 +368,40 @@ impl BoardsRegistry {
         env.storage()
             .persistent()
             .get(&RegistryKey::BoardContract(board_id))
+    }
+
+    /// Increment thread count for a board (called when a thread is created)
+    pub fn increment_thread_count(env: Env, board_id: u64) {
+        if let Some(mut board) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&RegistryKey::Board(board_id))
+        {
+            board.thread_count += 1;
+            env.storage()
+                .persistent()
+                .set(&RegistryKey::Board(board_id), &board);
+        }
+    }
+
+    /// Upgrade another contract (admin only, proxies to contract's upgrade function)
+    /// This allows the registry admin to upgrade any contract that trusts the registry.
+    pub fn upgrade_contract(env: Env, contract_id: Address, new_wasm_hash: BytesN<32>) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        // Call the target contract's upgrade function
+        // The target contract will verify that we (the registry) are calling it
+        let args: Vec<Val> = Vec::from_array(&env, [new_wasm_hash.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &contract_id,
+            &Symbol::new(&env, "upgrade"),
+            args,
+        );
     }
 }
 

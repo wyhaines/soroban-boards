@@ -16,7 +16,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 soroban-sdk = "22.0.0"
-soroban-render-sdk = { git = "https://github.com/wyhaines/soroban-render-sdk.git" }
+soroban-render-sdk = { path = "/media/wyhaines/home/wyhaines/ghq/github.com/wyhaines/soroban-render-sdk" }
 soroban-chonk = { git = "https://github.com/wyhaines/soroban-chonk" }
 
 [profile.release]

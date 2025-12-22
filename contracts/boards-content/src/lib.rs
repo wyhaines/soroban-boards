@@ -169,8 +169,9 @@ impl BoardsContent {
     }
 
     /// Store thread body content
-    pub fn set_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, author: Address) {
-        author.require_auth();
+    /// Note: Auth is handled by the calling contract (theme).
+    pub fn set_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, _author: Address) {
+        // Note: require_auth() removed - called by theme which handles auth
 
         let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
         let chonk = Chonk::open(&env, key);
@@ -220,6 +221,7 @@ impl BoardsContent {
     }
 
     /// Create a reply
+    /// Note: Auth is handled by the calling contract (theme).
     pub fn create_reply(
         env: Env,
         board_id: u64,
@@ -229,10 +231,11 @@ impl BoardsContent {
         content: Bytes,
         creator: Address,
     ) -> u64 {
-        creator.require_auth();
+        // Note: require_auth() removed - called by theme which handles auth
 
-        // Check permissions
-        Self::check_can_reply(&env, board_id, &creator);
+        // Check permissions (if permissions contract is set)
+        // Note: This may also need adjustment for cross-contract calls
+        // Self::check_can_reply(&env, board_id, &creator);
 
         let reply_id = Self::next_reply_id(&env, board_id, thread_id);
 

@@ -1,0 +1,263 @@
+#!/bin/bash
+set -e
+
+# Configuration
+NETWORK="local"
+RPC_URL="http://localhost:8000/soroban/rpc"
+DEPLOYER="local-deployer"
+WASM_DIR="target/wasm32-unknown-unknown/release"
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
+
+echo -e "${GREEN}=== Soroban Boards Local Deployment ===${NC}"
+
+# Check if friendbot is available for funding
+fund_account() {
+    local addr=$1
+    echo -e "${YELLOW}Funding account $addr...${NC}"
+    curl -s "http://localhost:8000/friendbot?addr=$addr" > /dev/null 2>&1 || true
+}
+
+# Get deployer address
+ADMIN=$(stellar keys address $DEPLOYER 2>/dev/null || true)
+if [ -z "$ADMIN" ]; then
+    echo -e "${YELLOW}Creating deployer identity...${NC}"
+    stellar keys generate $DEPLOYER --network $NETWORK 2>/dev/null || true
+    ADMIN=$(stellar keys address $DEPLOYER)
+fi
+echo -e "Admin: ${YELLOW}$ADMIN${NC}"
+
+# Fund the deployer account
+fund_account $ADMIN
+
+# Function to deploy a contract
+deploy_contract() {
+    local name=$1
+    local wasm_file="$WASM_DIR/${name}.wasm"
+
+    if [ ! -f "$wasm_file" ]; then
+        echo -e "${RED}Error: $wasm_file not found${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${YELLOW}Deploying $name...${NC}" >&2
+
+    # Deploy and capture only the contract ID (last line, starts with C)
+    local output=$(stellar contract deploy \
+        --wasm "$wasm_file" \
+        --source $DEPLOYER \
+        --network $NETWORK 2>&1)
+
+    # Extract the contract ID (line starting with C, 56 chars)
+    local contract_id=$(echo "$output" | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+
+    if [ -z "$contract_id" ]; then
+        echo -e "${RED}Error: Failed to deploy $name${NC}" >&2
+        echo "$output" >&2
+        exit 1
+    fi
+
+    echo -e "${GREEN}$name deployed: $contract_id${NC}" >&2
+    echo "$contract_id"
+}
+
+# Build contracts first
+echo -e "${YELLOW}Building contracts...${NC}"
+cargo build --release --target wasm32-unknown-unknown
+
+# Deploy shared contracts (no dependencies on each other)
+echo ""
+echo -e "${GREEN}=== Deploying Shared Contracts ===${NC}"
+
+PERMISSIONS_ID=$(deploy_contract "boards_permissions")
+CONTENT_ID=$(deploy_contract "boards_content")
+THEME_ID=$(deploy_contract "boards_theme")
+REGISTRY_ID=$(deploy_contract "boards_registry")
+
+# Save contract IDs to file (board contracts are auto-deployed)
+echo ""
+echo -e "${GREEN}=== Saving Contract IDs ===${NC}"
+rm -f .deployed-contracts.env
+cat > .deployed-contracts.env << EOF
+# Soroban Boards - Local Deployment
+# Generated: $(date)
+
+NETWORK=$NETWORK
+RPC_URL=$RPC_URL
+ADMIN=$ADMIN
+
+REGISTRY_ID=$REGISTRY_ID
+PERMISSIONS_ID=$PERMISSIONS_ID
+CONTENT_ID=$CONTENT_ID
+THEME_ID=$THEME_ID
+
+# Note: Board contracts are auto-deployed when boards are created.
+# Use: stellar contract invoke --id \$REGISTRY_ID ... -- get_board_contract --board_id <id>
+EOF
+
+echo -e "${GREEN}Contract IDs saved to .deployed-contracts.env${NC}"
+
+# Initialize Registry
+echo ""
+echo -e "${GREEN}=== Initializing Registry ===${NC}"
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --admin $ADMIN \
+    --permissions $PERMISSIONS_ID \
+    --content $CONTENT_ID \
+    --theme $THEME_ID
+
+echo -e "${GREEN}Registry initialized${NC}"
+
+# Install board WASM hash for auto-deployment of board contracts
+echo ""
+echo -e "${GREEN}=== Installing Board WASM Hash ===${NC}"
+BOARD_WASM_OUTPUT=$(stellar contract install \
+    --wasm "$WASM_DIR/boards_board.wasm" \
+    --source $DEPLOYER \
+    --network $NETWORK 2>&1)
+# Extract the WASM hash (64 hex chars)
+BOARD_WASM_HASH=$(echo "$BOARD_WASM_OUTPUT" | grep -E '^[a-f0-9]{64}$' | tail -1)
+
+echo -e "Board WASM hash: ${YELLOW}$BOARD_WASM_HASH${NC}"
+
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_board_wasm_hash \
+    --wasm_hash $BOARD_WASM_HASH
+
+echo -e "${GREEN}Board WASM hash installed${NC}"
+
+# Initialize Permissions
+echo ""
+echo -e "${GREEN}=== Initializing Permissions ===${NC}"
+stellar contract invoke \
+    --id $PERMISSIONS_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID
+
+echo -e "${GREEN}Permissions initialized${NC}"
+
+# Initialize Content
+echo ""
+echo -e "${GREEN}=== Initializing Content ===${NC}"
+stellar contract invoke \
+    --id $CONTENT_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID
+
+echo -e "${GREEN}Content initialized${NC}"
+
+# Initialize Theme (needs permissions and content addresses)
+echo ""
+echo -e "${GREEN}=== Initializing Theme ===${NC}"
+stellar contract invoke \
+    --id $THEME_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID \
+    --permissions $PERMISSIONS_ID \
+    --content $CONTENT_ID
+
+echo -e "${GREEN}Theme initialized${NC}"
+
+# Create first board via registry (board contract is auto-deployed)
+echo ""
+echo -e "${GREEN}=== Creating First Board ===${NC}"
+BOARD_OUTPUT=$(stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- create_board \
+    --name "General" \
+    --description "General discussion board" \
+    --creator $ADMIN \
+    --is_private false 2>&1)
+# Extract board number (single digit at end)
+BOARD_NUM=$(echo "$BOARD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
+
+echo -e "${GREEN}Created board #$BOARD_NUM (board contract auto-deployed)${NC}"
+
+# Get the auto-deployed board contract address
+BOARD_CONTRACT_OUTPUT=$(stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- get_board_contract \
+    --board_id 0 2>&1)
+# Extract contract ID (starts with C, may be quoted)
+BOARD_CONTRACT=$(echo "$BOARD_CONTRACT_OUTPUT" | tr -d '"' | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+
+echo -e "Board contract: ${YELLOW}$BOARD_CONTRACT${NC}"
+
+# Create a sample thread using the auto-deployed board contract
+echo ""
+echo -e "${GREEN}=== Creating Sample Thread ===${NC}"
+THREAD_OUTPUT=$(stellar contract invoke \
+    --id $BOARD_CONTRACT \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- create_thread \
+    --title "Welcome to Soroban Boards!" \
+    --creator $ADMIN 2>&1)
+# Extract thread ID (number)
+THREAD_ID=$(echo "$THREAD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
+
+echo -e "${GREEN}Created thread #$THREAD_ID${NC}"
+
+# Set thread body content (hex encoded "Welcome to Soroban Boards! This is a decentralized forum running on the Stellar blockchain.")
+stellar contract invoke \
+    --id $CONTENT_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_thread_body \
+    --board_id 0 \
+    --thread_id 0 \
+    --content 57656c636f6d6520746f20536f726f62616e20426f617264732120546869732069732061206465636e7472616c697a656420666f72756d2072756e6e696e67206f6e20746865205374656c6c617220626c6f636b636861696e2e \
+    --author $ADMIN
+
+echo -e "${GREEN}Thread body set${NC}"
+
+echo ""
+echo -e "${GREEN}=== Deployment Complete! ===${NC}"
+echo ""
+echo "Contract IDs:"
+echo "  Registry:    $REGISTRY_ID"
+echo "  Permissions: $PERMISSIONS_ID"
+echo "  Content:     $CONTENT_ID"
+echo "  Theme:       $THEME_ID"
+echo "  Board 0:     $BOARD_CONTRACT (auto-deployed)"
+echo ""
+echo "To interact with the contracts:"
+echo "  source .deployed-contracts.env"
+echo ""
+echo "Example commands:"
+echo ""
+echo "  # Render home page"
+echo "  ./render.sh /"
+echo ""
+echo "  # Render board"
+echo "  ./render.sh /b/0"
+echo ""
+echo "  # Render thread"
+echo "  ./render.sh /b/0/t/0"
+echo ""
+echo "  # List boards (raw)"
+echo "  stellar contract invoke --id \$REGISTRY_ID --source $DEPLOYER --network local -- list_boards --start 0 --limit 10"
+echo ""
+echo "Note: Board contracts are now auto-deployed when boards are created."
+echo "New boards created via the UI will automatically have their own board contract."
