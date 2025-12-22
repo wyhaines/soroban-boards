@@ -277,6 +277,36 @@ impl BoardsRegistry {
             .instance()
             .remove(&RegistryKey::AdminTransfer);
     }
+
+    /// Set board contract address for a board ID (admin only)
+    pub fn set_board_contract(env: Env, board_id: u64, board_contract: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        // Verify board exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::Board(board_id))
+        {
+            panic!("Board does not exist");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardContract(board_id), &board_contract);
+    }
+
+    /// Get board contract address for a board ID
+    pub fn get_board_contract(env: Env, board_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::BoardContract(board_id))
+    }
 }
 
 #[cfg(test)]

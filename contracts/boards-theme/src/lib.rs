@@ -402,14 +402,43 @@ impl BoardsTheme {
 
         md = md.h2("Threads");
 
-        // For now, show placeholder since we'd need the board contract address
-        // In production, registry would return the board contract address
-        if board.thread_count == 0 {
-            md = md.paragraph("No threads yet. Be the first to post!");
+        // Fetch board contract address from registry
+        let board_contract_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            board_contract_args,
+        );
+
+        if let Some(board_contract) = board_contract_opt {
+            // Fetch threads from board contract
+            let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 20u64.into_val(env)]);
+            let threads: Vec<ThreadMeta> = env.invoke_contract(
+                &board_contract,
+                &Symbol::new(env, "list_threads"),
+                list_args,
+            );
+
+            if threads.is_empty() {
+                md = md.paragraph("No threads yet. Be the first to post!");
+            } else {
+                for i in 0..threads.len() {
+                    let thread = threads.get(i).unwrap();
+                    // Thread link: /b/{board_id}/t/{thread_id}
+                    md = md.raw_str("- **[")
+                        .text_string(&thread.title)
+                        .raw_str("](render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("/t/")
+                        .number(thread.id as u32)
+                        .raw_str(")** - ")
+                        .number(thread.reply_count)
+                        .raw_str(" replies\n");
+                }
+            }
         } else {
-            md = md.paragraph("*Thread list will be loaded from board contract*");
-            // In a real implementation, we'd fetch from the board contract:
-            // let threads: Vec<ThreadMeta> = env.invoke_contract(&board_contract, ...);
+            // No board contract registered yet
+            md = md.paragraph("No threads yet. Be the first to post!");
         }
 
         Self::render_footer_into(md).build()
