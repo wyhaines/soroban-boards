@@ -2,7 +2,7 @@
 
 use soroban_chonk::prelude::*;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, symbol_short, Address, Bytes, BytesN, Env, String, Symbol, Vec,
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
 
 /// Storage keys for the content contract
@@ -11,6 +11,8 @@ use soroban_sdk::{
 pub enum ContentKey {
     /// Registry contract address
     Registry,
+    /// Permissions contract address (optional)
+    Permissions,
     /// Reply count for a thread
     ReplyCount(u64, u64),
     /// Reply metadata by ID (board_id, thread_id, reply_id)
@@ -19,6 +21,16 @@ pub enum ContentKey {
     NextReplyId(u64, u64),
     /// Flags on a post (board_id, thread_id, reply_id) -> Vec<Flag>
     Flags(u64, u64, u64),
+    /// List of reply IDs for a thread (board_id, thread_id) -> Vec<u64>
+    ThreadReplies(u64, u64),
+    /// List of child reply IDs for a parent (board_id, thread_id, parent_id) -> Vec<u64>
+    ChildReplies(u64, u64, u64),
+    /// Next chonk ID counter
+    NextChonkId,
+    /// Thread body chonk symbol (board_id, thread_id) -> Symbol
+    ThreadBodyChonk(u64, u64),
+    /// Reply content chonk symbol (board_id, thread_id, reply_id) -> Symbol
+    ReplyChonk(u64, u64, u64),
 }
 
 /// Reply metadata
@@ -53,11 +65,21 @@ pub struct BoardsContent;
 #[contractimpl]
 impl BoardsContent {
     /// Initialize the content contract
-    pub fn init(env: Env, registry: Address) {
+    /// permissions is optional - if None, permission checks are skipped (useful for testing)
+    pub fn init(env: Env, registry: Address, permissions: Option<Address>) {
         if env.storage().instance().has(&ContentKey::Registry) {
             panic!("Already initialized");
         }
-        env.storage().instance().set(&ContentKey::Registry, &registry);
+        env.storage()
+            .instance()
+            .set(&ContentKey::Registry, &registry);
+
+        // Only set permissions if provided
+        if let Some(perms) = permissions {
+            env.storage()
+                .instance()
+                .set(&ContentKey::Permissions, &perms);
+        }
     }
 
     /// Get registry address
@@ -68,11 +90,61 @@ impl BoardsContent {
             .expect("Not initialized")
     }
 
+    // Permission check helpers
+
+    /// Check if user can reply on this board
+    fn check_can_reply(env: &Env, board_id: u64, user: &Address) {
+        if !env.storage().instance().has(&ContentKey::Permissions) {
+            return; // Skip if permissions not configured
+        }
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Permissions)
+            .unwrap();
+
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [board_id.into_val(env), user.into_val(env)],
+        );
+        let fn_name = Symbol::new(env, "can_reply");
+        let can_reply: bool = env.invoke_contract(&permissions, &fn_name, args);
+
+        if !can_reply {
+            panic!("Not authorized to reply");
+        }
+    }
+
+    /// Check if user can moderate on this board
+    fn check_can_moderate(env: &Env, board_id: u64, user: &Address) {
+        if !env.storage().instance().has(&ContentKey::Permissions) {
+            return; // Skip if permissions not configured
+        }
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Permissions)
+            .unwrap();
+
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [board_id.into_val(env), user.into_val(env)],
+        );
+        let fn_name = Symbol::new(env, "can_moderate");
+        let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
+
+        if !can_moderate {
+            panic!("Not authorized to moderate");
+        }
+    }
+
     /// Store thread body content
     pub fn set_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, author: Address) {
         author.require_auth();
 
-        let key = Self::thread_body_key(board_id, thread_id);
+        let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
         let chonk = Chonk::open(&env, key);
         chonk.clear();
         chonk.write_chunked(content, 4096);
@@ -80,16 +152,43 @@ impl BoardsContent {
 
     /// Get thread body content
     pub fn get_thread_body(env: Env, board_id: u64, thread_id: u64) -> Bytes {
-        let key = Self::thread_body_key(board_id, thread_id);
-        let chonk = Chonk::open(&env, key);
-        chonk.assemble()
+        if let Some(key) = Self::get_thread_body_chonk(&env, board_id, thread_id) {
+            let chonk = Chonk::open(&env, key);
+            chonk.assemble()
+        } else {
+            Bytes::new(&env)
+        }
     }
 
     /// Get a chunk of thread body (for progressive loading)
     pub fn get_thread_body_chunk(env: Env, board_id: u64, thread_id: u64, index: u32) -> Option<Bytes> {
-        let key = Self::thread_body_key(board_id, thread_id);
+        if let Some(key) = Self::get_thread_body_chonk(&env, board_id, thread_id) {
+            let chonk = Chonk::open(&env, key);
+            chonk.get(index)
+        } else {
+            None
+        }
+    }
+
+    /// Get chunk count for thread body
+    pub fn get_thread_body_chunk_count(env: Env, board_id: u64, thread_id: u64) -> u32 {
+        if let Some(key) = Self::get_thread_body_chonk(&env, board_id, thread_id) {
+            let chonk = Chonk::open(&env, key);
+            chonk.count()
+        } else {
+            0
+        }
+    }
+
+    /// Edit thread body content
+    pub fn edit_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, caller: Address) {
+        caller.require_auth();
+        // TODO: Verify caller is author or moderator via permissions contract
+
+        let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
         let chonk = Chonk::open(&env, key);
-        chonk.get(index)
+        chonk.clear();
+        chonk.write_chunked(content, 4096);
     }
 
     /// Create a reply
@@ -103,6 +202,9 @@ impl BoardsContent {
         creator: Address,
     ) -> u64 {
         creator.require_auth();
+
+        // Check permissions
+        Self::check_can_reply(&env, board_id, &creator);
 
         let reply_id = Self::next_reply_id(&env, board_id, thread_id);
 
@@ -126,9 +228,33 @@ impl BoardsContent {
             .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
 
         // Store reply content in chonk
-        let key = Self::reply_content_key(board_id, thread_id, reply_id);
+        let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
         let chonk = Chonk::open(&env, key);
         chonk.write_chunked(content, 4096);
+
+        // Add to thread replies list
+        let mut thread_replies: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ThreadReplies(board_id, thread_id))
+            .unwrap_or(Vec::new(&env));
+        thread_replies.push_back(reply_id);
+        env.storage()
+            .persistent()
+            .set(&ContentKey::ThreadReplies(board_id, thread_id), &thread_replies);
+
+        // If this is a nested reply, add to parent's child list
+        if parent_id > 0 || depth > 0 {
+            let mut child_replies: Vec<u64> = env
+                .storage()
+                .persistent()
+                .get(&ContentKey::ChildReplies(board_id, thread_id, parent_id))
+                .unwrap_or(Vec::new(&env));
+            child_replies.push_back(reply_id);
+            env.storage()
+                .persistent()
+                .set(&ContentKey::ChildReplies(board_id, thread_id, parent_id), &child_replies);
+        }
 
         // Increment reply count
         let count: u64 = env
@@ -157,9 +283,22 @@ impl BoardsContent {
 
     /// Get reply content
     pub fn get_reply_content(env: Env, board_id: u64, thread_id: u64, reply_id: u64) -> Bytes {
-        let key = Self::reply_content_key(board_id, thread_id, reply_id);
-        let chonk = Chonk::open(&env, key);
-        chonk.assemble()
+        if let Some(key) = Self::get_reply_chonk(&env, board_id, thread_id, reply_id) {
+            let chonk = Chonk::open(&env, key);
+            chonk.assemble()
+        } else {
+            Bytes::new(&env)
+        }
+    }
+
+    /// Get reply content chunk (for progressive loading)
+    pub fn get_reply_content_chunk(env: Env, board_id: u64, thread_id: u64, reply_id: u64, index: u32) -> Option<Bytes> {
+        if let Some(key) = Self::get_reply_chonk(&env, board_id, thread_id, reply_id) {
+            let chonk = Chonk::open(&env, key);
+            chonk.get(index)
+        } else {
+            None
+        }
     }
 
     /// Get reply count for a thread
@@ -168,6 +307,103 @@ impl BoardsContent {
             .persistent()
             .get(&ContentKey::ReplyCount(board_id, thread_id))
             .unwrap_or(0)
+    }
+
+    /// List all replies for a thread with pagination
+    pub fn list_replies(env: Env, board_id: u64, thread_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
+        let reply_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ThreadReplies(board_id, thread_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut replies = Vec::new(&env);
+        let total = reply_ids.len();
+        let end = core::cmp::min(start + limit, total);
+
+        for i in start..end {
+            let reply_id = reply_ids.get(i).unwrap();
+            if let Some(reply) = env
+                .storage()
+                .persistent()
+                .get(&ContentKey::Reply(board_id, thread_id, reply_id))
+            {
+                replies.push_back(reply);
+            }
+        }
+
+        replies
+    }
+
+    /// List top-level replies only (replies to the thread itself, not nested)
+    pub fn list_top_level_replies(env: Env, board_id: u64, thread_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
+        let reply_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ThreadReplies(board_id, thread_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut replies = Vec::new(&env);
+        let mut count = 0u32;
+        let mut skipped = 0u32;
+
+        for i in 0..reply_ids.len() {
+            if count >= limit {
+                break;
+            }
+            let reply_id = reply_ids.get(i).unwrap();
+            if let Some(reply) = env
+                .storage()
+                .persistent()
+                .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
+            {
+                // Only include top-level replies (depth 0 or 1, parent_id 0)
+                if reply.depth <= 1 && reply.parent_id == 0 {
+                    if skipped >= start {
+                        replies.push_back(reply);
+                        count += 1;
+                    } else {
+                        skipped += 1;
+                    }
+                }
+            }
+        }
+
+        replies
+    }
+
+    /// List child replies of a specific reply
+    pub fn list_children_replies(env: Env, board_id: u64, thread_id: u64, parent_id: u64) -> Vec<ReplyMeta> {
+        let child_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ChildReplies(board_id, thread_id, parent_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut replies = Vec::new(&env);
+
+        for i in 0..child_ids.len() {
+            let reply_id = child_ids.get(i).unwrap();
+            if let Some(reply) = env
+                .storage()
+                .persistent()
+                .get(&ContentKey::Reply(board_id, thread_id, reply_id))
+            {
+                replies.push_back(reply);
+            }
+        }
+
+        replies
+    }
+
+    /// Get child reply count for a reply
+    pub fn get_children_count(env: Env, board_id: u64, thread_id: u64, parent_id: u64) -> u32 {
+        let child_ids: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::ChildReplies(board_id, thread_id, parent_id))
+            .unwrap_or(Vec::new(&env));
+        child_ids.len()
     }
 
     /// Edit reply content
@@ -191,7 +427,7 @@ impl BoardsContent {
                 .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
 
             // Update content
-            let key = Self::reply_content_key(board_id, thread_id, reply_id);
+            let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
             let chonk = Chonk::open(&env, key);
             chonk.clear();
             chonk.write_chunked(content, 4096);
@@ -220,11 +456,12 @@ impl BoardsContent {
                 .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
 
             // Clear content
-            let key = Self::reply_content_key(board_id, thread_id, reply_id);
-            let chonk = Chonk::open(&env, key);
-            chonk.clear();
-            // Store deletion notice
-            chonk.push(Bytes::from_slice(&env, b"[This reply has been deleted]"));
+            if let Some(key) = Self::get_reply_chonk(&env, board_id, thread_id, reply_id) {
+                let chonk = Chonk::open(&env, key);
+                chonk.clear();
+                // Store deletion notice
+                chonk.push(Bytes::from_slice(&env, b"[This reply has been deleted]"));
+            }
         }
     }
 
@@ -266,7 +503,9 @@ impl BoardsContent {
     /// Hide a reply (moderator action)
     pub fn hide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller is moderator
+
+        // Check moderator permissions
+        Self::check_can_moderate(&env, board_id, &caller);
 
         if let Some(mut reply) = env
             .storage()
@@ -283,7 +522,9 @@ impl BoardsContent {
     /// Unhide a reply (moderator action)
     pub fn unhide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller is moderator
+
+        // Check moderator permissions
+        Self::check_can_moderate(&env, board_id, &caller);
 
         if let Some(mut reply) = env
             .storage()
@@ -323,15 +564,95 @@ impl BoardsContent {
 
     // Helper functions
 
-    fn thread_body_key(board_id: u64, thread_id: u64) -> Symbol {
-        // Create a unique symbol for thread body storage
-        // Note: Symbol has length limits, so we use a simple scheme
-        symbol_short!("tb")
+    /// Get or create a unique chonk symbol for a thread body
+    fn get_or_create_thread_body_chonk(env: &Env, board_id: u64, thread_id: u64) -> Symbol {
+        let key = ContentKey::ThreadBodyChonk(board_id, thread_id);
+        if let Some(symbol) = env.storage().persistent().get(&key) {
+            symbol
+        } else {
+            let symbol = Self::next_chonk_symbol(env);
+            env.storage().persistent().set(&key, &symbol);
+            symbol
+        }
     }
 
-    fn reply_content_key(board_id: u64, thread_id: u64, reply_id: u64) -> Symbol {
-        // Create a unique symbol for reply content storage
-        symbol_short!("rc")
+    /// Get or create a unique chonk symbol for reply content
+    fn get_or_create_reply_chonk(env: &Env, board_id: u64, thread_id: u64, reply_id: u64) -> Symbol {
+        let key = ContentKey::ReplyChonk(board_id, thread_id, reply_id);
+        if let Some(symbol) = env.storage().persistent().get(&key) {
+            symbol
+        } else {
+            let symbol = Self::next_chonk_symbol(env);
+            env.storage().persistent().set(&key, &symbol);
+            symbol
+        }
+    }
+
+    /// Get chonk symbol for thread body (returns None if not created)
+    fn get_thread_body_chonk(env: &Env, board_id: u64, thread_id: u64) -> Option<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::ThreadBodyChonk(board_id, thread_id))
+    }
+
+    /// Get chonk symbol for reply content (returns None if not created)
+    fn get_reply_chonk(env: &Env, board_id: u64, thread_id: u64, reply_id: u64) -> Option<Symbol> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::ReplyChonk(board_id, thread_id, reply_id))
+    }
+
+    /// Generate the next unique chonk symbol
+    /// Uses format "c_XXXXXXXX" where X is hex digits from the counter
+    fn next_chonk_symbol(env: &Env) -> Symbol {
+        let counter: u64 = env
+            .storage()
+            .instance()
+            .get(&ContentKey::NextChonkId)
+            .unwrap_or(0);
+
+        // Increment counter
+        env.storage()
+            .instance()
+            .set(&ContentKey::NextChonkId, &(counter + 1));
+
+        // Create symbol string "c_" + 8 hex chars (fits in short symbol limit)
+        // We'll use a simple encoding: c_{counter in base36}
+        Self::counter_to_symbol(env, counter)
+    }
+
+    /// Convert a counter to a short symbol (max 9 chars for short symbol)
+    /// Format: "c" + base36 encoded number
+    fn counter_to_symbol(env: &Env, counter: u64) -> Symbol {
+        // Use a fixed-size buffer for the symbol
+        // "c" prefix + up to 8 chars for base36 number = max 9 chars
+        let mut buf = [0u8; 9];
+        buf[0] = b'c';
+
+        // Encode counter in base36 (0-9, a-z)
+        let mut n = counter;
+        let mut pos = 8usize;
+
+        if n == 0 {
+            buf[1] = b'0';
+            return Symbol::new(env, core::str::from_utf8(&buf[0..2]).unwrap());
+        }
+
+        while n > 0 && pos > 0 {
+            let digit = (n % 36) as u8;
+            buf[pos] = if digit < 10 {
+                b'0' + digit
+            } else {
+                b'a' + digit - 10
+            };
+            n /= 36;
+            pos -= 1;
+        }
+
+        // Create symbol from the non-zero portion
+        let start = pos + 1;
+        buf[start - 1] = b'c';
+        Symbol::new(env, core::str::from_utf8(&buf[start - 1..9]).unwrap())
     }
 
     fn next_reply_id(env: &Env, board_id: u64, thread_id: u64) -> u64 {
@@ -357,7 +678,8 @@ mod test {
         let client = BoardsContentClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
-        client.init(&registry);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&registry, &None);
 
         let author = Address::generate(&env);
         let content = Bytes::from_slice(&env, b"Hello, this is my first post!");
@@ -377,7 +699,8 @@ mod test {
         let client = BoardsContentClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
-        client.init(&registry);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&registry, &None);
 
         let author = Address::generate(&env);
         let content = Bytes::from_slice(&env, b"This is a reply!");
@@ -404,7 +727,8 @@ mod test {
         let client = BoardsContentClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
-        client.init(&registry);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&registry, &None);
 
         let author = Address::generate(&env);
         let content = Bytes::from_slice(&env, b"This reply will be deleted");
@@ -430,7 +754,8 @@ mod test {
         let client = BoardsContentClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
-        client.init(&registry);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&registry, &None);
 
         let author = Address::generate(&env);
         let flagger = Address::generate(&env);

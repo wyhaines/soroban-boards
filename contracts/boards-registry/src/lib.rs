@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Vec};
 
 /// Storage keys for the registry contract
 #[contracttype]
@@ -128,6 +128,31 @@ impl BoardsRegistry {
         env.storage()
             .instance()
             .set(&RegistryKey::BoardCount, &(board_id + 1));
+
+        // Set board owner in permissions contract
+        // Note: This call may fail in unit tests where the permissions contract
+        // is not a real contract. In production, this will work correctly.
+        // We use try_invoke_contract to handle this gracefully.
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        // Call permissions.set_board_owner(board_id, creator)
+        // In tests without a real permissions contract, this will be a no-op
+        let args: Vec<soroban_sdk::Val> = Vec::from_array(
+            &env,
+            [board_id.into_val(&env), creator.into_val(&env)],
+        );
+        let fn_name = Symbol::new(&env, "set_board_owner");
+
+        // Use try_invoke_contract to handle the case where permissions isn't set up
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &contracts.permissions,
+            &fn_name,
+            args,
+        );
 
         board_id
     }

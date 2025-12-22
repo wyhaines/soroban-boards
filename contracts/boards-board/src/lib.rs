@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 /// Storage keys for a board contract
 #[contracttype]
@@ -10,6 +10,8 @@ pub enum BoardKey {
     BoardId,
     /// Registry contract address
     Registry,
+    /// Permissions contract address
+    Permissions,
     /// Thread count
     ThreadCount,
     /// Thread metadata by ID
@@ -53,22 +55,84 @@ pub struct BoardsBoard;
 #[contractimpl]
 impl BoardsBoard {
     /// Initialize a board contract (called by registry after deployment)
-    pub fn init(env: Env, board_id: u64, registry: Address, name: String, description: String, is_private: bool) {
+    /// permissions is optional - if None, permission checks are skipped (useful for testing)
+    pub fn init(
+        env: Env,
+        board_id: u64,
+        registry: Address,
+        permissions: Option<Address>,
+        name: String,
+        description: String,
+        is_private: bool,
+    ) {
         if env.storage().instance().has(&BoardKey::BoardId) {
             panic!("Already initialized");
         }
 
         env.storage().instance().set(&BoardKey::BoardId, &board_id);
         env.storage().instance().set(&BoardKey::Registry, &registry);
+
+        // Only set permissions if provided
+        if let Some(perms) = permissions {
+            env.storage().instance().set(&BoardKey::Permissions, &perms);
+        }
+
         env.storage().instance().set(&BoardKey::ThreadCount, &0u64);
-        env.storage().instance().set(&BoardKey::PinnedThreads, &Vec::<u64>::new(&env));
-        env.storage().instance().set(&BoardKey::Config, &BoardConfig {
-            name,
-            description,
-            is_private,
-            is_readonly: false,
-            max_reply_depth: 10,
-        });
+        env.storage()
+            .instance()
+            .set(&BoardKey::PinnedThreads, &Vec::<u64>::new(&env));
+        env.storage().instance().set(
+            &BoardKey::Config,
+            &BoardConfig {
+                name,
+                description,
+                is_private,
+                is_readonly: false,
+                max_reply_depth: 10,
+            },
+        );
+    }
+
+    // Permission check helpers
+
+    /// Check if user can create threads on this board
+    fn check_can_create_thread(env: &Env, board_id: u64, user: &Address) {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Permissions)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [board_id.into_val(env), user.into_val(env)],
+        );
+        let fn_name = Symbol::new(env, "can_create_thread");
+        let can_create: bool = env.invoke_contract(&permissions, &fn_name, args);
+
+        if !can_create {
+            panic!("Not authorized to create threads");
+        }
+    }
+
+    /// Check if user has moderator permissions
+    fn check_can_moderate(env: &Env, board_id: u64, user: &Address) {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Permissions)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [board_id.into_val(env), user.into_val(env)],
+        );
+        let fn_name = Symbol::new(env, "can_moderate");
+        let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
+
+        if !can_moderate {
+            panic!("Not authorized to moderate");
+        }
     }
 
     /// Get board ID
@@ -88,6 +152,7 @@ impl BoardsBoard {
     }
 
     /// Create a new thread (returns thread ID)
+    /// Set skip_permission_check to true only for testing
     pub fn create_thread(env: Env, title: String, creator: Address) -> u64 {
         creator.require_auth();
 
@@ -96,6 +161,21 @@ impl BoardsBoard {
             .instance()
             .get(&BoardKey::BoardId)
             .expect("Not initialized");
+
+        // Check permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_create_thread(&env, board_id, &creator);
+        }
+
+        // Check if board is readonly
+        let config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        if config.is_readonly {
+            panic!("Board is read-only");
+        }
 
         let thread_id: u64 = env
             .storage()
@@ -170,7 +250,17 @@ impl BoardsBoard {
     /// Lock a thread (no more replies)
     pub fn lock_thread(env: Env, thread_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller has moderator+ role via permissions contract
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
 
         if let Some(mut thread) = env
             .storage()
@@ -187,7 +277,17 @@ impl BoardsBoard {
     /// Unlock a thread
     pub fn unlock_thread(env: Env, thread_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller has moderator+ role
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
 
         if let Some(mut thread) = env
             .storage()
@@ -204,7 +304,17 @@ impl BoardsBoard {
     /// Pin a thread
     pub fn pin_thread(env: Env, thread_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller has moderator+ role
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
 
         if let Some(mut thread) = env
             .storage()
@@ -231,7 +341,17 @@ impl BoardsBoard {
     /// Unpin a thread
     pub fn unpin_thread(env: Env, thread_id: u64, caller: Address) {
         caller.require_auth();
-        // TODO: Verify caller has moderator+ role
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check moderator permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            Self::check_can_moderate(&env, board_id, &caller);
+        }
 
         if let Some(mut thread) = env
             .storage()
@@ -324,7 +444,8 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
 
-        client.init(&0, &registry, &name, &desc, &false);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&0, &registry, &None, &name, &desc, &false);
 
         assert_eq!(client.get_board_id(), 0);
         assert_eq!(client.thread_count(), 0);
@@ -353,7 +474,8 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
 
-        client.init(&0, &registry, &name, &desc, &false);
+        // Pass None for permissions to skip permission checks in tests
+        client.init(&0, &registry, &None, &name, &desc, &false);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
