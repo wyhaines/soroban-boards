@@ -4,7 +4,7 @@ set -e
 # Upgrade Soroban Boards contracts in place (preserves addresses and data)
 # Usage: ./upgrade-contracts.sh [contract-name...]
 #   No args: upgrade all contracts
-#   With args: upgrade only specified contracts (registry, permissions, content, theme, boards)
+#   With args: upgrade only specified contracts (registry, permissions, content, theme, admin, boards)
 
 # Configuration
 NETWORK="local"
@@ -39,6 +39,7 @@ UPGRADE_REGISTRY=false
 UPGRADE_PERMISSIONS=false
 UPGRADE_CONTENT=false
 UPGRADE_THEME=false
+UPGRADE_ADMIN=false
 UPGRADE_BOARDS=false
 
 if [ $# -gt 0 ]; then
@@ -49,11 +50,12 @@ if [ $# -gt 0 ]; then
             permissions) UPGRADE_PERMISSIONS=true ;;
             content)     UPGRADE_CONTENT=true ;;
             theme)       UPGRADE_THEME=true ;;
+            admin)       UPGRADE_ADMIN=true ;;
             boards)      UPGRADE_BOARDS=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, boards, all"
+                echo "Valid options: registry, permissions, content, theme, admin, boards, all"
                 exit 1
                 ;;
         esac
@@ -65,6 +67,7 @@ if [ "$UPGRADE_ALL" = true ]; then
     UPGRADE_PERMISSIONS=true
     UPGRADE_CONTENT=true
     UPGRADE_THEME=true
+    UPGRADE_ADMIN=true
     UPGRADE_BOARDS=true
 fi
 
@@ -175,6 +178,15 @@ if [ "$UPGRADE_THEME" = true ]; then
     echo ""
 fi
 
+# Upgrade Admin (via registry proxy)
+if [ "$UPGRADE_ADMIN" = true ]; then
+    echo -e "${GREEN}=== Upgrading Admin ===${NC}"
+    ADMIN_HASH=$(install_wasm "boards_admin")
+    echo -e "WASM hash: ${BLUE}$ADMIN_HASH${NC}"
+    upgrade_contract_via_registry "Admin" "$ADMIN_CONTRACT_ID" "$ADMIN_HASH"
+    echo ""
+fi
+
 # Upgrade Board contracts (need to iterate through all boards)
 if [ "$UPGRADE_BOARDS" = true ]; then
     echo -e "${GREEN}=== Upgrading Board Contracts ===${NC}"
@@ -235,5 +247,6 @@ echo "  Registry:    $REGISTRY_ID"
 echo "  Permissions: $PERMISSIONS_ID"
 echo "  Content:     $CONTENT_ID"
 echo "  Theme:       $THEME_ID"
+echo "  Admin:       $ADMIN_CONTRACT_ID"
 echo ""
 echo "All existing data has been preserved."

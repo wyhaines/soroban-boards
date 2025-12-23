@@ -818,6 +818,83 @@ impl BoardsContent {
         }
     }
 
+    /// Set reply hidden state (called by admin contract)
+    pub fn set_reply_hidden(env: Env, board_id: u64, thread_id: u64, reply_id: u64, hidden: bool) {
+        // Note: Auth is handled by the calling admin contract
+        if let Some(mut reply) = env
+            .storage()
+            .persistent()
+            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
+        {
+            reply.is_hidden = hidden;
+            reply.updated_at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+        }
+    }
+
+    /// Clear flags on content (called by admin contract)
+    /// If reply_id is None, clears thread flags; otherwise clears reply flags
+    pub fn clear_flags(env: Env, board_id: u64, thread_id: u64, reply_id: Option<u64>) {
+        // Note: Auth is handled by the calling admin contract
+        if let Some(rid) = reply_id {
+            // Clear reply flags
+            if let Some(mut flags) = env
+                .storage()
+                .persistent()
+                .get::<_, Vec<Flag>>(&ContentKey::Flags(board_id, thread_id, rid))
+            {
+                for i in 0..flags.len() {
+                    let mut flag = flags.get(i).unwrap();
+                    flag.resolved = true;
+                    flags.set(i, flag);
+                }
+                env.storage()
+                    .persistent()
+                    .set(&ContentKey::Flags(board_id, thread_id, rid), &flags);
+            }
+
+            // Update reply flag count
+            if let Some(mut reply) = env
+                .storage()
+                .persistent()
+                .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, rid))
+            {
+                reply.flag_count = 0;
+                env.storage()
+                    .persistent()
+                    .set(&ContentKey::Reply(board_id, thread_id, rid), &reply);
+            }
+
+            // Remove from flagged content list
+            Self::remove_from_flagged_content(&env, board_id, thread_id, rid, FlaggedType::Reply);
+        } else {
+            // Clear thread flags
+            if let Some(mut flags) = env
+                .storage()
+                .persistent()
+                .get::<_, Vec<Flag>>(&ContentKey::ThreadFlags(board_id, thread_id))
+            {
+                for i in 0..flags.len() {
+                    let mut flag = flags.get(i).unwrap();
+                    flag.resolved = true;
+                    flags.set(i, flag);
+                }
+                env.storage()
+                    .persistent()
+                    .set(&ContentKey::ThreadFlags(board_id, thread_id), &flags);
+            }
+
+            env.storage()
+                .persistent()
+                .set(&ContentKey::ThreadFlagCount(board_id, thread_id), &0u32);
+
+            // Remove from flagged content list
+            Self::remove_from_flagged_content(&env, board_id, thread_id, 0, FlaggedType::Thread);
+        }
+    }
+
     /// Get chunk for progressive loading (called by viewer)
     pub fn get_chunk(env: Env, collection: Symbol, index: u32) -> Option<Bytes> {
         let chonk = Chonk::open(&env, collection);

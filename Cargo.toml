@@ -7,6 +7,7 @@ members = [
     "contracts/boards-content",
     "contracts/boards-permissions",
     "contracts/boards-theme",
+    "contracts/boards-admin",
 ]
 
 [workspace.package]

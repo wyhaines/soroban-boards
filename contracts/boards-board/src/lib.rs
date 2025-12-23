@@ -36,6 +36,7 @@ pub struct ThreadMeta {
     pub is_locked: bool,
     pub is_pinned: bool,
     pub is_hidden: bool,
+    pub is_deleted: bool,
 }
 
 /// Board configuration
@@ -197,6 +198,7 @@ impl BoardsBoard {
             is_locked: false,
             is_pinned: false,
             is_hidden: false,
+            is_deleted: false,
         };
 
         env.storage()
@@ -449,6 +451,135 @@ impl BoardsBoard {
             .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
         {
             thread.is_hidden = false;
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Set thread hidden state (called by admin contract)
+    pub fn set_thread_hidden(env: Env, thread_id: u64, hidden: bool) {
+        // Note: Auth is handled by the calling admin contract
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            thread.is_hidden = hidden;
+            thread.updated_at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Set thread locked state (called by admin contract)
+    pub fn set_thread_locked(env: Env, thread_id: u64, locked: bool) {
+        // Note: Auth is handled by the calling admin contract
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            thread.is_locked = locked;
+            thread.updated_at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Set thread pinned state (called by admin contract)
+    pub fn set_thread_pinned(env: Env, thread_id: u64, pinned: bool) {
+        // Note: Auth is handled by the calling admin contract
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            thread.is_pinned = pinned;
+            thread.updated_at = env.ledger().timestamp();
+
+            // Update pinned list
+            let mut pinned_list: Vec<u64> = env
+                .storage()
+                .instance()
+                .get(&BoardKey::PinnedThreads)
+                .unwrap_or(Vec::new(&env));
+
+            if pinned {
+                // Add to list if not already present
+                let mut found = false;
+                for i in 0..pinned_list.len() {
+                    if pinned_list.get(i).unwrap() == thread_id {
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    pinned_list.push_back(thread_id);
+                }
+            } else {
+                // Remove from list
+                let mut new_list = Vec::new(&env);
+                for i in 0..pinned_list.len() {
+                    let id = pinned_list.get(i).unwrap();
+                    if id != thread_id {
+                        new_list.push_back(id);
+                    }
+                }
+                pinned_list = new_list;
+            }
+
+            env.storage()
+                .instance()
+                .set(&BoardKey::PinnedThreads, &pinned_list);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Thread(thread_id), &thread);
+        }
+    }
+
+    /// Delete a thread (soft delete - sets is_deleted flag)
+    /// Only author or moderator+ can delete
+    pub fn delete_thread(env: Env, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        if let Some(mut thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+        {
+            // Verify caller is author or moderator
+            let is_author = thread.creator == caller;
+            let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
+                let permissions: Address = env
+                    .storage()
+                    .instance()
+                    .get(&BoardKey::Permissions)
+                    .unwrap();
+                let args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [board_id.into_val(&env), caller.into_val(&env)],
+                );
+                let fn_name = Symbol::new(&env, "can_moderate");
+                env.invoke_contract(&permissions, &fn_name, args)
+            } else {
+                false
+            };
+
+            if !is_author && !is_moderator {
+                panic!("Only author or moderator can delete thread");
+            }
+
+            thread.is_deleted = true;
+            thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
                 .set(&BoardKey::Thread(thread_id), &thread);
@@ -926,5 +1057,73 @@ mod test {
         assert!(!thread.is_locked);
         assert!(!thread.is_pinned);
         assert!(!thread.is_hidden);
+        assert!(!thread.is_deleted);
+    }
+
+    #[test]
+    fn test_delete_thread() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread to Delete");
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Initially not deleted
+        let thread = client.get_thread(&thread_id).unwrap();
+        assert!(!thread.is_deleted);
+
+        // Delete thread (author can delete)
+        client.delete_thread(&thread_id, &creator);
+        let deleted_thread = client.get_thread(&thread_id).unwrap();
+        assert!(deleted_thread.is_deleted);
+    }
+
+    #[test]
+    fn test_set_thread_states() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let name = String::from_str(&env, "General");
+        let desc = String::from_str(&env, "Discussion");
+
+        client.init(&0, &registry, &None, &name, &desc, &false);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Test Thread");
+        let thread_id = client.create_thread(&title, &creator);
+
+        // Test set_thread_hidden
+        client.set_thread_hidden(&thread_id, &true);
+        assert!(client.get_thread(&thread_id).unwrap().is_hidden);
+        client.set_thread_hidden(&thread_id, &false);
+        assert!(!client.get_thread(&thread_id).unwrap().is_hidden);
+
+        // Test set_thread_locked
+        client.set_thread_locked(&thread_id, &true);
+        assert!(client.get_thread(&thread_id).unwrap().is_locked);
+        client.set_thread_locked(&thread_id, &false);
+        assert!(!client.get_thread(&thread_id).unwrap().is_locked);
+
+        // Test set_thread_pinned
+        client.set_thread_pinned(&thread_id, &true);
+        assert!(client.get_thread(&thread_id).unwrap().is_pinned);
+        assert_eq!(client.get_pinned_threads().len(), 1);
+        client.set_thread_pinned(&thread_id, &false);
+        assert!(!client.get_thread(&thread_id).unwrap().is_pinned);
+        assert_eq!(client.get_pinned_threads().len(), 0);
     }
 }

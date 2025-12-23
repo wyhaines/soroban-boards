@@ -76,6 +76,7 @@ echo -e "${GREEN}=== Deploying Shared Contracts ===${NC}"
 PERMISSIONS_ID=$(deploy_contract "boards_permissions")
 CONTENT_ID=$(deploy_contract "boards_content")
 THEME_ID=$(deploy_contract "boards_theme")
+ADMIN_CONTRACT_ID=$(deploy_contract "boards_admin")
 REGISTRY_ID=$(deploy_contract "boards_registry")
 
 # Save contract IDs to file (board contracts are auto-deployed)
@@ -94,6 +95,7 @@ REGISTRY_ID=$REGISTRY_ID
 PERMISSIONS_ID=$PERMISSIONS_ID
 CONTENT_ID=$CONTENT_ID
 THEME_ID=$THEME_ID
+ADMIN_CONTRACT_ID=$ADMIN_CONTRACT_ID
 
 # Note: Board contracts are auto-deployed when boards are created.
 # Use: stellar contract invoke --id \$REGISTRY_ID ... -- get_board_contract --board_id <id>
@@ -112,7 +114,8 @@ stellar contract invoke \
     --admin $ADMIN \
     --permissions $PERMISSIONS_ID \
     --content $CONTENT_ID \
-    --theme $THEME_ID
+    --theme $THEME_ID \
+    --admin_contract $ADMIN_CONTRACT_ID
 
 echo -e "${GREEN}Registry initialized${NC}"
 
@@ -161,7 +164,7 @@ stellar contract invoke \
 
 echo -e "${GREEN}Content initialized${NC}"
 
-# Initialize Theme (needs permissions and content addresses)
+# Initialize Theme (needs permissions, content, and admin addresses)
 echo ""
 echo -e "${GREEN}=== Initializing Theme ===${NC}"
 stellar contract invoke \
@@ -171,9 +174,25 @@ stellar contract invoke \
     -- init \
     --registry $REGISTRY_ID \
     --permissions $PERMISSIONS_ID \
-    --content $CONTENT_ID
+    --content $CONTENT_ID \
+    --admin $ADMIN_CONTRACT_ID
 
 echo -e "${GREEN}Theme initialized${NC}"
+
+# Initialize Admin (needs registry, permissions, content, and theme addresses)
+echo ""
+echo -e "${GREEN}=== Initializing Admin ===${NC}"
+stellar contract invoke \
+    --id $ADMIN_CONTRACT_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID \
+    --permissions $PERMISSIONS_ID \
+    --content $CONTENT_ID \
+    --theme $THEME_ID
+
+echo -e "${GREEN}Admin initialized${NC}"
 
 # Create first board via registry (board contract is auto-deployed)
 echo ""
@@ -240,6 +259,7 @@ echo "  Registry:    $REGISTRY_ID"
 echo "  Permissions: $PERMISSIONS_ID"
 echo "  Content:     $CONTENT_ID"
 echo "  Theme:       $THEME_ID"
+echo "  Admin:       $ADMIN_CONTRACT_ID"
 echo "  Board 0:     $BOARD_CONTRACT (auto-deployed)"
 echo ""
 echo "To interact with the contracts:"

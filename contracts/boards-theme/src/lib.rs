@@ -17,6 +17,8 @@ pub enum ThemeKey {
     Permissions,
     /// Content contract address
     Content,
+    /// Admin contract address (for admin UI delegation)
+    Admin,
 }
 
 // ============================================================================
@@ -51,6 +53,7 @@ pub struct ThreadMeta {
     pub is_locked: bool,
     pub is_pinned: bool,
     pub is_hidden: bool,
+    pub is_deleted: bool,
 }
 
 /// Reply metadata from content contract
@@ -70,16 +73,22 @@ pub struct ReplyMeta {
     pub flag_count: u32,
 }
 
-/// Ban record from permissions contract
-#[contracttype]
-#[derive(Clone)]
-pub struct Ban {
-    pub user: Address,
-    pub board_id: u64,
-    pub issuer: Address,
-    pub reason: String,
-    pub created_at: u64,
-    pub expires_at: Option<u64>,
+/// Helper to parse a string to u64 (for form inputs)
+fn parse_string_to_u64(env: &Env, s: &String) -> u64 {
+    let bytes = string_to_bytes(env, s);
+    let mut result: u64 = 0;
+    for i in 0..bytes.len() {
+        let byte = bytes.get(i).unwrap();
+        if byte >= b'0' && byte <= b'9' {
+            result = result * 10 + (byte - b'0') as u64;
+        }
+    }
+    result
+}
+
+/// Helper to parse a string to u32 (for form inputs)
+fn parse_string_to_u32(env: &Env, s: &String) -> u32 {
+    parse_string_to_u64(env, s) as u32
 }
 
 /// Role levels from permissions contract
@@ -92,27 +101,6 @@ pub enum Role {
     Moderator = 2,
     Admin = 3,
     Owner = 4,
-}
-
-/// Type of flagged content
-#[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum FlaggedType {
-    Thread = 0,
-    Reply = 1,
-}
-
-/// Flagged content item from content contract
-#[contracttype]
-#[derive(Clone)]
-pub struct FlaggedItem {
-    pub board_id: u64,
-    pub thread_id: u64,
-    pub reply_id: u64,
-    pub item_type: FlaggedType,
-    pub flag_count: u32,
-    pub first_flagged_at: u64,
 }
 
 /// Permission set from permissions contract
@@ -133,13 +121,22 @@ pub struct BoardsTheme;
 #[contractimpl]
 impl BoardsTheme {
     /// Initialize the theme contract
-    pub fn init(env: Env, registry: Address, permissions: Address, content: Address) {
+    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, admin: Address) {
         if env.storage().instance().has(&ThemeKey::Registry) {
             panic!("Already initialized");
         }
         env.storage().instance().set(&ThemeKey::Registry, &registry);
         env.storage().instance().set(&ThemeKey::Permissions, &permissions);
         env.storage().instance().set(&ThemeKey::Content, &content);
+        env.storage().instance().set(&ThemeKey::Admin, &admin);
+    }
+
+    /// Get admin contract address
+    pub fn get_admin(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Not initialized")
     }
 
     /// Get registry address
@@ -168,29 +165,25 @@ impl BoardsTheme {
 
     /// Main render entry point
     pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
-        Router::new(&env, path)
+        Router::new(&env, path.clone())
             // Home page - board list
             .handle(b"/", |_| Self::render_home(&env, &viewer))
             // Help page
             .or_handle(b"/help", |_| Self::render_help(&env))
             // Create board form
             .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
-            // Moderation routes (must be before simpler board routes)
-            .or_handle(b"/b/{id}/members", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_members(&env, board_id, &viewer)
+            // Admin routes - delegate to admin contract
+            .or_handle(b"/b/{id}/members", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
             })
-            .or_handle(b"/b/{id}/banned", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_banned(&env, board_id, &viewer)
+            .or_handle(b"/b/{id}/banned", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
             })
-            .or_handle(b"/b/{id}/flags", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_flag_queue(&env, board_id, &viewer)
+            .or_handle(b"/b/{id}/flags", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
             })
-            .or_handle(b"/b/{id}/settings", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_settings(&env, board_id, &viewer)
+            .or_handle(b"/b/{id}/settings", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
             })
             // Thread reply form (must be before thread view to match first)
             .or_handle(b"/b/{id}/t/{tid}/reply", |req| {
@@ -230,6 +223,23 @@ impl BoardsTheme {
             })
             // Default
             .or_default(|_| Self::render_home(&env, &viewer))
+    }
+
+    /// Delegate rendering to the admin contract
+    fn delegate_to_admin(env: &Env, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        // Call admin.render(path, viewer)
+        let args: Vec<Val> = Vec::from_array(env, [
+            path.into_val(env),
+            viewer.into_val(env),
+        ]);
+
+        env.invoke_contract(&admin, &Symbol::new(env, "render"), args)
     }
 
     /// Render the home page with board list
@@ -779,339 +789,6 @@ impl BoardsTheme {
         Self::render_footer_into(md).build()
     }
 
-    /// Render members list page
-    fn render_members(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Permissions)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .h1("Board Members");
-
-        // Check if viewer has permission to view members (moderator+)
-        let can_view = if let Some(user) = viewer {
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
-            perms.can_moderate
-        } else {
-            false
-        };
-
-        if !can_view {
-            md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Fetch owner
-        let owner_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let owner_opt: Option<Address> = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "get_board_owner"),
-            owner_args,
-        );
-
-        md = md.h2("Owner");
-        if let Some(_owner) = owner_opt {
-            // Address display - in production, use address shortener or full display
-            md = md.text("- ").code("[owner address]").newline();
-        } else {
-            md = md.paragraph("*No owner set*");
-        }
-
-        // Fetch admins
-        md = md.h2("Admins");
-        let admins: Vec<Address> = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "list_admins"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        if admins.is_empty() {
-            md = md.paragraph("*No admins*");
-        } else {
-            for i in 0..admins.len() {
-                let _addr = admins.get(i).unwrap();
-                md = md.text("- ").code("[admin ").number(i as u32).code("]").newline();
-            }
-        }
-
-        // Fetch moderators
-        md = md.h2("Moderators");
-        let mods: Vec<Address> = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "list_moderators"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        if mods.is_empty() {
-            md = md.paragraph("*No moderators*");
-        } else {
-            for i in 0..mods.len() {
-                let _addr = mods.get(i).unwrap();
-                md = md.text("- ").code("[moderator ").number(i as u32).code("]").newline();
-            }
-        }
-
-        // Fetch members
-        md = md.h2("Members");
-        let members: Vec<Address> = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "list_members"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        if members.is_empty() {
-            md = md.paragraph("*No members*");
-        } else {
-            for i in 0..members.len() {
-                let _addr = members.get(i).unwrap();
-                md = md.text("- ").code("[member ").number(i as u32).code("]").newline();
-            }
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render banned users page
-    fn render_banned(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Permissions)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .h1("Banned Users");
-
-        // Check if viewer has permission (moderator+)
-        let can_view = if let Some(user) = viewer {
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
-            perms.can_moderate
-        } else {
-            false
-        };
-
-        if !can_view {
-            md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Fetch bans
-        let bans: Vec<Ban> = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "list_bans"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        if bans.is_empty() {
-            md = md.paragraph("No banned users.");
-        } else {
-            for i in 0..bans.len() {
-                let ban = bans.get(i).unwrap();
-                md = md.h3("Banned User #").number(i as u32);
-                md = md.text("**Reason:** ").text_string(&ban.reason).newline();
-                md = md.text("**Issued by:** ").code("[issuer address]").newline();
-
-                if let Some(expires) = ban.expires_at {
-                    md = md.text("**Expires:** ").number(expires as u32).text(" (timestamp)").newline();
-                } else {
-                    md = md.text("**Expires:** *Permanent*").newline();
-                }
-
-                // Unban link
-                md = md.tx_link("Unban", "unban_user", "").newline().newline();
-            }
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render flag queue page
-    fn render_flag_queue(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Permissions)
-            .expect("Not initialized");
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .h1("Flag Queue");
-
-        // Check if viewer has permission (moderator+)
-        let can_view = if let Some(user) = viewer {
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
-            perms.can_moderate
-        } else {
-            false
-        };
-
-        if !can_view {
-            md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Fetch flagged content
-        let flagged: Vec<FlaggedItem> = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "list_flagged_content"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        if flagged.is_empty() {
-            md = md.tip("No flagged content. Good work!");
-        } else {
-            md = md.paragraph("Review flagged content and take appropriate action.");
-
-            for i in 0..flagged.len() {
-                let item = flagged.get(i).unwrap();
-
-                md = md.hr();
-
-                let type_str = if item.item_type == FlaggedType::Thread { "Thread" } else { "Reply" };
-                md = md.h3("").text(type_str).text(" #").number(item.thread_id as u32);
-
-                if item.item_type == FlaggedType::Reply {
-                    md = md.text(" / Reply #").number(item.reply_id as u32);
-                }
-
-                md = md.newline()
-                    .text("**Flags:** ").number(item.flag_count).newline();
-
-                // View link
-                if item.item_type == FlaggedType::Thread {
-                    md = md.raw_str("[View Thread](render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("/t/")
-                        .number(item.thread_id as u32)
-                        .raw_str(")");
-                } else {
-                    md = md.raw_str("[View Reply](render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("/t/")
-                        .number(item.thread_id as u32)
-                        .raw_str("/r/")
-                        .number(item.reply_id as u32)
-                        .raw_str(")");
-                }
-
-                // Actions
-                md = md.text(" | ").tx_link("Hide", "hide_content", "");
-                md = md.text(" | ").tx_link("Clear Flags", "clear_flags", "");
-                md = md.newline();
-            }
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render board settings page
-    fn render_settings(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Permissions)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .h1("Board Settings");
-
-        // Check if viewer has admin permission
-        let can_admin = if let Some(user) = viewer {
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
-            perms.can_admin
-        } else {
-            false
-        };
-
-        if !can_admin {
-            md = md.warning("You must be an admin to view this page.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Get flag threshold
-        let threshold: u32 = env.invoke_contract(
-            &permissions,
-            &Symbol::new(env, "get_flag_threshold"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
-
-        md = md.h2("Moderation Settings");
-        md = md.text("**Flag threshold for auto-hide:** ").number(threshold).newline();
-        md = md.input("threshold", "New threshold")
-            .newline()
-            .form_link("Update Threshold", "set_flag_threshold")
-            .newline()
-            .newline();
-
-        md = md.h2("Role Management");
-        md = md.paragraph("Assign roles to users on this board.");
-        md = md.input("user_address", "User wallet address")
-            .newline()
-            .text("Select role: ")
-            .text("[").tx_link("Member", "set_role_member", "").text("] ")
-            .text("[").tx_link("Moderator", "set_role_mod", "").text("] ")
-            .text("[").tx_link("Admin", "set_role_admin", "").text("]")
-            .newline()
-            .newline();
-
-        md = md.h2("Quick Links");
-        md = md.raw_str("[View Members](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/members)")
-            .text(" | ");
-        md = md.raw_str("[View Banned](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/banned)")
-            .text(" | ");
-        md = md.raw_str("[View Flag Queue](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/flags)");
-
-        Self::render_footer_into(md).build()
-    }
-
     /// Render header component
     pub fn render_header(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         Self::render_nav(&env).build()
@@ -1381,6 +1058,33 @@ impl BoardsTheme {
             .get(&ThemeKey::Content)
             .expect("Not initialized");
 
+        // Get board contract to check thread lock state
+        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            board_args,
+        );
+
+        if let Some(board_contract) = board_contract_opt {
+            // Check if thread is locked
+            let thread_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
+            let thread_opt: Option<ThreadMeta> = env.invoke_contract(
+                &board_contract,
+                &Symbol::new(&env, "get_thread"),
+                thread_args,
+            );
+
+            if let Some(thread) = thread_opt {
+                if thread.is_locked {
+                    panic!("Thread is locked - replies are not allowed");
+                }
+                if thread.is_deleted {
+                    panic!("Thread has been deleted");
+                }
+            }
+        }
+
         // Convert content string to bytes
         let content_bytes = string_to_bytes(&env, &content_str);
 
@@ -1413,6 +1117,507 @@ impl BoardsTheme {
 
         reply_id
     }
+
+    /// Edit a thread's title and/or body
+    pub fn edit_thread(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        new_title: Option<String>,
+        new_body: Option<String>,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        // Get board contract
+        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                board_args,
+            )
+            .expect("Board contract not found");
+
+        // Update title if provided
+        if let Some(title) = new_title {
+            let title_args: Vec<Val> = Vec::from_array(&env, [
+                thread_id.into_val(&env),
+                title.into_val(&env),
+                caller.clone().into_val(&env),
+            ]);
+            env.invoke_contract::<()>(
+                &board_contract,
+                &Symbol::new(&env, "edit_thread_title"),
+                title_args,
+            );
+        }
+
+        // Update body if provided
+        if let Some(body) = new_body {
+            let body_bytes = string_to_bytes(&env, &body);
+            let body_args: Vec<Val> = Vec::from_array(&env, [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                body_bytes.into_val(&env),
+                caller.into_val(&env),
+            ]);
+            env.invoke_contract::<()>(
+                &content,
+                &Symbol::new(&env, "edit_thread_body"),
+                body_args,
+            );
+        }
+    }
+
+    /// Edit a reply's content
+    pub fn edit_reply(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        new_content: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let content_bytes = string_to_bytes(&env, &new_content);
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            content_bytes.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &content,
+            &Symbol::new(&env, "edit_reply"),
+            args,
+        );
+    }
+
+    /// Flag a thread for moderation review
+    pub fn flag_thread(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reason: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reason.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &content,
+            &Symbol::new(&env, "flag_thread"),
+            args,
+        );
+    }
+
+    /// Flag a reply for moderation review
+    pub fn flag_reply(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        reason: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            reason.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &content,
+            &Symbol::new(&env, "flag_reply"),
+            args,
+        );
+    }
+
+    // ========== Admin Proxies ==========
+    // These functions proxy to the admin contract for moderation actions
+
+    /// Set flag threshold (proxies to admin contract)
+    /// Note: board_id comes as u64 (viewer heuristic: fields ending in _id -> u64)
+    /// threshold comes as String (no matching heuristic in viewer)
+    pub fn set_flag_threshold(env: Env, board_id: u64, threshold: String, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        // Parse threshold string to u32
+        let threshold_num = parse_string_to_u32(&env, &threshold);
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            threshold_num.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "set_flag_threshold"),
+            args,
+        );
+    }
+
+    /// Hide a thread (proxies to admin contract)
+    pub fn hide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "hide_thread"),
+            args,
+        );
+    }
+
+    /// Unhide a thread (proxies to admin contract)
+    pub fn unhide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "unhide_thread"),
+            args,
+        );
+    }
+
+    /// Lock a thread (proxies to admin contract)
+    pub fn lock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "lock_thread"),
+            args,
+        );
+    }
+
+    /// Unlock a thread (proxies to admin contract)
+    pub fn unlock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "unlock_thread"),
+            args,
+        );
+    }
+
+    /// Pin a thread (proxies to admin contract)
+    pub fn pin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "pin_thread"),
+            args,
+        );
+    }
+
+    /// Unpin a thread (proxies to admin contract)
+    pub fn unpin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "unpin_thread"),
+            args,
+        );
+    }
+
+    /// Delete a thread (proxies to admin contract)
+    pub fn delete_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "delete_thread"),
+            args,
+        );
+    }
+
+    /// Hide a reply (proxies to admin contract)
+    pub fn hide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "hide_reply"),
+            args,
+        );
+    }
+
+    /// Unhide a reply (proxies to admin contract)
+    pub fn unhide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "unhide_reply"),
+            args,
+        );
+    }
+
+    /// Delete a reply (proxies to admin contract)
+    pub fn delete_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "delete_reply"),
+            args,
+        );
+    }
+
+    /// Ban a user (proxies to admin contract)
+    pub fn ban_user(env: Env, board_id: u64, user: Address, reason: String, duration_hours: Option<u64>, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            reason.into_val(&env),
+            duration_hours.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "ban_user"),
+            args,
+        );
+    }
+
+    /// Unban a user (proxies to admin contract)
+    pub fn unban_user(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "unban_user"),
+            args,
+        );
+    }
+
+    /// Set a user's role (proxies to admin contract)
+    pub fn set_role(env: Env, board_id: u64, user: Address, role: u32, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            role.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "set_role"),
+            args,
+        );
+    }
+
+    /// Clear flags on content (proxies to admin contract)
+    pub fn clear_flags(env: Env, board_id: u64, thread_id: u64, reply_id: Option<u64>, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            thread_id.into_val(&env),
+            reply_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "clear_flags"),
+            args,
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1432,7 +1637,8 @@ mod test {
         let registry = Address::generate(&env);
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
-        client.init(&registry, &permissions, &content);
+        let admin = Address::generate(&env);
+        client.init(&registry, &permissions, &content, &admin);
 
         // Render help page (doesn't require external contracts)
         let help_path = String::from_str(&env, "/help");
@@ -1451,7 +1657,8 @@ mod test {
         let registry = Address::generate(&env);
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
-        client.init(&registry, &permissions, &content);
+        let admin = Address::generate(&env);
+        client.init(&registry, &permissions, &content, &admin);
 
         // Render create board form (doesn't require external contracts)
         let path = String::from_str(&env, "/create");
@@ -1471,7 +1678,8 @@ mod test {
         let registry = Address::generate(&env);
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
-        client.init(&registry, &permissions, &content);
+        let admin = Address::generate(&env);
+        client.init(&registry, &permissions, &content, &admin);
 
         let css = client.styles();
         assert!(css.len() > 0);

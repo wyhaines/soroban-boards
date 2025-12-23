@@ -190,6 +190,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "boards-admin"
+version = "0.1.0"
+dependencies = [
+ "soroban-render-sdk",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "boards-board"
 version = "0.1.0"
 dependencies = [

@@ -33,6 +33,7 @@ pub struct ContractAddresses {
     pub permissions: Address,
     pub content: Address,
     pub theme: Address,
+    pub admin: Address,
 }
 
 /// Board metadata stored in registry
@@ -61,6 +62,7 @@ impl BoardsRegistry {
         permissions: Address,
         content: Address,
         theme: Address,
+        admin_contract: Address,
     ) {
         // Only allow initialization once
         if env.storage().instance().has(&RegistryKey::Admin) {
@@ -78,6 +80,7 @@ impl BoardsRegistry {
                 permissions,
                 content,
                 theme,
+                admin: admin_contract,
             },
         );
     }
@@ -423,9 +426,10 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
         // Initialize
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         // Verify admin
         assert_eq!(client.get_admin(), admin);
@@ -460,8 +464,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
 
@@ -493,8 +498,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         // Verify initially not paused
         assert!(!client.is_paused());
@@ -521,8 +527,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         // Pause the registry
         client.set_paused(&true);
@@ -546,8 +553,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         // Try to get a board that doesn't exist
         let board = client.get_board(&999);
@@ -566,13 +574,15 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         let contracts = client.get_contracts();
         assert_eq!(contracts.permissions, permissions);
         assert_eq!(contracts.content, content);
         assert_eq!(contracts.theme, theme);
+        assert_eq!(contracts.admin, admin_contract);
     }
 
     #[test]
@@ -587,8 +597,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "Private Board");
@@ -613,8 +624,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         assert_eq!(client.board_count(), 0);
 
@@ -642,8 +654,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme);
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         // List boards when none exist
         let boards = client.list_boards(&0, &10);
