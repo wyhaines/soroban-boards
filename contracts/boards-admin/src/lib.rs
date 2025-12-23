@@ -569,6 +569,39 @@ impl BoardsAdmin {
             .newline()
             .newline();
 
+        // Get board contract for chunk size
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if let Some(board_addr) = board_contract {
+            let chunk_size: u32 = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "get_chunk_size"),
+                Vec::new(env),
+            );
+
+            md = md.h2("Display Settings")
+                .text("**Reply chunk size:** ").number(chunk_size).text(" replies per batch").newline()
+                .paragraph("Controls how many replies load at once in waterfall loading. Lower values load faster but require more scrolling.")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .input("chunk_size", "New chunk size (1-20)")
+                .newline()
+                .form_link("Update Chunk Size", "set_chunk_size")
+                .newline()
+                .newline();
+        }
+
         md = md.h2("Quick Links")
             .raw_str("[View Members](render:/b/")
             .number(board_id as u32)
@@ -1011,6 +1044,64 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &permissions,
             &Symbol::new(&env, "set_flag_threshold"),
+            args,
+        );
+    }
+
+    /// Update reply chunk size for waterfall loading (admin+)
+    pub fn set_chunk_size(
+        env: Env,
+        board_id: u64,
+        chunk_size: u32,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Validate chunk size (1-20 is reasonable range)
+        if chunk_size < 1 || chunk_size > 20 {
+            panic!("Chunk size must be between 1 and 20");
+        }
+
+        // Get board contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Set the chunk size
+        let args: Vec<Val> = Vec::from_array(&env, [
+            chunk_size.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_chunk_size"),
             args,
         );
     }

@@ -1721,6 +1721,32 @@ impl BoardsTheme {
         );
     }
 
+    /// Set reply chunk size for waterfall loading (proxies to admin contract)
+    /// Note: chunk_size comes as String from form input
+    pub fn set_chunk_size(env: Env, board_id: u64, chunk_size: String, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        // Parse chunk_size string to u32
+        let chunk_size_num = parse_string_to_u32(&env, &chunk_size);
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            chunk_size_num.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "set_chunk_size"),
+            args,
+        );
+    }
+
     /// Hide a thread (proxies to admin contract)
     pub fn hide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
