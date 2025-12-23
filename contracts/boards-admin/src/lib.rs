@@ -267,7 +267,7 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Demote button (for owner only)
-                md = md.text(" ").tx_link("[Demote]", "remove_admin", "");
+                md = md.text(" ").tx_link_to("[Demote]", "admin", "remove_admin", "");
                 md = md.newline();
             }
         }
@@ -288,7 +288,7 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Demote button (for admin+)
-                md = md.text(" ").tx_link("[Demote]", "remove_moderator", "");
+                md = md.text(" ").tx_link_to("[Demote]", "admin", "remove_moderator", "");
                 md = md.newline();
             }
         }
@@ -309,8 +309,8 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Promote/Remove buttons
-                md = md.text(" ").tx_link("[Promote to Mod]", "set_moderator", "");
-                md = md.text(" ").tx_link("[Remove]", "remove_member", "");
+                md = md.text(" ").tx_link_to("[Promote to Mod]", "admin", "set_moderator", "");
+                md = md.text(" ").tx_link_to("[Remove]", "admin", "remove_member", "");
                 md = md.newline();
             }
         }
@@ -323,11 +323,11 @@ impl BoardsAdmin {
             .raw_str("\" />\n")
             .input("user_address", "Wallet address (G...)")
             .newline()
-            .form_link("Add as Member", "add_member")
+            .form_link_to("Add as Member", "admin", "add_member")
             .text(" ")
-            .form_link("Add as Moderator", "add_moderator")
+            .form_link_to("Add as Moderator", "admin", "add_moderator")
             .text(" ")
-            .form_link("Add as Admin", "add_admin");
+            .form_link_to("Add as Admin", "admin", "add_admin");
 
         Self::render_footer_into(md).build()
     }
@@ -392,7 +392,7 @@ impl BoardsAdmin {
                 md = md.raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                     .number(board_id as u32)
                     .raw_str("\" />\n")
-                    .tx_link("Unban User", "unban_user", "")
+                    .tx_link_to("Unban User", "admin", "unban_user", "")
                     .newline();
             }
         }
@@ -409,7 +409,7 @@ impl BoardsAdmin {
             .newline()
             .input("duration_hours", "Duration (hours, 0 = permanent)")
             .newline()
-            .form_link("Ban User", "ban_user");
+            .form_link_to("Ban User", "admin", "ban_user");
 
         Self::render_footer_into(md).build()
     }
@@ -508,13 +508,13 @@ impl BoardsAdmin {
 
                 // Actions
                 if item.item_type == FlaggedType::Thread {
-                    md = md.text(" | ").tx_link("Hide Thread", "hide_thread", "");
-                    md = md.text(" | ").tx_link("Delete Thread", "delete_thread", "");
+                    md = md.text(" | ").tx_link_to("Hide Thread", "admin", "hide_thread", "");
+                    md = md.text(" | ").tx_link_to("Delete Thread", "admin", "delete_thread", "");
                 } else {
-                    md = md.text(" | ").tx_link("Hide Reply", "hide_reply", "");
-                    md = md.text(" | ").tx_link("Delete Reply", "delete_reply", "");
+                    md = md.text(" | ").tx_link_to("Hide Reply", "admin", "hide_reply", "");
+                    md = md.text(" | ").tx_link_to("Delete Reply", "admin", "delete_reply", "");
                 }
-                md = md.text(" | ").tx_link("Clear Flags", "clear_flags", "");
+                md = md.text(" | ").tx_link_to("Clear Flags", "admin", "clear_flags", "");
                 md = md.newline();
             }
         }
@@ -565,7 +565,7 @@ impl BoardsAdmin {
             .raw_str("\" />\n")
             .input("threshold", "New threshold (number)")
             .newline()
-            .form_link("Update Threshold", "set_flag_threshold")
+            .form_link_to("Update Threshold", "admin", "set_flag_threshold")
             .newline()
             .newline();
 
@@ -597,7 +597,7 @@ impl BoardsAdmin {
                 .raw_str("\" />\n")
                 .input("chunk_size", "New chunk size (1-20)")
                 .newline()
-                .form_link("Update Chunk Size", "set_chunk_size")
+                .form_link_to("Update Chunk Size", "admin", "set_chunk_size")
                 .newline()
                 .newline();
         }

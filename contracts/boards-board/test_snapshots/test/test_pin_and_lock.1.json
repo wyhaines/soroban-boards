@@ -283,6 +283,14 @@
                               "val": {
                                 "string": "General"
                               }
+                            },
+                            {
+                              "key": {
+                                "symbol": "reply_chunk_size"
+                              },
+                              "val": {
+                                "u32": 6
+                              }
                             }
                           ]
                         }

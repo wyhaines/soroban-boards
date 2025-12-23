@@ -265,6 +265,42 @@ impl BoardsRegistry {
             .expect("Not initialized")
     }
 
+    /// Get a contract address by its alias name.
+    ///
+    /// This enables the `form:@alias:method` protocol in soroban-render.
+    /// Valid aliases:
+    /// - "registry" → This registry contract
+    /// - "perms" → Permissions contract
+    /// - "content" → Content contract
+    /// - "theme" → Theme contract
+    /// - "admin" → Admin contract
+    pub fn get_contract_by_alias(env: Env, alias: Symbol) -> Option<Address> {
+        // Handle "registry" specially - return self
+        if alias == Symbol::new(&env, "registry") {
+            return Some(env.current_contract_address());
+        }
+
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)?;
+
+        // Map aliases to contract addresses
+        // Note: Using Symbol::new instead of symbol_short! for comparison
+        // since the alias comes from the viewer as a regular Symbol
+        if alias == Symbol::new(&env, "perms") {
+            Some(contracts.permissions)
+        } else if alias == Symbol::new(&env, "content") {
+            Some(contracts.content)
+        } else if alias == Symbol::new(&env, "theme") {
+            Some(contracts.theme)
+        } else if alias == Symbol::new(&env, "admin") {
+            Some(contracts.admin)
+        } else {
+            None
+        }
+    }
+
     /// Get admin address
     pub fn get_admin(env: Env) -> Address {
         env.storage()
@@ -661,5 +697,50 @@ mod test {
         // List boards when none exist
         let boards = client.list_boards(&0, &10);
         assert_eq!(boards.len(), 0);
+    }
+
+    #[test]
+    fn test_get_contract_by_alias() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        // Test each alias
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "registry")),
+            Some(contract_id)
+        );
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "perms")),
+            Some(permissions)
+        );
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "content")),
+            Some(content)
+        );
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "theme")),
+            Some(theme)
+        );
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "admin")),
+            Some(admin_contract)
+        );
+
+        // Test unknown alias
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "unknown")),
+            None
+        );
     }
 }

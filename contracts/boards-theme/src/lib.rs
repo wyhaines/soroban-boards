@@ -73,24 +73,6 @@ pub struct ReplyMeta {
     pub flag_count: u32,
 }
 
-/// Helper to parse a string to u64 (for form inputs)
-fn parse_string_to_u64(env: &Env, s: &String) -> u64 {
-    let bytes = string_to_bytes(env, s);
-    let mut result: u64 = 0;
-    for i in 0..bytes.len() {
-        let byte = bytes.get(i).unwrap();
-        if byte >= b'0' && byte <= b'9' {
-            result = result * 10 + (byte - b'0') as u64;
-        }
-    }
-    result
-}
-
-/// Helper to parse a string to u32 (for form inputs)
-fn parse_string_to_u32(env: &Env, s: &String) -> u32 {
-    parse_string_to_u64(env, s) as u32
-}
-
 /// Role levels from permissions contract
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -793,7 +775,14 @@ impl BoardsTheme {
                 .number(reply.id as u32)
                 .raw_str("/reply)")
                 .text(" ")
-                .tx_link("Flag", "flag_reply", "");
+                // Flag link targets content contract directly with args
+                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
+                .number(board_id as u32)
+                .raw_str(",\"thread_id\":")
+                .number(thread_id as u32)
+                .raw_str(",\"reply_id\":")
+                .number(reply.id as u32)
+                .raw_str(",\"reason\":\"\"})");
         }
 
         md = md.div_end();  // Close reply-meta
@@ -894,7 +883,14 @@ impl BoardsTheme {
                 .number(reply.id as u32)
                 .raw_str("/reply)")
                 .text(" ")
-                .tx_link("Flag", "flag_reply", "");
+                // Flag link targets content contract directly with args
+                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
+                .number(board_id as u32)
+                .raw_str(",\"thread_id\":")
+                .number(thread_id as u32)
+                .raw_str(",\"reply_id\":")
+                .number(reply.id as u32)
+                .raw_str(",\"reason\":\"\"})");
         }
 
         md = md.div_end();  // Close reply-meta
@@ -1190,7 +1186,14 @@ impl BoardsTheme {
                 .number(reply_id as u32)
                 .raw_str("/reply)")
                 .text(" | ")
-                .tx_link("Flag", "flag_reply", "");
+                // Flag link targets content contract directly with args
+                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
+                .number(board_id as u32)
+                .raw_str(",\"thread_id\":")
+                .number(thread_id as u32)
+                .raw_str(",\"reply_id\":")
+                .number(reply_id as u32)
+                .raw_str(",\"reason\":\"\"})");
         }
 
         Self::render_footer_into(md).build()
@@ -1207,6 +1210,11 @@ impl BoardsTheme {
             .hr()
             .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
             .build()
+    }
+
+    /// Public styles method for viewer/test access
+    pub fn styles(env: Env) -> Bytes {
+        Self::render_styles(env, None, None)
     }
 
     /// Base styles using Stellar Design System colors
@@ -1631,502 +1639,11 @@ impl BoardsTheme {
         );
     }
 
-    /// Flag a thread for moderation review
-    pub fn flag_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reason: String,
-        caller: Address,
-    ) {
-        caller.require_auth();
-
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reason.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "flag_thread"),
-            args,
-        );
-    }
-
-    /// Flag a reply for moderation review
-    pub fn flag_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reply_id: u64,
-        reason: String,
-        caller: Address,
-    ) {
-        caller.require_auth();
-
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            reason.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "flag_reply"),
-            args,
-        );
-    }
-
-    // ========== Admin Proxies ==========
-    // These functions proxy to the admin contract for moderation actions
-
-    /// Set flag threshold (proxies to admin contract)
-    /// Note: board_id comes as u64 (viewer heuristic: fields ending in _id -> u64)
-    /// threshold comes as String (no matching heuristic in viewer)
-    pub fn set_flag_threshold(env: Env, board_id: u64, threshold: String, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        // Parse threshold string to u32
-        let threshold_num = parse_string_to_u32(&env, &threshold);
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            threshold_num.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "set_flag_threshold"),
-            args,
-        );
-    }
-
-    /// Set reply chunk size for waterfall loading (proxies to admin contract)
-    /// Note: chunk_size comes as String from form input
-    pub fn set_chunk_size(env: Env, board_id: u64, chunk_size: String, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        // Parse chunk_size string to u32
-        let chunk_size_num = parse_string_to_u32(&env, &chunk_size);
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            chunk_size_num.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "set_chunk_size"),
-            args,
-        );
-    }
-
-    /// Hide a thread (proxies to admin contract)
-    pub fn hide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "hide_thread"),
-            args,
-        );
-    }
-
-    /// Unhide a thread (proxies to admin contract)
-    pub fn unhide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "unhide_thread"),
-            args,
-        );
-    }
-
-    /// Lock a thread (proxies to admin contract)
-    pub fn lock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "lock_thread"),
-            args,
-        );
-    }
-
-    /// Unlock a thread (proxies to admin contract)
-    pub fn unlock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "unlock_thread"),
-            args,
-        );
-    }
-
-    /// Pin a thread (proxies to admin contract)
-    pub fn pin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "pin_thread"),
-            args,
-        );
-    }
-
-    /// Unpin a thread (proxies to admin contract)
-    pub fn unpin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "unpin_thread"),
-            args,
-        );
-    }
-
-    /// Delete a thread (proxies to admin contract)
-    pub fn delete_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "delete_thread"),
-            args,
-        );
-    }
-
-    /// Hide a reply (proxies to admin contract)
-    pub fn hide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "hide_reply"),
-            args,
-        );
-    }
-
-    /// Unhide a reply (proxies to admin contract)
-    pub fn unhide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "unhide_reply"),
-            args,
-        );
-    }
-
-    /// Delete a reply (proxies to admin contract)
-    pub fn delete_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "delete_reply"),
-            args,
-        );
-    }
-
-    /// Ban a user (proxies to admin contract)
-    pub fn ban_user(env: Env, board_id: u64, user: Address, reason: String, duration_hours: Option<u64>, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            reason.into_val(&env),
-            duration_hours.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "ban_user"),
-            args,
-        );
-    }
-
-    /// Unban a user (proxies to admin contract)
-    pub fn unban_user(env: Env, board_id: u64, user: Address, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "unban_user"),
-            args,
-        );
-    }
-
-    /// Set a user's role (proxies to admin contract)
-    pub fn set_role(env: Env, board_id: u64, user: Address, role: u32, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            role.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "set_role"),
-            args,
-        );
-    }
-
-    /// Clear flags on content (proxies to admin contract)
-    pub fn clear_flags(env: Env, board_id: u64, thread_id: u64, reply_id: Option<u64>, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "clear_flags"),
-            args,
-        );
-    }
-
-    /// Add a user as Member (proxies to admin contract)
-    pub fn add_member(env: Env, board_id: u64, user_address: Address, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user_address.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "add_member"),
-            args,
-        );
-    }
-
-    /// Add a user as Moderator (proxies to admin contract)
-    pub fn add_moderator(env: Env, board_id: u64, user_address: Address, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user_address.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "add_moderator"),
-            args,
-        );
-    }
-
-    /// Add a user as Admin (proxies to admin contract)
-    pub fn add_admin(env: Env, board_id: u64, user_address: Address, caller: Address) {
-        caller.require_auth();
-
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user_address.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &admin,
-            &Symbol::new(&env, "add_admin"),
-            args,
-        );
-    }
+    // ========================================================================
+    // NOTE: Admin proxy methods removed - now handled via contract aliasing
+    // Forms use form:@admin:method and tx:@admin:method to target admin directly
+    // Flag links use tx:@content:flag_reply to target content directly
+    // ========================================================================
 }
 
 #[cfg(test)]
