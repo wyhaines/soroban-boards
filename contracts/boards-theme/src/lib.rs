@@ -163,6 +163,15 @@ impl BoardsTheme {
             .expect("Not initialized")
     }
 
+    /// Get chunk size for waterfall loading (defaults to 6)
+    /// This is a simple implementation that returns the default.
+    /// Board-specific chunk sizes can be added later once all boards are migrated.
+    fn get_chunk_size(_env: &Env, _board_id: u64) -> u32 {
+        // For now, return a sensible default
+        // TODO: Fetch from board contract once data migration is complete
+        6
+    }
+
     /// Main render entry point
     pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
         Router::new(&env, path.clone())
@@ -190,6 +199,28 @@ impl BoardsTheme {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
                 Self::render_reply_form(&env, board_id, thread_id, 0, &viewer)
+            })
+            // Load top-level replies batch (waterfall loading)
+            .or_handle(b"/b/{id}/t/{tid}/replies/{start}", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
+                let start = req.get_var_u32(b"start").unwrap_or(0);
+                Self::render_replies_batch(&env, board_id, thread_id, start, &viewer)
+            })
+            // Load children of a reply batch (waterfall loading)
+            .or_handle(b"/b/{id}/t/{tid}/r/{rid}/children/{start}", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
+                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
+                let start = req.get_var_u32(b"start").unwrap_or(0);
+                Self::render_children_batch(&env, board_id, thread_id, reply_id, start, &viewer)
+            })
+            // Load more children of a reply (legacy page view)
+            .or_handle(b"/b/{id}/t/{tid}/r/{rid}/children", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
+                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
+                Self::render_reply_children(&env, board_id, thread_id, reply_id, &viewer)
             })
             // Nested reply form
             .or_handle(b"/b/{id}/t/{tid}/r/{rid}/reply", |req| {
@@ -322,7 +353,8 @@ impl BoardsTheme {
 
     /// Append footer to builder
     fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.hr()
+        md.newline()  // Blank line before hr for markdown parsing
+            .hr()
             .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
     }
 
@@ -365,6 +397,10 @@ impl BoardsTheme {
             .newline()
             .textarea("description", 3, "Board description")
             .newline()
+            // Caller address for the contract (must be last to match parameter order)
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer.as_ref().unwrap().to_string())
+            .raw_str("\" />\n")
             .newline()
             .form_link("Create Board", "create_board")
             .newline()
@@ -494,6 +530,10 @@ impl BoardsTheme {
             .newline()
             .textarea("body", 10, "Write your post content here...")
             .newline()
+            // Caller address for the contract (must be last to match parameter order)
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer.as_ref().unwrap().to_string())
+            .raw_str("\" />\n")
             .newline()
             .form_link("Create Thread", "create_thread")
             .newline()
@@ -505,7 +545,7 @@ impl BoardsTheme {
         Self::render_footer_into(md).build()
     }
 
-    /// Render a thread with replies
+    /// Render a thread with replies (uses waterfall loading)
     fn render_thread(env: &Env, board_id: u64, thread_id: u64, viewer: &Option<Address>) -> Bytes {
         let content: Address = env
             .storage()
@@ -518,8 +558,10 @@ impl BoardsTheme {
             .number(board_id as u32)
             .raw_str(")")
             .newline()
-            .h1("Thread")  // In production, we'd fetch title from board contract
-            .hr();
+            .h1("Thread");  // In production, we'd fetch title from board contract
+
+        // Thread body in a container
+        md = md.div_start("thread-body");
 
         // Get thread body from content contract
         let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
@@ -530,25 +572,28 @@ impl BoardsTheme {
         );
 
         if body.len() > 0 {
-            md = md.raw(body).newline().newline();
+            md = md.raw(body);
         } else {
-            md = md.paragraph("*No content*");
+            md = md.italic("No content");
         }
 
-        md = md.hr();
+        md = md.div_end()  // Close thread-body
+            .newline();  // Blank line for markdown parsing
 
-        // Reply button
+        // Thread actions (Reply button)
         if viewer.is_some() {
-            md = md.raw_str("[Reply](render:/b/")
+            md = md.div_start("thread-actions")
+                .raw_str("[Reply to Thread](render:/b/")
                 .number(board_id as u32)
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/reply)")
-                .newline()
-                .newline();
+                .div_end()
+                .newline();  // Blank line for markdown parsing
         }
 
-        md = md.h2("Replies");
+        md = md.h2("Replies")
+            .newline();  // Ensure blank line before replies
 
         // Fetch reply count
         let reply_count: u64 = env.invoke_contract(
@@ -560,36 +605,139 @@ impl BoardsTheme {
         if reply_count == 0 {
             md = md.paragraph("No replies yet. Be the first to respond!");
         } else {
-            // Fetch top-level replies
-            let list_args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                0u32.into_val(env),
-                20u32.into_val(env),
-            ]);
-            let replies: Vec<ReplyMeta> = env.invoke_contract(
-                &content,
-                &Symbol::new(env, "list_top_level_replies"),
-                list_args,
-            );
-
-            for i in 0..replies.len() {
-                if let Some(reply) = replies.get(i) {
-                    md = Self::render_reply_item(env, md, &content, &reply, board_id, thread_id, viewer);
-                }
-            }
-
-            // Progressive loading marker if more replies exist
-            if reply_count > 20 {
-                md = md.continuation("replies", 20, Some(reply_count as u32));
-            }
+            // Use waterfall loading: embed a continuation for the first batch
+            // The viewer will automatically fetch /b/{id}/t/{tid}/replies/0
+            // which returns the first chunk of replies + continuation for next chunk
+            md = md.raw_str("{{render path=\"/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/replies/0\"}}");
         }
 
         Self::render_footer_into(md).build()
     }
 
-    /// Render a single reply item with nested children
-    fn render_reply_item<'a>(
+    /// Render a batch of top-level replies (for waterfall loading)
+    fn render_replies_batch(env: &Env, board_id: u64, thread_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let chunk_size = Self::get_chunk_size(env, board_id);
+
+        // Get total reply count
+        let count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let total_count: u64 = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "get_reply_count"),
+            count_args,
+        );
+
+        // Fetch this batch of replies
+        let list_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            start.into_val(env),
+            chunk_size.into_val(env),
+        ]);
+        let replies: Vec<ReplyMeta> = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "list_top_level_replies"),
+            list_args,
+        );
+
+        let mut md = MarkdownBuilder::new(env);
+
+        // Render each reply with child continuations (not eager loading)
+        for i in 0..replies.len() {
+            if let Some(reply) = replies.get(i) {
+                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer);
+            }
+        }
+
+        // If more replies exist, add continuation for next batch
+        let next_start = start + chunk_size;
+        if (next_start as u64) < total_count {
+            md = md.raw_str("{{render path=\"/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/replies/")
+                .number(next_start)
+                .raw_str("\"}}");
+        }
+
+        md.build()
+    }
+
+    /// Render a batch of children for a reply (for waterfall loading)
+    fn render_children_batch(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
+        let content: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Content)
+            .expect("Not initialized");
+
+        let chunk_size = Self::get_chunk_size(env, board_id);
+
+        // Get total children count
+        let count_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            parent_id.into_val(env),
+        ]);
+        let total_count: u32 = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "get_children_count"),
+            count_args,
+        );
+
+        // Fetch this batch of children
+        let list_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            parent_id.into_val(env),
+            start.into_val(env),
+            chunk_size.into_val(env),
+        ]);
+        let children: Vec<ReplyMeta> = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "list_children_replies"),
+            list_args,
+        );
+
+        let mut md = MarkdownBuilder::new(env);
+
+        // Render each child with its own child continuations
+        for i in 0..children.len() {
+            if let Some(child) = children.get(i) {
+                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer);
+            }
+        }
+
+        // If more children exist, add continuation for next batch
+        let next_start = start + chunk_size;
+        if next_start < total_count {
+            md = md.raw_str("{{render path=\"/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/r/")
+                .number(parent_id as u32)
+                .raw_str("/children/")
+                .number(next_start)
+                .raw_str("\"}}");
+        }
+
+        md.build()
+    }
+
+    /// Render a single reply with waterfall loading for children
+    /// (no eager child loading - uses render continuations)
+    fn render_reply_item_waterfall<'a>(
         env: &Env,
         mut md: MarkdownBuilder<'a>,
         content: &Address,
@@ -598,13 +746,20 @@ impl BoardsTheme {
         thread_id: u64,
         viewer: &Option<Address>,
     ) -> MarkdownBuilder<'a> {
-        // Show reply metadata
+        // Open reply container
+        md = md.div_start("reply");
+
+        // Reply content
         if reply.is_hidden {
-            md = md.blockquote("*[This reply has been hidden by a moderator]*");
+            md = md.div_start("reply-content reply-hidden")
+                .text("[This reply has been hidden by a moderator]")
+                .div_end();
         } else if reply.is_deleted {
-            md = md.blockquote("*[This reply has been deleted]*");
+            md = md.div_start("reply-content reply-deleted")
+                .text("[This reply has been deleted]")
+                .div_end();
         } else {
-            // Get reply content
+            // Get reply content from content contract
             let args: Vec<Val> = Vec::from_array(env, [
                 board_id.into_val(env),
                 thread_id.into_val(env),
@@ -616,51 +771,276 @@ impl BoardsTheme {
                 args,
             );
 
-            md = md.blockquote("").raw(content_bytes);
+            md = md.div_start("reply-content")
+                .raw(content_bytes)
+                .div_end();
         }
 
-        // Reply meta and actions
-        md = md.text("*Reply #").number(reply.id as u32).text("*");
+        // Reply metadata and actions
+        md = md.div_start("reply-meta")
+            .span_start("reply-id")
+            .text("Reply #")
+            .number(reply.id as u32)
+            .span_end();
 
         if viewer.is_some() {
-            md = md.text(" | ")
+            md = md.text(" ")
                 .raw_str("[Reply](render:/b/")
                 .number(board_id as u32)
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/r/")
                 .number(reply.id as u32)
-                .raw_str("/reply)");
-
-            md = md.text(" | ")
+                .raw_str("/reply)")
+                .text(" ")
                 .tx_link("Flag", "flag_reply", "");
         }
 
-        md = md.newline().newline();
+        md = md.div_end();  // Close reply-meta
 
-        // Fetch and render children (limited depth for performance)
-        if reply.depth < 3 {
-            let children_args: Vec<Val> = Vec::from_array(env, [
+        // Get children count
+        let count_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            reply.id.into_val(env),
+        ]);
+        let children_count: u32 = env.invoke_contract(
+            content,
+            &Symbol::new(env, "get_children_count"),
+            count_args,
+        );
+
+        // If has children, embed a continuation for them (waterfall loading)
+        if children_count > 0 {
+            md = md.raw_str("{{render path=\"/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/r/")
+                .number(reply.id as u32)
+                .raw_str("/children/0\"}}");
+        }
+
+        // Close reply container
+        md = md.div_end();
+
+        md
+    }
+
+    /// Render a single reply item with nested children
+    ///
+    /// Children are rendered INSIDE the parent div, creating true DOM nesting.
+    /// CSS handles indentation via margin-left on .reply class.
+    ///
+    /// To prevent budget exhaustion from deep nesting, we limit eager loading
+    /// to MAX_EAGER_DEPTH levels. Beyond that, a "view replies" link is shown.
+    fn render_reply_item<'a>(
+        env: &Env,
+        mut md: MarkdownBuilder<'a>,
+        content: &Address,
+        reply: &ReplyMeta,
+        board_id: u64,
+        thread_id: u64,
+        viewer: &Option<Address>,
+        depth: u32,  // Track depth for limiting recursion
+    ) -> MarkdownBuilder<'a> {
+        // Maximum depth for eager child loading (prevents budget exhaustion)
+        // Beyond this depth, show "view replies" link instead
+        const MAX_EAGER_DEPTH: u32 = 2;
+        // Open reply container - single class, nesting handles indentation
+        md = md.div_start("reply");
+
+        // Reply content
+        if reply.is_hidden {
+            md = md.div_start("reply-content reply-hidden")
+                .text("[This reply has been hidden by a moderator]")
+                .div_end();
+        } else if reply.is_deleted {
+            md = md.div_start("reply-content reply-deleted")
+                .text("[This reply has been deleted]")
+                .div_end();
+        } else {
+            // Get reply content from content contract
+            let args: Vec<Val> = Vec::from_array(env, [
                 board_id.into_val(env),
                 thread_id.into_val(env),
                 reply.id.into_val(env),
             ]);
-            let children: Vec<ReplyMeta> = env.invoke_contract(
+            let content_bytes: Bytes = env.invoke_contract(
                 content,
+                &Symbol::new(env, "get_reply_content"),
+                args,
+            );
+
+            md = md.div_start("reply-content")
+                .raw(content_bytes)
+                .div_end();
+        }
+
+        // Reply metadata and actions
+        md = md.div_start("reply-meta")
+            .span_start("reply-id")
+            .text("Reply #")
+            .number(reply.id as u32)
+            .span_end();
+
+        if viewer.is_some() {
+            md = md.text(" ")
+                .raw_str("[Reply](render:/b/")
+                .number(board_id as u32)
+                .raw_str("/t/")
+                .number(thread_id as u32)
+                .raw_str("/r/")
+                .number(reply.id as u32)
+                .raw_str("/reply)")
+                .text(" ")
+                .tx_link("Flag", "flag_reply", "");
+        }
+
+        md = md.div_end();  // Close reply-meta
+
+        // Fetch children with progressive loading
+        // Load first 5 children initially, rest via continuation
+        const CHILDREN_LIMIT: u32 = 5;
+
+        // Get total children count first
+        let count_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            reply.id.into_val(env),
+        ]);
+        let children_count: u32 = env.invoke_contract(
+            content,
+            &Symbol::new(env, "get_children_count"),
+            count_args,
+        );
+
+        if children_count > 0 {
+            // If we've hit max depth, don't eagerly load children - show link instead
+            if depth >= MAX_EAGER_DEPTH {
+                md = md.div_start("reply-more")
+                    .raw_str("[View ")
+                    .number(children_count)
+                    .raw_str(" ")
+                    .raw_str(if children_count == 1 { "reply" } else { "replies" })
+                    .raw_str("](render:/b/")
+                    .number(board_id as u32)
+                    .raw_str("/t/")
+                    .number(thread_id as u32)
+                    .raw_str("/r/")
+                    .number(reply.id as u32)
+                    .raw_str("/children)")
+                    .div_end();
+            } else {
+                // Fetch first batch of children
+                let children_args: Vec<Val> = Vec::from_array(env, [
+                    board_id.into_val(env),
+                    thread_id.into_val(env),
+                    reply.id.into_val(env),
+                    0u32.into_val(env),        // start
+                    CHILDREN_LIMIT.into_val(env),  // limit
+                ]);
+                let children: Vec<ReplyMeta> = env.invoke_contract(
+                    content,
+                    &Symbol::new(env, "list_children_replies"),
+                    children_args,
+                );
+
+                for i in 0..children.len() {
+                    if let Some(child) = children.get(i) {
+                        // Children rendered inside parent - nesting creates indentation
+                        md = Self::render_reply_item(env, md, content, &child, board_id, thread_id, viewer, depth + 1);
+                    }
+                }
+
+                // Add "load more" link if more children exist
+                if children_count > CHILDREN_LIMIT {
+                    let remaining = children_count - CHILDREN_LIMIT;
+                    md = md.div_start("reply-more")
+                        .raw_str("[Load ")
+                        .number(remaining)
+                        .raw_str(" more ")
+                        .raw_str(if remaining == 1 { "reply" } else { "replies" })
+                        .raw_str("](render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("/t/")
+                        .number(thread_id as u32)
+                        .raw_str("/r/")
+                        .number(reply.id as u32)
+                        .raw_str("/children)")
+                        .div_end();
+                }
+            }
+        }
+
+        // Close reply container AFTER children
+        md = md.div_end();
+
+        md
+    }
+
+    /// Render children of a reply (for "load more" progressive loading)
+    /// This is a dedicated page, so we have more budget - but still limit to prevent exhaustion
+    fn render_reply_children(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, viewer: &Option<Address>) -> Bytes {
+        const PAGE_LIMIT: u32 = 10;  // Max children per page
+
+        let content = Self::get_content(env.clone());
+
+        let mut md = Self::render_nav(env)
+            .raw_str("[< Back to Thread](render:/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread_id as u32)
+            .raw_str(")")
+            .newline()
+            .h2("Replies");
+
+        // Get total children count
+        let count_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            thread_id.into_val(env),
+            parent_id.into_val(env),
+        ]);
+        let children_count: u32 = env.invoke_contract(
+            &content,
+            &Symbol::new(env, "get_children_count"),
+            count_args,
+        );
+
+        if children_count == 0 {
+            md = md.paragraph("No replies found.");
+        } else {
+            // Fetch limited batch of children
+            let fetch_limit = if children_count > PAGE_LIMIT { PAGE_LIMIT } else { children_count };
+            let children_args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                parent_id.into_val(env),
+                0u32.into_val(env),
+                fetch_limit.into_val(env),
+            ]);
+            let children: Vec<ReplyMeta> = env.invoke_contract(
+                &content,
                 &Symbol::new(env, "list_children_replies"),
                 children_args,
             );
 
             for i in 0..children.len() {
                 if let Some(child) = children.get(i) {
-                    // Indent nested replies
-                    md = md.raw_str("  ");
-                    md = Self::render_reply_item(env, md, content, &child, board_id, thread_id, viewer);
+                    // Start at depth 0 - this page is the "root" context
+                    md = Self::render_reply_item(env, md, &content, &child, board_id, thread_id, viewer, 0);
                 }
+            }
+
+            // Show message if more exist
+            if children_count > PAGE_LIMIT {
+                md = md.div_start("reply-more")
+                    .paragraph("More replies exist. View the thread for full context.")
+                    .div_end();
             }
         }
 
-        md
+        Self::render_footer_into(md).build()
     }
 
     /// Render reply form
@@ -685,8 +1065,31 @@ impl BoardsTheme {
         }
 
         // Hidden inputs for board_id, thread_id, parent_id, depth
-        // Depth: 0 for top-level replies, 1 for nested (simplified)
-        let depth: u32 = if parent_id > 0 { 1 } else { 0 };
+        // Depth is parent_depth + 1, or 0 for top-level replies
+        let depth: u32 = if parent_id > 0 {
+            // Look up parent reply to get its depth
+            let content: Address = env
+                .storage()
+                .instance()
+                .get(&ThemeKey::Content)
+                .expect("Not initialized");
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                parent_id.into_val(env),
+            ]);
+            let parent_reply: Option<ReplyMeta> = env.invoke_contract(
+                &content,
+                &Symbol::new(env, "get_reply"),
+                args,
+            );
+            match parent_reply {
+                Some(reply) => reply.depth + 1,
+                None => 1, // Fallback if parent not found
+            }
+        } else {
+            0
+        };
         md = md
             // Redirect to thread view after posting reply
             .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
@@ -709,6 +1112,10 @@ impl BoardsTheme {
             .raw_str("\" />\n")
             .textarea("content_str", 6, "Write your reply...")
             .newline()
+            // Caller address for the contract (must be last to match parameter order)
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer.as_ref().unwrap().to_string())
+            .raw_str("\" />\n")
             .newline()
             .form_link("Post Reply", "create_reply")
             .newline()
@@ -803,7 +1210,9 @@ impl BoardsTheme {
     }
 
     /// Base styles using Stellar Design System colors
-    pub fn styles(env: Env) -> Bytes {
+    /// Named render_styles to follow the render_* convention for routable content
+    /// Accepts path/viewer for consistency with render_* convention (unused here)
+    pub fn render_styles(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         StyleBuilder::new(&env)
             .root_vars_start()
             // Primary colors (Stellar lilac)
@@ -850,11 +1259,20 @@ impl BoardsTheme {
             .rule(".thread-item", "padding: var(--space-md); border-bottom: 1px solid var(--border);")
             .rule(".thread-title", "font-weight: 600; color: var(--text);")
             .rule(".thread-meta", "color: var(--text-muted); font-size: 0.875rem;")
-            // Replies - responsive nesting
-            .rule(".reply", "margin-left: var(--space-lg); padding: var(--space-sm); border-left: 2px solid var(--border);")
-            .rule(".reply-nested", "margin-left: var(--space-md);")
-            // Blockquotes (for replies)
-            .rule("blockquote", "margin: 0 0 var(--space-md) 0; padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--primary); background: var(--bg-muted);")
+            // Thread content
+            .rule(".thread-body", "margin-bottom: var(--space-lg);")
+            .rule(".thread-actions", "display: flex; gap: var(--space-md); margin-bottom: var(--space-lg);")
+            // Reply containers - top-level has no indent, nested replies indent via .reply .reply
+            .rule(".reply", "margin-bottom: var(--space-sm); padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--primary); background: var(--bg-muted); border-radius: 0 4px 4px 0;")
+            .rule(".reply .reply", "margin-left: var(--space-lg);")
+            .rule(".reply-content", "margin-bottom: var(--space-xs);")
+            .rule(".reply-meta", "font-size: 0.875rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center;")
+            .rule(".reply-hidden, .reply-deleted", "font-style: italic; color: var(--text-muted);")
+            .rule(".reply-more", "margin-top: var(--space-sm); padding: var(--space-xs) 0; font-size: 0.875rem;")
+            .rule(".reply-more a", "color: var(--primary); text-decoration: none;")
+            .rule(".reply-more a:hover", "text-decoration: underline;")
+            // Blockquotes (general)
+            .rule("blockquote", "margin: 0 0 var(--space-md) 0; padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--border); background: var(--bg-muted);")
             // Forms
             .rule("input, textarea", "width: 100%; padding: var(--space-sm); border: 1px solid var(--border); border-radius: 4px; font-size: 1rem; background: var(--bg);")
             .rule("input:focus, textarea:focus", "outline: none; border-color: var(--primary);")
@@ -911,8 +1329,7 @@ impl BoardsTheme {
             .rule("h1", "font-size: 1.5rem;")
             .rule("h2", "font-size: 1.25rem;")
             .rule("h3", "font-size: 1.125rem;")
-            .rule(".reply", "margin-left: var(--space-sm);")
-            .rule(".reply-nested", "margin-left: var(--space-xs);")
+            .rule(".reply .reply", "margin-left: var(--space-md);")  // Smaller indent on mobile
             .rule("blockquote", "padding: var(--space-xs) var(--space-sm);")
             .rule(".nav", "font-size: 0.875rem;")
             .media_end()
@@ -920,7 +1337,7 @@ impl BoardsTheme {
             .media_start("(max-width: 375px)")
             .rule("body", "font-size: 0.9375rem;")
             .rule("h1", "font-size: 1.25rem;")
-            .rule(".reply", "margin-left: var(--space-xs);")
+            .rule(".reply .reply", "margin-left: var(--space-sm);")  // Even smaller on tiny screens
             .media_end()
             .build()
     }

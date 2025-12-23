@@ -48,6 +48,8 @@ pub struct BoardConfig {
     pub is_private: bool,
     pub is_readonly: bool,
     pub max_reply_depth: u32,
+    /// Number of replies to load per chunk in waterfall loading (default: 6)
+    pub reply_chunk_size: u32,
 }
 
 #[contract]
@@ -90,6 +92,7 @@ impl BoardsBoard {
                 is_private,
                 is_readonly: false,
                 max_reply_depth: 10,
+                reply_chunk_size: 6,  // Default: 6 replies per chunk
             },
         );
     }
@@ -150,6 +153,62 @@ impl BoardsBoard {
             .instance()
             .get(&BoardKey::Config)
             .expect("Not initialized")
+    }
+
+    /// Get reply chunk size for waterfall loading
+    pub fn get_chunk_size(env: Env) -> u32 {
+        let config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        // Handle old configs that don't have this field (default to 6)
+        if config.reply_chunk_size == 0 {
+            6
+        } else {
+            config.reply_chunk_size
+        }
+    }
+
+    /// Set reply chunk size (must be >= 1, owner/admin only)
+    pub fn set_chunk_size(env: Env, size: u32, caller: Address) {
+        caller.require_auth();
+
+        if size < 1 {
+            panic!("Chunk size must be at least 1");
+        }
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can change chunk size");
+            }
+        }
+
+        let mut config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        config.reply_chunk_size = size;
+        env.storage().instance().set(&BoardKey::Config, &config);
     }
 
     /// Create a new thread (returns thread ID)

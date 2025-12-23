@@ -403,8 +403,8 @@ impl BoardsContent {
         replies
     }
 
-    /// List child replies of a specific reply
-    pub fn list_children_replies(env: Env, board_id: u64, thread_id: u64, parent_id: u64) -> Vec<ReplyMeta> {
+    /// List child replies of a specific reply with pagination
+    pub fn list_children_replies(env: Env, board_id: u64, thread_id: u64, parent_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
         let child_ids: Vec<u64> = env
             .storage()
             .persistent()
@@ -412,8 +412,10 @@ impl BoardsContent {
             .unwrap_or(Vec::new(&env));
 
         let mut replies = Vec::new(&env);
+        let total = child_ids.len();
+        let end = core::cmp::min(start + limit, total);
 
-        for i in 0..child_ids.len() {
+        for i in start..end {
             let reply_id = child_ids.get(i).unwrap();
             if let Some(reply) = env
                 .storage()
@@ -1402,8 +1404,8 @@ mod test {
             client.create_reply(&0, &0, &parent_id, &1, &content, &author);
         }
 
-        // List children
-        let children = client.list_children_replies(&0, &0, &parent_id);
+        // List children (with pagination)
+        let children = client.list_children_replies(&0, &0, &parent_id, &0, &100);
         assert_eq!(children.len(), 3);
 
         // All children should have parent_id set correctly
