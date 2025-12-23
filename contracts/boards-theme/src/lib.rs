@@ -1618,6 +1618,72 @@ impl BoardsTheme {
             args,
         );
     }
+
+    /// Add a user as Member (proxies to admin contract)
+    pub fn add_member(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user_address.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "add_member"),
+            args,
+        );
+    }
+
+    /// Add a user as Moderator (proxies to admin contract)
+    pub fn add_moderator(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user_address.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "add_moderator"),
+            args,
+        );
+    }
+
+    /// Add a user as Admin (proxies to admin contract)
+    pub fn add_admin(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        caller.require_auth();
+
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Admin)
+            .expect("Admin contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user_address.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &admin,
+            &Symbol::new(&env, "add_admin"),
+            args,
+        );
+    }
 }
 
 #[cfg(test)]

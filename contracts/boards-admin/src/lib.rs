@@ -621,12 +621,28 @@ impl BoardsAdmin {
             board_id.into_val(&env),
             user.into_val(&env),
             role.into_val(&env),
+            caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
             &permissions,
             &Symbol::new(&env, "set_role"),
             args,
         );
+    }
+
+    /// Add a user as Member (convenience function for forms)
+    pub fn add_member(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        Self::set_role(env, board_id, user_address, Role::Member, caller);
+    }
+
+    /// Add a user as Moderator (convenience function for forms)
+    pub fn add_moderator(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        Self::set_role(env, board_id, user_address, Role::Moderator, caller);
+    }
+
+    /// Add a user as Admin (convenience function for forms)
+    pub fn add_admin(env: Env, board_id: u64, user_address: Address, caller: Address) {
+        Self::set_role(env, board_id, user_address, Role::Admin, caller);
     }
 
     /// Ban a user from a board (moderator+)
@@ -665,12 +681,13 @@ impl BoardsAdmin {
         };
 
         // Ban the user
+        // Permissions expects: (board_id, user, reason, duration_hours, caller)
         let args: Vec<Val> = Vec::from_array(&env, [
             board_id.into_val(&env),
             user.into_val(&env),
             reason.into_val(&env),
-            caller.clone().into_val(&env),
             expires_at.into_val(&env),
+            caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
             &permissions,
@@ -709,6 +726,7 @@ impl BoardsAdmin {
         let args: Vec<Val> = Vec::from_array(&env, [
             board_id.into_val(&env),
             user.into_val(&env),
+            caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
             &permissions,
