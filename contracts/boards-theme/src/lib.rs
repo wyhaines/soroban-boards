@@ -258,9 +258,9 @@ impl BoardsTheme {
     /// Render the home page with board list
     fn render_home(env: &Env, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar div for markdown parsing
             .h1("Soroban Boards")
-            .paragraph("*Decentralized discussion forums on Stellar*")
-            .hr();
+            .paragraph("Decentralized discussion forums on Stellar");
 
         // Show connection status
         if viewer.is_some() {
@@ -269,7 +269,8 @@ impl BoardsTheme {
             md = md.note("Connect your wallet to participate in discussions.");
         }
 
-        md = md.newline().h2("Boards");
+        md = md.h2("Boards")
+            .newline();
 
         // Fetch boards from registry
         if let Some(registry) = env.storage().instance().get::<_, Address>(&ThemeKey::Registry) {
@@ -291,25 +292,26 @@ impl BoardsTheme {
                     args,
                 );
 
+                md = md.raw_str("<div class=\"board-list\">\n");
                 for i in 0..boards.len() {
                     if let Some(board) = boards.get(i) {
-                        // Format: **[Board Name](/b/0)** - Description (X threads)
-                        md = md.raw_str("**[")
-                            .text_string(&board.name)
-                            .raw_str("](render:/b/")
+                        // Board card with link wrapper
+                        md = md.raw_str("<a href=\"render:/b/")
                             .number(board.id as u32)
-                            .raw_str(")**")
-                            .text(" - ")
+                            .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
+                            .text_string(&board.name)
+                            .raw_str("</span><span class=\"board-card-desc\">")
                             .text_string(&board.description)
-                            .text(" (")
+                            .raw_str("</span><span class=\"board-card-meta\">")
                             .number(board.thread_count as u32)
-                            .text(" threads)");
+                            .text(" threads");
                         if board.is_private {
-                            md = md.text(" ").italic("[private]");
+                            md = md.raw_str(" <span class=\"badge\">private</span>");
                         }
-                        md = md.newline().newline();
+                        md = md.raw_str("</span></a>\n");
                     }
                 }
+                md = md.raw_str("</div>\n");
             }
         } else {
             md = md.warning("Registry not configured");
@@ -317,7 +319,6 @@ impl BoardsTheme {
 
         md = md.newline()
             .render_link("+ Create New Board", "/create")
-            .newline()
             .newline();
 
         Self::render_footer_into(md).build()
@@ -326,34 +327,37 @@ impl BoardsTheme {
     /// Render the navigation bar
     fn render_nav(env: &Env) -> MarkdownBuilder<'_> {
         MarkdownBuilder::new(env)
+            .div_start("nav-bar")
             .render_link("Soroban Boards", "/")
-            .text(" | ")
             .render_link("Help", "/help")
-            .newline()
-            .hr()
+            .div_end()
     }
 
     /// Append footer to builder
     fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.newline()  // Blank line before hr for markdown parsing
-            .hr()
-            .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
+        md.div_start("footer")
+            .text("Powered by ")
+            .link("Soroban Render", "https://github.com/wyhaines/soroban-render")
+            .text(" on ")
+            .link("Stellar", "https://stellar.org")
+            .div_end()
     }
 
     /// Render help page
     fn render_help(env: &Env) -> Bytes {
         let md = Self::render_nav(env)
-            .h1("Help")
-            .h2("What is Soroban Boards?")
+            .newline()  // Blank line after nav-bar for markdown parsing
+            .raw_str("<h1>Help</h1>\n")  // Use raw HTML for reliable rendering
+            .raw_str("<h2>What is Soroban Boards?</h2>\n")
             .paragraph("Soroban Boards is a decentralized forum system running on Stellar's Soroban smart contract platform. All content is stored on-chain, and the UI is rendered directly from the smart contracts.")
-            .h2("Features")
+            .raw_str("<h2>Features</h2>\n")
             .list_item("Create discussion boards")
             .list_item("Post threads and replies")
             .list_item("Nested comment threads")
             .list_item("Role-based permissions (Owner, Admin, Moderator, Member)")
             .list_item("Content moderation (flagging, banning)")
             .list_item("Progressive loading for large threads")
-            .h2("How to Use")
+            .raw_str("<h2>How to Use</h2>\n")
             .list_item("Connect your Stellar wallet")
             .list_item("Browse existing boards or create a new one")
             .list_item("Create threads and reply to discussions")
@@ -418,29 +422,31 @@ impl BoardsTheme {
 
         let mut md = Self::render_nav(env)
             .render_link("< Back", "/")
-            .newline()
-            .raw_str("# ")
+            .div_start("page-header")
+            .raw_str("<h1>")
             .text_string(&board.name)
-            .newline()
-            .newline()
+            .raw_str("</h1>")
+            .raw_str("<p>")
             .text_string(&board.description)
-            .newline()
-            .hr();
-
-        // Show create thread button if logged in
-        if viewer.is_some() && !board.is_readonly {
-            md = md.raw_str("[+ New Thread](render:/b/")
-                .number(board_id as u32)
-                .raw_str("/new)")
-                .newline()
-                .newline();
-        }
+            .raw_str("</p>")
+            .div_end()
+            .newline();  // Blank line after page-header for markdown parsing
 
         if board.is_readonly {
             md = md.note("This board is read-only.");
         }
 
-        md = md.h2("Threads");
+        // Show create thread button if logged in
+        if viewer.is_some() && !board.is_readonly {
+            md = md.raw_str("<a href=\"render:/b/")
+                .number(board_id as u32)
+                .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
+                .newline();
+        }
+
+        // Use raw HTML for h2 since markdown parsing after HTML blocks can be unreliable
+        md = md.raw_str("<h2>Threads</h2>\n")
+            .div_start("thread-list");
 
         // Fetch board contract address from registry
         let board_contract_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
@@ -460,25 +466,32 @@ impl BoardsTheme {
             );
 
             if threads.is_empty() {
-                md = md.paragraph("No threads yet. Be the first to post!");
+                md = md.div_end()  // close thread-list
+                    .paragraph("No threads yet. Be the first to post!");
             } else {
                 for i in 0..threads.len() {
                     let thread = threads.get(i).unwrap();
-                    // Thread link: /b/{board_id}/t/{thread_id}
-                    md = md.raw_str("- **[")
-                        .text_string(&thread.title)
-                        .raw_str("](render:/b/")
+                    // Thread item with link
+                    md = md.div_start("thread-item")
+                        .raw_str("<a href=\"render:/b/")
                         .number(board_id as u32)
                         .raw_str("/t/")
                         .number(thread.id as u32)
-                        .raw_str(")** - ")
+                        .raw_str("\" class=\"thread-title\">")
+                        .text_string(&thread.title)
+                        .raw_str("</a>")
+                        .div_start("thread-meta")
                         .number(thread.reply_count)
-                        .raw_str(" replies\n");
+                        .text(" replies")
+                        .div_end()
+                        .div_end();  // close thread-item
                 }
+                md = md.div_end();  // close thread-list
             }
         } else {
             // No board contract registered yet
-            md = md.paragraph("No threads yet. Be the first to post!");
+            md = md.div_end()  // close thread-list
+                .paragraph("No threads yet. Be the first to post!");
         }
 
         Self::render_footer_into(md).build()
@@ -536,11 +549,12 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("[< Back to Board](render:/b/")
             .number(board_id as u32)
             .raw_str(")")
             .newline()
-            .h1("Thread");  // In production, we'd fetch title from board contract
+            .raw_str("<h1>Thread</h1>\n");  // Use raw HTML for reliable rendering
 
         // Thread body in a container
         md = md.div_start("thread-body");
@@ -574,8 +588,8 @@ impl BoardsTheme {
                 .newline();  // Blank line for markdown parsing
         }
 
-        md = md.h2("Replies")
-            .newline();  // Ensure blank line before replies
+        // Use raw HTML for h2 since markdown parsing after HTML blocks can be unreliable
+        md = md.raw_str("<h2>Replies</h2>\n");
 
         // Fetch reply count
         let reply_count: u64 = env.invoke_contract(
@@ -983,13 +997,14 @@ impl BoardsTheme {
         let content = Self::get_content(env.clone());
 
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
             .newline()
-            .h2("Replies");
+            .raw_str("<h2>Replies</h2>\n");  // Use raw HTML for reliable rendering
 
         // Get total children count
         let count_args: Vec<Val> = Vec::from_array(env, [
@@ -1042,17 +1057,20 @@ impl BoardsTheme {
     /// Render reply form
     fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
-            .newline();
+            .newline()
+            .newline();  // Blank line before h1 for markdown parsing
 
+        // Use raw HTML for headings to ensure reliable rendering after HTML blocks
         if parent_id > 0 {
-            md = md.h1("Reply to Comment");
+            md = md.raw_str("<h1>Reply to Comment</h1>\n");
         } else {
-            md = md.h1("Reply to Thread");
+            md = md.raw_str("<h1>Reply to Thread</h1>\n");
         }
 
         if viewer.is_none() {
@@ -1134,16 +1152,16 @@ impl BoardsTheme {
             .expect("Not initialized");
 
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
             .newline()
-            .raw_str("# Reply #")
+            .raw_str("<h1>Reply #")
             .number(reply_id as u32)
-            .newline()
-            .hr();
+            .raw_str("</h1>\n");
 
         // Fetch reply metadata
         let args: Vec<Val> = Vec::from_array(env, [
@@ -1172,28 +1190,30 @@ impl BoardsTheme {
                 &Symbol::new(env, "get_reply_content"),
                 args,
             );
-            md = md.raw(content_bytes).newline().newline();
+            md = md.div_start("thread-body")
+                .raw(content_bytes)
+                .div_end();
         }
 
         // Actions
         if viewer.is_some() {
-            md = md.hr()
-                .raw_str("[Reply](render:/b/")
+            md = md.div_start("actions")
+                .raw_str("<a href=\"render:/b/")
                 .number(board_id as u32)
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/r/")
                 .number(reply_id as u32)
-                .raw_str("/reply)")
-                .text(" | ")
+                .raw_str("/reply\" class=\"action-btn\">Reply</a>")
                 // Flag link targets content contract directly with args
-                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
+                .raw_str("<a href=\"tx:@content:flag_reply {&quot;board_id&quot;:")
                 .number(board_id as u32)
-                .raw_str(",\"thread_id\":")
+                .raw_str(",&quot;thread_id&quot;:")
                 .number(thread_id as u32)
-                .raw_str(",\"reply_id\":")
+                .raw_str(",&quot;reply_id&quot;:")
                 .number(reply_id as u32)
-                .raw_str(",\"reason\":\"\"})");
+                .raw_str(",&quot;reason&quot;:&quot;&quot;}\" class=\"action-btn action-btn-secondary\">Flag</a>")
+                .div_end();
         }
 
         Self::render_footer_into(md).build()
@@ -1231,7 +1251,7 @@ impl BoardsTheme {
             .var("text-muted", "#6f6f6f")
             // Background colors
             .var("bg", "#ffffff")
-            .var("bg-muted", "#f3f3f3")
+            .var("bg-muted", "#f7f7f7")
             // Border
             .var("border", "#e2e2e2")
             // Status colors
@@ -1245,81 +1265,108 @@ impl BoardsTheme {
             .var("space-lg", "1.5rem")
             .var("space-xl", "2rem")
             // Container max width
-            .var("container-max", "48rem")
+            .var("container-max", "52rem")
             .root_vars_end()
             // Base styles
             .rule("*", "box-sizing: border-box;")
-            .rule("body", "font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); background: var(--bg); line-height: 1.6; margin: 0; padding: var(--space-md);")
-            // Container
-            .rule(".container", "max-width: var(--container-max); margin: 0 auto; padding: 0 var(--space-md);")
+            // Apply max-width to the soroban-render root container
+            .rule(".soroban-render", "max-width: var(--container-max); margin: 0 auto; padding: var(--space-md); font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); background: var(--bg); line-height: 1.6;")
+            .rule("body", "font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: var(--text); background: var(--bg); line-height: 1.6; margin: 0; padding: 0;")
             // Typography
-            .rule("h1", "font-size: 1.875rem; font-weight: 600; margin: 0 0 var(--space-md) 0; word-wrap: break-word;")
-            .rule("h2", "font-size: 1.5rem; font-weight: 600; margin: var(--space-xl) 0 var(--space-md) 0;")
-            .rule("h3", "font-size: 1.25rem; font-weight: 600; margin: var(--space-lg) 0 var(--space-sm) 0;")
+            .rule("h1", "font-size: 1.75rem; font-weight: 600; margin: 0 0 var(--space-sm) 0; word-wrap: break-word;")
+            .rule("h2", "font-size: 1.375rem; font-weight: 600; margin: var(--space-lg) 0 var(--space-md) 0;")
+            .rule("h3", "font-size: 1.125rem; font-weight: 600; margin: var(--space-md) 0 var(--space-sm) 0;")
             .rule("p", "margin: 0 0 var(--space-md) 0;")
-            // Links
+            // Links - inline links styled subtly
             .rule("a", "color: var(--primary); text-decoration: none;")
             .rule("a:hover", "color: var(--primary-hover); text-decoration: underline;")
+            // Action links styled as buttons
+            .rule("a.action-btn", "display: inline-block; background: var(--primary); color: white; padding: var(--space-xs) var(--space-sm); border-radius: 4px; font-size: 0.875rem; text-decoration: none;")
+            .rule("a.action-btn:hover", "background: var(--primary-hover); text-decoration: none;")
+            .rule("a.action-btn-secondary", "background: var(--bg-muted); color: var(--text); border: 1px solid var(--border);")
+            .rule("a.action-btn-secondary:hover", "background: var(--border);")
             // Code
             .rule("code", "font-family: 'Inconsolata', 'Monaco', monospace; background: var(--bg-muted); padding: 0.15rem 0.4rem; border-radius: 4px; word-break: break-all;")
             .rule("pre", "overflow-x: auto; padding: var(--space-md); background: var(--bg-muted); border-radius: 4px;")
-            // Thread items
-            .rule(".thread-item", "padding: var(--space-md); border-bottom: 1px solid var(--border);")
+            // Navigation bar
+            .rule(".nav-bar", "display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; padding: var(--space-sm) 0; margin-bottom: var(--space-md);")
+            .rule(".nav-bar a", "padding: var(--space-xs) var(--space-sm); background: var(--bg-muted); border-radius: 4px; font-size: 0.875rem;")
+            .rule(".nav-bar a:hover", "background: var(--border); text-decoration: none;")
+            // Page header
+            .rule(".page-header", "margin-bottom: var(--space-lg);")
+            .rule(".page-header h1", "margin-bottom: var(--space-xs);")
+            .rule(".page-header p", "color: var(--text-muted); margin: 0;")
+            // Board cards - use a.board-card for higher specificity over viewer's a.soroban-action
+            .rule(".board-list", "display: flex; flex-direction: column; gap: var(--space-sm);")
+            .rule("a.board-card", "display: flex !important; flex-direction: column; align-items: flex-start !important; background: var(--bg) !important; color: var(--text) !important; border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md) !important; transition: border-color 0.15s, box-shadow 0.15s; text-decoration: none !important;")
+            .rule("a.board-card:hover", "border-color: var(--primary); box-shadow: 0 2px 8px rgba(120, 87, 225, 0.1); text-decoration: none !important; background: var(--bg) !important;")
+            .rule(".board-card-title", "display: block; font-weight: 600; color: var(--text); margin-bottom: var(--space-xs); text-align: left;")
+            .rule(".board-card-desc", "display: block; color: var(--text-muted); font-size: 0.9375rem; margin-bottom: var(--space-xs); text-align: left;")
+            .rule(".board-card-meta", "display: block; font-size: 0.8125rem; color: var(--text-muted); text-align: left;")
+            .rule(".board-card-meta .badge", "margin-left: var(--space-xs);")
+            // Thread list
+            .rule(".thread-list", "display: flex; flex-direction: column; gap: 0;")
+            .rule(".thread-item", "padding: var(--space-md) 0; border-bottom: 1px solid var(--border);")
+            .rule(".thread-item:first-child", "padding-top: 0;")
             .rule(".thread-title", "font-weight: 600; color: var(--text);")
-            .rule(".thread-meta", "color: var(--text-muted); font-size: 0.875rem;")
+            .rule(".thread-meta", "color: var(--text-muted); font-size: 0.875rem; margin-top: var(--space-xs);")
             // Thread content
-            .rule(".thread-body", "margin-bottom: var(--space-lg);")
-            .rule(".thread-actions", "display: flex; gap: var(--space-md); margin-bottom: var(--space-lg);")
-            // Reply containers - top-level has no indent, nested replies indent via .reply .reply
+            .rule(".thread-body", "margin-bottom: var(--space-lg); padding: var(--space-md); background: var(--bg-muted); border-radius: 6px;")
+            .rule(".thread-actions", "display: flex; gap: var(--space-sm); margin-bottom: var(--space-lg);")
+            // Reply containers
             .rule(".reply", "margin-bottom: var(--space-sm); padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--primary); background: var(--bg-muted); border-radius: 0 4px 4px 0;")
             .rule(".reply .reply", "margin-left: var(--space-lg);")
             .rule(".reply-content", "margin-bottom: var(--space-xs);")
-            .rule(".reply-meta", "font-size: 0.875rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center;")
+            .rule(".reply-meta", "font-size: 0.8125rem; color: var(--text-muted); display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center;")
+            .rule(".reply-meta a", "padding: var(--space-xs) var(--space-sm); background: var(--primary); color: white; border-radius: 4px; font-size: 0.75rem;")
+            .rule(".reply-meta a:hover", "background: var(--primary-hover); text-decoration: none;")
             .rule(".reply-hidden, .reply-deleted", "font-style: italic; color: var(--text-muted);")
             .rule(".reply-more", "margin-top: var(--space-sm); padding: var(--space-xs) 0; font-size: 0.875rem;")
             .rule(".reply-more a", "color: var(--primary); text-decoration: none;")
             .rule(".reply-more a:hover", "text-decoration: underline;")
-            // Blockquotes (general)
-            .rule("blockquote", "margin: 0 0 var(--space-md) 0; padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--border); background: var(--bg-muted);")
+            // Blockquotes (alerts)
+            .rule("blockquote", "margin: 0 0 var(--space-md) 0; padding: var(--space-sm) var(--space-md); border-left: 3px solid var(--border); background: var(--bg-muted); border-radius: 0 4px 4px 0;")
             // Forms
+            .rule(".form-group", "margin-bottom: var(--space-md);")
             .rule("input, textarea", "width: 100%; padding: var(--space-sm); border: 1px solid var(--border); border-radius: 4px; font-size: 1rem; background: var(--bg);")
             .rule("input:focus, textarea:focus", "outline: none; border-color: var(--primary);")
             .rule("textarea", "resize: vertical; min-height: 100px;")
             // Buttons
-            .rule("button, .btn", "background: var(--primary); color: white; padding: var(--space-sm) var(--space-md); border: none; border-radius: 4px; cursor: pointer; font-size: 1rem;")
+            .rule("button, .btn", "display: inline-block; background: var(--primary); color: white; padding: var(--space-sm) var(--space-md); border: none; border-radius: 4px; cursor: pointer; font-size: 0.9375rem;")
             .rule("button:hover, .btn:hover", "background: var(--primary-hover);")
-            .rule(".btn-secondary", "background: var(--bg-muted); color: var(--text);")
+            .rule(".btn-secondary", "background: var(--bg-muted); color: var(--text); border: 1px solid var(--border);")
             .rule(".btn-secondary:hover", "background: var(--border);")
-            // Alerts/Notices
-            .rule(".alert", "padding: var(--space-md); border-radius: 4px; margin-bottom: var(--space-md);")
+            // Alerts/Notices - make them more subtle
+            .rule(".alert", "padding: var(--space-sm) var(--space-md); border-radius: 4px; margin-bottom: var(--space-md); font-size: 0.9375rem;")
             .rule(".alert-success", "background: #d3f9d8; color: #1e7a34;")
             .rule(".alert-warning", "background: #fff3bf; color: #946c00;")
             .rule(".alert-danger", "background: #ffd8d8; color: #c41d1d;")
             .rule(".alert-info", "background: #e8e4fd; color: #5c4bad;")
-            // Navigation
-            .rule(".nav", "display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; padding: var(--space-md) 0; border-bottom: 1px solid var(--border);")
-            // Cards/Boards
-            .rule(".card", "background: var(--bg); border: 1px solid var(--border); border-radius: 4px; padding: var(--space-md); margin-bottom: var(--space-md);")
-            // Horizontal rule
-            .rule("hr", "border: none; border-top: 1px solid var(--border); margin: var(--space-lg) 0;")
+            // Horizontal rule - use sparingly
+            .rule("hr", "border: none; border-top: 1px solid var(--border); margin: var(--space-md) 0;")
             // Lists
             .rule("ul, ol", "padding-left: var(--space-lg); margin: 0 0 var(--space-md) 0;")
             .rule("li", "margin-bottom: var(--space-xs);")
-            // Action links
+            // Action links row
             .rule(".actions", "display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.875rem;")
             // Badge/Tag
             .rule(".badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--bg-muted); border-radius: 9999px; font-size: 0.75rem;")
             .rule(".badge-pinned", "background: #ffeeba; color: #856404;")
             .rule(".badge-locked", "background: #f8d7da; color: #721c24;")
+            // Section spacing
+            .rule(".section", "margin-bottom: var(--space-lg);")
+            // Footer
+            .rule(".footer", "margin-top: var(--space-xl); padding-top: var(--space-md); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.875rem;")
             // Dark mode
             .dark_mode_start()
             .rule_start(":root")
             .prop("--text", "#e0e0e0")
             .prop("--text-muted", "#a0a0a0")
             .prop("--bg", "#0f0f0f")
-            .prop("--bg-muted", "#1c1c1c")
+            .prop("--bg-muted", "#1a1a1a")
             .prop("--border", "#3e3e3e")
             .rule_end()
+            .rule(".board-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
             .rule(".alert-success", "background: #1e3a28; color: #6fdd8b;")
             .rule(".alert-warning", "background: #3a3019; color: #ffd859;")
             .rule(".alert-danger", "background: #3a1c1c; color: #ff8080;")
@@ -1333,19 +1380,26 @@ impl BoardsTheme {
             .prop("--space-lg", "1rem")
             .prop("--space-xl", "1.5rem")
             .rule_end()
-            .rule("body", "padding: var(--space-sm);")
-            .rule("h1", "font-size: 1.5rem;")
-            .rule("h2", "font-size: 1.25rem;")
-            .rule("h3", "font-size: 1.125rem;")
-            .rule(".reply .reply", "margin-left: var(--space-md);")  // Smaller indent on mobile
+            .rule(".soroban-render", "padding: var(--space-sm);")
+            .rule("h1", "font-size: 1.375rem;")
+            .rule("h2", "font-size: 1.125rem;")
+            .rule("h3", "font-size: 1rem;")
+            .rule(".reply .reply", "margin-left: var(--space-md);")
+            .rule(".reply-meta a", "padding: 0.125rem var(--space-xs); font-size: 0.6875rem;")
             .rule("blockquote", "padding: var(--space-xs) var(--space-sm);")
-            .rule(".nav", "font-size: 0.875rem;")
+            .rule(".nav-bar", "font-size: 0.8125rem;")
+            .rule(".nav-bar a", "padding: var(--space-xs);")
+            .rule(".board-card", "padding: var(--space-sm);")
+            .rule(".thread-body", "padding: var(--space-sm);")
+            .rule("button, .btn", "padding: var(--space-xs) var(--space-sm); font-size: 0.875rem;")
             .media_end()
             // Very small screens
             .media_start("(max-width: 375px)")
-            .rule("body", "font-size: 0.9375rem;")
+            .rule(".soroban-render", "font-size: 0.9375rem;")
             .rule("h1", "font-size: 1.25rem;")
-            .rule(".reply .reply", "margin-left: var(--space-sm);")  // Even smaller on tiny screens
+            .rule(".reply .reply", "margin-left: var(--space-sm);")
+            .rule(".reply-meta", "gap: var(--space-xs);")
+            .rule(".reply-meta a", "padding: 0.125rem 0.25rem;")
             .media_end()
             .build()
     }
