@@ -180,7 +180,7 @@ impl BoardsTheme {
             .or_handle(b"/b/{id}/t/{tid}/reply", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                Self::render_reply_form(&env, board_id, thread_id, 0, &viewer)
+                Self::render_reply_form(&env, board_id, thread_id, None, &viewer)
             })
             // Load top-level replies batch (waterfall loading)
             .or_handle(b"/b/{id}/t/{tid}/replies/{start}", |req| {
@@ -209,7 +209,7 @@ impl BoardsTheme {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
                 let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
-                Self::render_reply_form(&env, board_id, thread_id, reply_id, &viewer)
+                Self::render_reply_form(&env, board_id, thread_id, Some(reply_id), &viewer)
             })
             // Single reply view
             .or_handle(b"/b/{id}/t/{tid}/r/{rid}", |req| {
@@ -471,20 +471,24 @@ impl BoardsTheme {
             } else {
                 for i in 0..threads.len() {
                     let thread = threads.get(i).unwrap();
-                    // Thread item with link
-                    md = md.div_start("thread-item")
-                        .raw_str("<a href=\"render:/b/")
+                    // Thread card with link wrapper (similar to board cards)
+                    md = md.raw_str("<a href=\"render:/b/")
                         .number(board_id as u32)
                         .raw_str("/t/")
                         .number(thread.id as u32)
-                        .raw_str("\" class=\"thread-title\">")
+                        .raw_str("\" class=\"thread-card\"><span class=\"thread-card-title\">")
                         .text_string(&thread.title)
-                        .raw_str("</a>")
-                        .div_start("thread-meta")
-                        .number(thread.reply_count)
+                        .raw_str("</span><span class=\"thread-card-meta\">");
+                    // Show badges for pinned/locked threads
+                    if thread.is_pinned {
+                        md = md.raw_str("<span class=\"badge badge-pinned\">pinned</span> ");
+                    }
+                    if thread.is_locked {
+                        md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
+                    }
+                    md = md.number(thread.reply_count)
                         .text(" replies")
-                        .div_end()
-                        .div_end();  // close thread-item
+                        .raw_str("</span></a>\n");
                 }
                 md = md.div_end();  // close thread-list
             }
@@ -1055,7 +1059,8 @@ impl BoardsTheme {
     }
 
     /// Render reply form
-    fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, viewer: &Option<Address>) -> Bytes {
+    /// parent_reply_id: None for thread replies, Some(id) for nested replies
+    fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
             .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("[< Back to Thread](render:/b/")
@@ -1067,7 +1072,7 @@ impl BoardsTheme {
             .newline();  // Blank line before h1 for markdown parsing
 
         // Use raw HTML for headings to ensure reliable rendering after HTML blocks
-        if parent_id > 0 {
+        if parent_reply_id.is_some() {
             md = md.raw_str("<h1>Reply to Comment</h1>\n");
         } else {
             md = md.raw_str("<h1>Reply to Thread</h1>\n");
@@ -1080,8 +1085,8 @@ impl BoardsTheme {
 
         // Hidden inputs for board_id, thread_id, parent_id, depth
         // Depth is parent_depth + 1, or 0 for top-level replies
-        let depth: u32 = if parent_id > 0 {
-            // Look up parent reply to get its depth
+        let (parent_id, depth): (u64, u32) = if let Some(pid) = parent_reply_id {
+            // Replying to another reply - look up parent's depth
             let content: Address = env
                 .storage()
                 .instance()
@@ -1090,7 +1095,7 @@ impl BoardsTheme {
             let args: Vec<Val> = Vec::from_array(env, [
                 board_id.into_val(env),
                 thread_id.into_val(env),
-                parent_id.into_val(env),
+                pid.into_val(env),
             ]);
             let parent_reply: Option<ReplyMeta> = env.invoke_contract(
                 &content,
@@ -1098,11 +1103,12 @@ impl BoardsTheme {
                 args,
             );
             match parent_reply {
-                Some(reply) => reply.depth + 1,
-                None => 1, // Fallback if parent not found
+                Some(reply) => (pid, reply.depth + 1),
+                None => (pid, 1), // Fallback if parent not found
             }
         } else {
-            0
+            // Top-level reply to thread
+            (0, 0)
         };
         md = md
             // Redirect to thread view after posting reply
@@ -1304,12 +1310,12 @@ impl BoardsTheme {
             .rule(".board-card-desc", "display: block; color: var(--text-muted); font-size: 0.9375rem; margin-bottom: var(--space-xs); text-align: left;")
             .rule(".board-card-meta", "display: block; font-size: 0.8125rem; color: var(--text-muted); text-align: left;")
             .rule(".board-card-meta .badge", "margin-left: var(--space-xs);")
-            // Thread list
-            .rule(".thread-list", "display: flex; flex-direction: column; gap: 0;")
-            .rule(".thread-item", "padding: var(--space-md) 0; border-bottom: 1px solid var(--border);")
-            .rule(".thread-item:first-child", "padding-top: 0;")
-            .rule(".thread-title", "font-weight: 600; color: var(--text);")
-            .rule(".thread-meta", "color: var(--text-muted); font-size: 0.875rem; margin-top: var(--space-xs);")
+            // Thread list - card layout similar to boards
+            .rule(".thread-list", "display: flex; flex-direction: column; gap: var(--space-sm);")
+            .rule("a.thread-card", "display: flex !important; flex-direction: column; align-items: flex-start !important; background: var(--bg) !important; color: var(--text) !important; border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md) !important; transition: border-color 0.15s, box-shadow 0.15s; text-decoration: none !important;")
+            .rule("a.thread-card:hover", "border-color: var(--primary); box-shadow: 0 2px 8px rgba(120, 87, 225, 0.1); text-decoration: none !important; background: var(--bg) !important;")
+            .rule(".thread-card-title", "display: block; font-weight: 600; color: var(--text); margin-bottom: var(--space-xs); text-align: left;")
+            .rule(".thread-card-meta", "display: block; font-size: 0.8125rem; color: var(--text-muted); text-align: left;")
             // Thread content
             .rule(".thread-body", "margin-bottom: var(--space-lg); padding: var(--space-md); background: var(--bg-muted); border-radius: 6px;")
             .rule(".thread-actions", "display: flex; gap: var(--space-sm); margin-bottom: var(--space-lg);")
@@ -1367,6 +1373,7 @@ impl BoardsTheme {
             .prop("--border", "#3e3e3e")
             .rule_end()
             .rule(".board-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
+            .rule(".thread-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
             .rule(".alert-success", "background: #1e3a28; color: #6fdd8b;")
             .rule(".alert-warning", "background: #3a3019; color: #ffd859;")
             .rule(".alert-danger", "background: #3a1c1c; color: #ff8080;")
@@ -1390,6 +1397,7 @@ impl BoardsTheme {
             .rule(".nav-bar", "font-size: 0.8125rem;")
             .rule(".nav-bar a", "padding: var(--space-xs);")
             .rule(".board-card", "padding: var(--space-sm);")
+            .rule(".thread-card", "padding: var(--space-sm);")
             .rule(".thread-body", "padding: var(--space-sm);")
             .rule("button, .btn", "padding: var(--space-xs) var(--space-sm); font-size: 0.875rem;")
             .media_end()
