@@ -388,8 +388,8 @@ impl BoardsContent {
                 .persistent()
                 .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
             {
-                // Only include top-level replies (depth 0 or 1, parent_id 0)
-                if reply.depth <= 1 && reply.parent_id == 0 {
+                // Only include top-level replies (depth 0)
+                if reply.depth == 0 {
                     if skipped >= start {
                         replies.push_back(reply);
                         count += 1;
