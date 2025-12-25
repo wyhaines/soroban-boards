@@ -97,6 +97,15 @@ pub struct PermissionSet {
     pub is_banned: bool,
 }
 
+/// Invite request from permissions contract
+#[contracttype]
+#[derive(Clone)]
+pub struct InviteRequest {
+    pub user: Address,
+    pub board_id: u64,
+    pub created_at: u64,
+}
+
 #[contract]
 pub struct BoardsTheme;
 
@@ -368,6 +377,7 @@ impl BoardsTheme {
     /// Render create board form
     fn render_create_board(env: &Env, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
             .h1("Create New Board");
 
         if viewer.is_none() {
@@ -382,6 +392,10 @@ impl BoardsTheme {
             .input("name", "Board name")
             .newline()
             .textarea("description", 3, "Board description")
+            .newline()
+            // Private board checkbox - hidden field provides default "false", checkbox overrides to "true"
+            .raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n")
+            .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Make this board private</label>\n")
             .newline()
             // Caller address for the contract (must be last to match parameter order)
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
@@ -420,6 +434,77 @@ impl BoardsTheme {
                 .build();
         };
 
+        // For private boards, check if viewer has access
+        if board.is_private {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&ThemeKey::Permissions)
+                .expect("Not initialized");
+
+            // Check viewer's role
+            let viewer_role = if let Some(user) = viewer {
+                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role: Role = env.invoke_contract(
+                    &permissions,
+                    &Symbol::new(env, "get_role"),
+                    args,
+                );
+                role
+            } else {
+                Role::Guest
+            };
+
+            // If not a member (Guest), show access denied page
+            if (viewer_role as u32) < (Role::Member as u32) {
+                let mut md = Self::render_nav(env)
+                    .render_link("< Back", "/")
+                    .div_start("page-header")
+                    .raw_str("<h1>")
+                    .text_string(&board.name)
+                    .raw_str("</h1>")
+                    .raw_str("<p>")
+                    .text_string(&board.description)
+                    .raw_str("</p>")
+                    .div_end()
+                    .newline()
+                    .raw_str("<span class=\"badge badge-private\">private</span>")
+                    .newline()
+                    .newline();
+
+                if viewer.is_none() {
+                    md = md.warning("This is a private board. Please connect your wallet to request access.");
+                } else {
+                    // Check if user has a pending invite request
+                    let has_request_args: Vec<Val> = Vec::from_array(env, [
+                        board_id.into_val(env),
+                        viewer.as_ref().unwrap().into_val(env),
+                    ]);
+                    let has_request: bool = env.invoke_contract(
+                        &permissions,
+                        &Symbol::new(env, "has_invite_request"),
+                        has_request_args,
+                    );
+
+                    if has_request {
+                        md = md.tip("Your request to join this board is pending approval.");
+                    } else {
+                        md = md.note("This is a private board. You can request access from the board administrators.")
+                            .newline()
+                            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                            .number(board_id as u32)
+                            .raw_str("\" />\n")
+                            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+                            .text_string(&viewer.as_ref().unwrap().to_string())
+                            .raw_str("\" />\n")
+                            .form_link("Request to Join", "request_invite");
+                    }
+                }
+
+                return Self::render_footer_into(md).build();
+            }
+        }
+
         let mut md = Self::render_nav(env)
             .render_link("< Back", "/")
             .div_start("page-header")
@@ -432,6 +517,11 @@ impl BoardsTheme {
             .div_end()
             .newline();  // Blank line after page-header for markdown parsing
 
+        // Show private badge if applicable
+        if board.is_private {
+            md = md.raw_str("<span class=\"badge badge-private\">private</span> ");
+        }
+
         if board.is_readonly {
             md = md.note("This board is read-only.");
         }
@@ -442,6 +532,30 @@ impl BoardsTheme {
                 .number(board_id as u32)
                 .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
                 .newline();
+        }
+
+        // Show settings button for Admin+ users
+        if let Some(user) = viewer {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&ThemeKey::Permissions)
+                .expect("Not initialized");
+
+            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let viewer_role: Role = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_role"),
+                role_args,
+            );
+
+            // Admin or Owner can access settings
+            if (viewer_role as u32) >= (Role::Admin as u32) {
+                md = md.raw_str("<a href=\"render:/admin/b/")
+                    .number(board_id as u32)
+                    .raw_str("/settings\" class=\"action-btn action-btn-secondary\">⚙ Settings</a>")
+                    .newline();
+            }
         }
 
         // Use raw HTML for h2 since markdown parsing after HTML blocks can be unreliable
@@ -1359,6 +1473,7 @@ impl BoardsTheme {
             .rule(".badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--bg-muted); border-radius: 9999px; font-size: 0.75rem;")
             .rule(".badge-pinned", "background: #ffeeba; color: #856404;")
             .rule(".badge-locked", "background: #f8d7da; color: #721c24;")
+            .rule(".badge-private", "background: #e7d4ff; color: #5a3d7a;")
             // Section spacing
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
@@ -1380,6 +1495,7 @@ impl BoardsTheme {
             .rule(".alert-info", "background: #2a2644; color: #b8a8e8;")
             .rule(".badge-pinned", "background: #3a3019; color: #ffd859;")
             .rule(".badge-locked", "background: #3a1c1c; color: #ff8080;")
+            .rule(".badge-private", "background: #3a2d4a; color: #c9a5ff;")
             .media_end()
             // Mobile responsive styles
             .media_start("(max-width: 640px)")
@@ -1433,6 +1549,7 @@ impl BoardsTheme {
         env: Env,
         name: String,
         description: String,
+        is_private: String,  // String from form, parse to bool ("true" = private)
         caller: Address,
     ) -> u64 {
         caller.require_auth();
@@ -1443,15 +1560,46 @@ impl BoardsTheme {
             .get(&ThemeKey::Registry)
             .expect("Not initialized");
 
+        // Parse is_private string to bool
+        // "true" = private, anything else = public
+        let is_private_bool = is_private.len() == 4 && {
+            let mut buf = [0u8; 4];
+            is_private.copy_into_slice(&mut buf);
+            &buf == b"true"
+        };
+
         // Call registry.create_board
         let args: Vec<Val> = Vec::from_array(&env, [
             name.into_val(&env),
             description.into_val(&env),
             caller.into_val(&env),
-            false.into_val(&env),  // is_private = false by default
+            is_private_bool.into_val(&env),
         ]);
 
         env.invoke_contract(&registry, &Symbol::new(&env, "create_board"), args)
+    }
+
+    /// Request an invite to join a private board (proxies to permissions contract)
+    pub fn request_invite(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Permissions)
+            .expect("Not initialized");
+
+        // Call permissions.request_invite
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "request_invite"), args)
     }
 
     /// Create a new thread (proxies to board contract)

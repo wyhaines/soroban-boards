@@ -39,6 +39,15 @@ pub struct Ban {
     pub expires_at: Option<u64>,
 }
 
+/// Invite request (user requesting to join a private board)
+#[contracttype]
+#[derive(Clone)]
+pub struct InviteRequest {
+    pub user: Address,
+    pub board_id: u64,
+    pub created_at: u64,
+}
+
 /// Storage keys for the permissions contract
 #[contracttype]
 #[derive(Clone)]
@@ -63,6 +72,10 @@ pub enum PermKey {
     BoardMembers(u64),
     /// List of banned users for a board
     BannedUsers(u64),
+    /// Individual invite request (board_id, user) -> InviteRequest
+    InviteRequest(u64, Address),
+    /// List of users with pending invite requests for a board
+    InviteRequests(u64),
 }
 
 /// Permission check result with all relevant permissions
@@ -415,6 +428,239 @@ impl BoardsPermissions {
             .persistent()
             .get(&PermKey::FlagThreshold(board_id))
             .unwrap_or(3)
+    }
+
+    // Invite system functions
+
+    /// Request an invite to join a board (user-initiated)
+    /// Only allowed for non-members who are not banned
+    pub fn request_invite(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Check user is not already a member
+        let role = Self::get_role(env.clone(), board_id, caller.clone());
+        if role as u32 >= Role::Member as u32 {
+            panic!("Already a member of this board");
+        }
+
+        // Check user is not banned
+        if Self::is_banned(env.clone(), board_id, caller.clone()) {
+            panic!("Banned users cannot request invites");
+        }
+
+        // Check for existing request
+        if env
+            .storage()
+            .persistent()
+            .has(&PermKey::InviteRequest(board_id, caller.clone()))
+        {
+            panic!("Invite request already pending");
+        }
+
+        // Create the invite request
+        let request = InviteRequest {
+            user: caller.clone(),
+            board_id,
+            created_at: env.ledger().timestamp(),
+        };
+
+        // Store individual request
+        env.storage()
+            .persistent()
+            .set(&PermKey::InviteRequest(board_id, caller.clone()), &request);
+
+        // Add to requests list
+        let mut requests: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::InviteRequests(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        requests.push_back(caller);
+        env.storage()
+            .persistent()
+            .set(&PermKey::InviteRequests(board_id), &requests);
+    }
+
+    /// Accept an invite request (promotes user to Member)
+    /// Only Moderator+ can accept invites
+    pub fn accept_invite(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        // Check caller has authority (Moderator+)
+        let caller_role = Self::get_role(env.clone(), board_id, caller.clone());
+        if (caller_role as u32) < (Role::Moderator as u32) {
+            panic!("Only moderator+ can accept invite requests");
+        }
+
+        // Check invite request exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&PermKey::InviteRequest(board_id, user.clone()))
+        {
+            panic!("No invite request found for this user");
+        }
+
+        // Remove the invite request
+        Self::remove_invite_request(&env, board_id, &user);
+
+        // Set user role to Member
+        Self::add_to_role_list(&env, board_id, &user, Role::Member);
+        env.storage()
+            .persistent()
+            .set(&PermKey::BoardRole(board_id, user), &Role::Member);
+    }
+
+    /// Revoke/reject an invite request
+    /// Only Moderator+ can revoke invites
+    pub fn revoke_invite(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        // Check caller has authority (Moderator+)
+        let caller_role = Self::get_role(env.clone(), board_id, caller);
+        if (caller_role as u32) < (Role::Moderator as u32) {
+            panic!("Only moderator+ can revoke invite requests");
+        }
+
+        // Check invite request exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&PermKey::InviteRequest(board_id, user.clone()))
+        {
+            panic!("No invite request found for this user");
+        }
+
+        // Remove the invite request
+        Self::remove_invite_request(&env, board_id, &user);
+    }
+
+    /// Directly invite a user with a specific role (admin-initiated)
+    /// Authorization rules:
+    /// - Moderator+ can invite as Member or Guest
+    /// - Admin+ can invite as Moderator
+    /// - Owner can invite as Admin or Owner
+    pub fn invite_member(
+        env: Env,
+        board_id: u64,
+        user: Address,
+        role: Role,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let caller_role = Self::get_role(env.clone(), board_id, caller.clone());
+
+        // Check authorization based on role being assigned
+        match role {
+            Role::Owner | Role::Admin => {
+                if caller_role != Role::Owner {
+                    panic!("Only owner can invite admins or owners");
+                }
+            }
+            Role::Moderator => {
+                if (caller_role as u32) < (Role::Admin as u32) {
+                    panic!("Only admin+ can invite moderators");
+                }
+            }
+            Role::Member | Role::Guest => {
+                if (caller_role as u32) < (Role::Moderator as u32) {
+                    panic!("Only moderator+ can invite members");
+                }
+            }
+        }
+
+        // Check user is not already a member with higher role
+        let current_role = Self::get_role(env.clone(), board_id, user.clone());
+        if current_role as u32 >= role as u32 && current_role != Role::Guest {
+            panic!("User already has equal or higher role");
+        }
+
+        // Check user is not banned
+        if Self::is_banned(env.clone(), board_id, user.clone()) {
+            panic!("Cannot invite banned users");
+        }
+
+        // Remove any pending invite request for this user
+        if env
+            .storage()
+            .persistent()
+            .has(&PermKey::InviteRequest(board_id, user.clone()))
+        {
+            Self::remove_invite_request(&env, board_id, &user);
+        }
+
+        // Remove from old role list if applicable
+        Self::remove_from_role_list(&env, board_id, &user, current_role);
+
+        // Add to new role list and set role
+        Self::add_to_role_list(&env, board_id, &user, role.clone());
+        env.storage()
+            .persistent()
+            .set(&PermKey::BoardRole(board_id, user), &role);
+    }
+
+    /// Helper to remove an invite request
+    fn remove_invite_request(env: &Env, board_id: u64, user: &Address) {
+        // Remove individual request
+        env.storage()
+            .persistent()
+            .remove(&PermKey::InviteRequest(board_id, user.clone()));
+
+        // Remove from requests list
+        if let Some(requests) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&PermKey::InviteRequests(board_id))
+        {
+            let mut new_requests = Vec::new(env);
+            for i in 0..requests.len() {
+                let addr = requests.get(i).unwrap();
+                if addr != *user {
+                    new_requests.push_back(addr);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&PermKey::InviteRequests(board_id), &new_requests);
+        }
+    }
+
+    /// List all pending invite requests for a board
+    pub fn list_invite_requests(env: Env, board_id: u64) -> Vec<InviteRequest> {
+        let request_addrs: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::InviteRequests(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        let mut requests = Vec::new(&env);
+        for i in 0..request_addrs.len() {
+            let addr = request_addrs.get(i).unwrap();
+            if let Some(request) = env
+                .storage()
+                .persistent()
+                .get::<_, InviteRequest>(&PermKey::InviteRequest(board_id, addr))
+            {
+                requests.push_back(request);
+            }
+        }
+        requests
+    }
+
+    /// Check if a user has a pending invite request
+    pub fn has_invite_request(env: Env, board_id: u64, user: Address) -> bool {
+        env.storage()
+            .persistent()
+            .has(&PermKey::InviteRequest(board_id, user))
+    }
+
+    /// Get a specific invite request
+    pub fn get_invite_request(env: Env, board_id: u64, user: Address) -> Option<InviteRequest> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::InviteRequest(board_id, user))
     }
 
     // Membership list functions
@@ -1028,5 +1274,335 @@ mod test {
         client.set_role(&0, &user, &Role::Guest, &owner);
         assert_eq!(client.get_role(&0, &user), Role::Guest);
         assert_eq!(client.list_members(&0).len(), 0);
+    }
+
+    // Invite system tests
+
+    #[test]
+    fn test_request_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // User requests invite
+        client.request_invite(&0, &user);
+
+        // Check request exists
+        assert!(client.has_invite_request(&0, &user));
+        let requests = client.list_invite_requests(&0);
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests.get(0).unwrap().user, user);
+    }
+
+    #[test]
+    fn test_accept_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // User requests invite
+        client.request_invite(&0, &user);
+        assert!(client.has_invite_request(&0, &user));
+
+        // Owner accepts invite
+        client.accept_invite(&0, &user, &owner);
+
+        // Check user is now member
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+        assert!(!client.has_invite_request(&0, &user));
+        assert_eq!(client.list_members(&0).len(), 1);
+    }
+
+    #[test]
+    fn test_revoke_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // User requests invite
+        client.request_invite(&0, &user);
+        assert!(client.has_invite_request(&0, &user));
+
+        // Owner revokes invite
+        client.revoke_invite(&0, &user, &owner);
+
+        // Check request is gone, user is still guest
+        assert!(!client.has_invite_request(&0, &user));
+        assert_eq!(client.get_role(&0, &user), Role::Guest);
+    }
+
+    #[test]
+    fn test_invite_member_directly() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Owner directly invites as member
+        client.invite_member(&0, &user, &Role::Member, &owner);
+
+        // Check user is now member
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+        assert_eq!(client.list_members(&0).len(), 1);
+    }
+
+    #[test]
+    fn test_invite_member_with_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let new_admin = Address::generate(&env);
+        let new_mod = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Owner invites as admin
+        client.invite_member(&0, &new_admin, &Role::Admin, &owner);
+        assert_eq!(client.get_role(&0, &new_admin), Role::Admin);
+        assert_eq!(client.list_admins(&0).len(), 1);
+
+        // Owner invites as moderator
+        client.invite_member(&0, &new_mod, &Role::Moderator, &owner);
+        assert_eq!(client.get_role(&0, &new_mod), Role::Moderator);
+        assert_eq!(client.list_moderators(&0).len(), 1);
+    }
+
+    #[test]
+    fn test_invite_clears_pending_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // User requests invite
+        client.request_invite(&0, &user);
+        assert!(client.has_invite_request(&0, &user));
+
+        // Owner directly invites (bypasses request-accept flow)
+        client.invite_member(&0, &user, &Role::Member, &owner);
+
+        // Request should be cleared
+        assert!(!client.has_invite_request(&0, &user));
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already a member of this board")]
+    fn test_member_cannot_request_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        // Member cannot request invite - already a member
+        client.request_invite(&0, &member);
+    }
+
+    #[test]
+    #[should_panic(expected = "Banned users cannot request invites")]
+    fn test_banned_cannot_request_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let banned_user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        let reason = String::from_str(&env, "Spam");
+        client.ban_user(&0, &banned_user, &reason, &None, &owner);
+
+        // Banned user cannot request invite
+        client.request_invite(&0, &banned_user);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invite request already pending")]
+    fn test_duplicate_request_fails() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // First request succeeds
+        client.request_invite(&0, &user);
+
+        // Second request should fail
+        client.request_invite(&0, &user);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only moderator+ can accept invite requests")]
+    fn test_member_cannot_accept_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let member = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &member, &Role::Member, &owner);
+
+        client.request_invite(&0, &user);
+
+        // Member cannot accept - should panic
+        client.accept_invite(&0, &user, &member);
+    }
+
+    #[test]
+    #[should_panic(expected = "Only admin+ can invite moderators")]
+    fn test_mod_cannot_invite_mod() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Moderator cannot invite as moderator - should panic
+        client.invite_member(&0, &user, &Role::Moderator, &moderator);
+    }
+
+    #[test]
+    fn test_moderator_can_accept_invite() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.set_role(&0, &moderator, &Role::Moderator, &owner);
+
+        client.request_invite(&0, &user);
+
+        // Moderator can accept
+        client.accept_invite(&0, &user, &moderator);
+        assert_eq!(client.get_role(&0, &user), Role::Member);
+    }
+
+    #[test]
+    fn test_get_invite_request() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+        client.request_invite(&0, &user);
+
+        // Get the invite request
+        let request = client.get_invite_request(&0, &user).unwrap();
+        assert_eq!(request.user, user);
+        assert_eq!(request.board_id, 0);
     }
 }

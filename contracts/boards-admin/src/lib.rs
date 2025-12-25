@@ -95,8 +95,42 @@ pub struct PermissionSet {
     pub is_banned: bool,
 }
 
+/// Invite request from permissions contract
+#[contracttype]
+#[derive(Clone)]
+pub struct InviteRequest {
+    pub user: Address,
+    pub board_id: u64,
+    pub created_at: u64,
+}
+
 #[contract]
 pub struct BoardsAdmin;
+
+/// Helper function to parse a Soroban String to u32
+/// Panics if the string contains non-digit characters
+fn parse_string_to_u32(_env: &Env, s: &String) -> u32 {
+    let len = s.len() as usize;
+    if len == 0 {
+        panic!("Empty string");
+    }
+    if len > 10 {
+        panic!("Number too large");
+    }
+
+    let mut buf = [0u8; 10];
+    s.copy_into_slice(&mut buf[..len]);
+
+    let mut result: u32 = 0;
+    for i in 0..len {
+        let byte = buf[i];
+        if byte < b'0' || byte > b'9' {
+            panic!("Invalid number format");
+        }
+        result = result * 10 + (byte - b'0') as u32;
+    }
+    result
+}
 
 #[contractimpl]
 impl BoardsAdmin {
@@ -158,6 +192,10 @@ impl BoardsAdmin {
             .or_handle(b"/b/{id}/flags", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_flag_queue(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/invites", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_invites(&env, board_id, &viewer)
             })
             .or_handle(b"/b/{id}/settings", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
@@ -522,6 +560,95 @@ impl BoardsAdmin {
         Self::render_footer_into(md).build()
     }
 
+    /// Render invite requests page
+    fn render_invites(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env, board_id)
+            .h1("Invite Requests");
+
+        // Check if viewer has permission (moderator+)
+        let can_view = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_moderate
+        } else {
+            false
+        };
+
+        if !can_view {
+            md = md.warning("You must be a moderator to view this page.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Fetch pending invite requests
+        let requests: Vec<InviteRequest> = env.invoke_contract(
+            &permissions,
+            &Symbol::new(env, "list_invite_requests"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if requests.is_empty() {
+            md = md.tip("No pending invite requests.");
+        } else {
+            md = md.paragraph("Users requesting to join this board:");
+
+            for i in 0..requests.len() {
+                let request = requests.get(i).unwrap();
+                let user_str = Self::format_address(env, &request.user);
+
+                md = md.hr()
+                    .h3("").text("`").text_string(&user_str).text("`")
+                    .newline()
+                    .text("**Requested:** ").number(request.created_at as u32).text(" (timestamp)")
+                    .newline()
+                    // Hidden fields for actions
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                    .number(board_id as u32)
+                    .raw_str("\" />\n")
+                    .raw_str("<input type=\"hidden\" name=\"user\" value=\"")
+                    .text_string(&user_str)
+                    .raw_str("\" />\n")
+                    // Action buttons
+                    .tx_link_to("Accept", "admin", "accept_invite", "")
+                    .text(" | ")
+                    .tx_link_to("Reject", "admin", "revoke_invite", "")
+                    .newline();
+            }
+        }
+
+        // Direct invite form
+        md = md.hr()
+            .h3("Directly Invite a User")
+            .paragraph("Invite a user without requiring them to request access.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .input("user", "Wallet address (G...)")
+            .newline()
+            .form_link_to("Invite as Member", "admin", "invite_member")
+            .text(" ")
+            .form_link_to("Invite as Moderator", "admin", "invite_moderator")
+            .text(" ")
+            .form_link_to("Invite as Admin", "admin", "invite_admin");
+
+        // Link back to members page
+        md = md.hr()
+            .raw_str("[View All Members](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/members)");
+
+        Self::render_footer_into(md).build()
+    }
+
     /// Render board settings page
     fn render_settings(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let permissions: Address = env
@@ -603,15 +730,19 @@ impl BoardsAdmin {
         }
 
         md = md.h2("Quick Links")
-            .raw_str("[View Members](render:/b/")
+            .raw_str("[View Members](render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/members)")
             .text(" | ")
-            .raw_str("[View Banned](render:/b/")
+            .raw_str("[View Invites](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/invites)")
+            .text(" | ")
+            .raw_str("[View Banned](render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/banned)")
             .text(" | ")
-            .raw_str("[View Flag Queue](render:/b/")
+            .raw_str("[View Flag Queue](render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/flags)");
 
@@ -676,6 +807,117 @@ impl BoardsAdmin {
     /// Add a user as Admin (convenience function for forms)
     pub fn add_admin(env: Env, board_id: u64, user_address: Address, caller: Address) {
         Self::set_role(env, board_id, user_address, Role::Admin, caller);
+    }
+
+    // ========================================================================
+    // Invite Operations
+    // ========================================================================
+
+    /// Accept a pending invite request (moderator+)
+    pub fn accept_invite(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has moderator permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]),
+        );
+
+        if !caller_perms.can_moderate {
+            panic!("Caller must be moderator or higher");
+        }
+
+        // Accept the invite
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &permissions,
+            &Symbol::new(&env, "accept_invite"),
+            args,
+        );
+    }
+
+    /// Revoke/reject a pending invite request (moderator+)
+    pub fn revoke_invite(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has moderator permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]),
+        );
+
+        if !caller_perms.can_moderate {
+            panic!("Caller must be moderator or higher");
+        }
+
+        // Revoke the invite
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &permissions,
+            &Symbol::new(&env, "revoke_invite"),
+            args,
+        );
+    }
+
+    /// Directly invite a user as Member (moderator+)
+    pub fn invite_member(env: Env, board_id: u64, user: Address, caller: Address) {
+        Self::invite_with_role(env, board_id, user, Role::Member, caller);
+    }
+
+    /// Directly invite a user as Moderator (admin+)
+    pub fn invite_moderator(env: Env, board_id: u64, user: Address, caller: Address) {
+        Self::invite_with_role(env, board_id, user, Role::Moderator, caller);
+    }
+
+    /// Directly invite a user as Admin (owner only)
+    pub fn invite_admin(env: Env, board_id: u64, user: Address, caller: Address) {
+        Self::invite_with_role(env, board_id, user, Role::Admin, caller);
+    }
+
+    /// Helper function to invite with a specific role
+    fn invite_with_role(env: Env, board_id: u64, user: Address, role: Role, caller: Address) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // The permissions contract handles authorization checks
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            user.into_val(&env),
+            role.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &permissions,
+            &Symbol::new(&env, "invite_member"),
+            args,
+        );
     }
 
     /// Ban a user from a board (moderator+)
@@ -1010,13 +1252,17 @@ impl BoardsAdmin {
     }
 
     /// Update flag threshold for a board (admin+)
+    /// Accepts threshold as String since HTML forms submit strings
     pub fn set_flag_threshold(
         env: Env,
         board_id: u64,
-        threshold: u32,
+        threshold: String,
         caller: Address,
     ) {
         caller.require_auth();
+
+        // Parse string to u32
+        let threshold_u32 = parse_string_to_u32(&env, &threshold);
 
         let permissions: Address = env
             .storage()
@@ -1038,7 +1284,7 @@ impl BoardsAdmin {
         // Set the threshold
         let args: Vec<Val> = Vec::from_array(&env, [
             board_id.into_val(&env),
-            threshold.into_val(&env),
+            threshold_u32.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
@@ -1049,13 +1295,17 @@ impl BoardsAdmin {
     }
 
     /// Update reply chunk size for waterfall loading (admin+)
+    /// Accepts chunk_size as String since HTML forms submit strings
     pub fn set_chunk_size(
         env: Env,
         board_id: u64,
-        chunk_size: u32,
+        chunk_size: String,
         caller: Address,
     ) {
         caller.require_auth();
+
+        // Parse string to u32
+        let chunk_size_u32 = parse_string_to_u32(&env, &chunk_size);
 
         let permissions: Address = env
             .storage()
@@ -1075,7 +1325,7 @@ impl BoardsAdmin {
         }
 
         // Validate chunk size (1-20 is reasonable range)
-        if chunk_size < 1 || chunk_size > 20 {
+        if chunk_size_u32 < 1 || chunk_size_u32 > 20 {
             panic!("Chunk size must be between 1 and 20");
         }
 
@@ -1096,7 +1346,7 @@ impl BoardsAdmin {
 
         // Set the chunk size
         let args: Vec<Val> = Vec::from_array(&env, [
-            chunk_size.into_val(&env),
+            chunk_size_u32.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
