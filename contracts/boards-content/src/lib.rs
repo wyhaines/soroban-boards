@@ -118,6 +118,78 @@ impl BoardsContent {
             .expect("Not initialized")
     }
 
+    /// Create a thread (entry point for thread creation)
+    /// This function:
+    /// 1. Calls the Board contract to create thread metadata
+    /// 2. Stores the thread body content
+    /// Returns the thread ID
+    pub fn create_thread(
+        env: Env,
+        board_id: u64,
+        title: String,
+        body: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        // Get the registry to look up the board contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Registry)
+            .expect("Not initialized");
+
+        // Get the board contract address from registry
+        let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                args,
+            )
+            .expect("Board contract not found");
+
+        // Create the thread in the board contract (this creates metadata)
+        let create_args: Vec<Val> = Vec::from_array(
+            &env,
+            [title.into_val(&env), caller.clone().into_val(&env)],
+        );
+        let thread_id: u64 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(&env, "create_thread"),
+            create_args,
+        );
+
+        // Store the thread body content
+        // Convert String to Bytes - handle up to 16KB content
+        let body_len = body.len() as usize;
+        let body_bytes = if body_len > 0 && body_len <= 16384 {
+            let mut temp = [0u8; 16384];
+            body.copy_into_slice(&mut temp[..body_len]);
+            Bytes::from_slice(&env, &temp[..body_len])
+        } else if body_len > 16384 {
+            // For very large content, truncate (shouldn't happen in practice)
+            let mut temp = [0u8; 16384];
+            body.copy_into_slice(&mut temp[..16384]);
+            Bytes::from_slice(&env, &temp)
+        } else {
+            Bytes::new(&env)
+        };
+        let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
+        let chonk = Chonk::open(&env, key);
+        chonk.write_chunked(body_bytes, 4096);
+
+        // Increment thread count in registry
+        let incr_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(&env, "increment_thread_count"),
+            incr_args,
+        );
+
+        thread_id
+    }
+
     // Permission check helpers
 
     /// Check if user can reply on this board
@@ -209,7 +281,7 @@ impl BoardsContent {
         }
     }
 
-    /// Edit thread body content
+    /// Edit thread body content (takes Bytes, for internal use)
     pub fn edit_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, caller: Address) {
         caller.require_auth();
         // TODO: Verify caller is author or moderator via permissions contract
@@ -220,22 +292,84 @@ impl BoardsContent {
         chonk.write_chunked(content, 4096);
     }
 
+    /// Edit thread title and body (entry point for form submissions)
+    /// This function:
+    /// 1. Updates thread title in the Board contract
+    /// 2. Updates thread body content in this contract
+    pub fn edit_thread(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        new_title: String,
+        new_body: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Get the registry to look up the board contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Registry)
+            .expect("Not initialized");
+
+        // Get the board contract address from registry
+        let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                args,
+            )
+            .expect("Board contract not found");
+
+        // Update the thread title in the board contract
+        let title_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                thread_id.into_val(&env),
+                new_title.into_val(&env),
+                caller.clone().into_val(&env),
+            ],
+        );
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "edit_thread_title"),
+            title_args,
+        );
+
+        // Convert String to Bytes and update body
+        let body_len = new_body.len() as usize;
+        let body_bytes = if body_len > 0 && body_len <= 16384 {
+            let mut temp = [0u8; 16384];
+            new_body.copy_into_slice(&mut temp[..body_len]);
+            Bytes::from_slice(&env, &temp[..body_len])
+        } else if body_len > 16384 {
+            let mut temp = [0u8; 16384];
+            new_body.copy_into_slice(&mut temp[..16384]);
+            Bytes::from_slice(&env, &temp)
+        } else {
+            Bytes::new(&env)
+        };
+
+        let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
+        let chonk = Chonk::open(&env, key);
+        chonk.clear();
+        chonk.write_chunked(body_bytes, 4096);
+    }
+
     /// Create a reply
-    /// Note: Auth is handled by the calling contract (theme).
+    /// Called directly from forms via form:@content:create_reply
     pub fn create_reply(
         env: Env,
         board_id: u64,
         thread_id: u64,
         parent_id: u64,
         depth: u32,
-        content: Bytes,
+        content: String,
         creator: Address,
     ) -> u64 {
-        // Note: require_auth() removed - called by theme which handles auth
-
-        // Check permissions (if permissions contract is set)
-        // Note: This may also need adjustment for cross-contract calls
-        // Self::check_can_reply(&env, board_id, &creator);
+        creator.require_auth();
 
         let reply_id = Self::next_reply_id(&env, board_id, thread_id);
 
@@ -258,10 +392,24 @@ impl BoardsContent {
             .persistent()
             .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
 
+        // Convert String to Bytes for storage
+        let content_len = content.len() as usize;
+        let content_bytes = if content_len > 0 && content_len <= 16384 {
+            let mut temp = [0u8; 16384];
+            content.copy_into_slice(&mut temp[..content_len]);
+            Bytes::from_slice(&env, &temp[..content_len])
+        } else if content_len > 16384 {
+            let mut temp = [0u8; 16384];
+            content.copy_into_slice(&mut temp[..16384]);
+            Bytes::from_slice(&env, &temp)
+        } else {
+            Bytes::new(&env)
+        };
+
         // Store reply content in chonk
         let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
         let chonk = Chonk::open(&env, key);
-        chonk.write_chunked(content, 4096);
+        chonk.write_chunked(content_bytes, 4096);
 
         // Add to thread replies list
         let mut thread_replies: Vec<u64> = env
@@ -439,7 +587,7 @@ impl BoardsContent {
         child_ids.len()
     }
 
-    /// Edit reply content
+    /// Edit reply content (takes Bytes, for internal use)
     pub fn edit_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, content: Bytes, caller: Address) {
         caller.require_auth();
 
@@ -449,9 +597,11 @@ impl BoardsContent {
             .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
         {
             // Verify caller is author or moderator
-            if reply.creator != caller {
-                // TODO: Check if caller is moderator via permissions contract
-                panic!("Only author can edit reply");
+            let is_author = reply.creator == caller;
+            let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
+
+            if !is_author && !is_moderator {
+                panic!("Only author or moderator can edit reply");
             }
 
             reply.updated_at = env.ledger().timestamp();
@@ -465,6 +615,74 @@ impl BoardsContent {
             chonk.clear();
             chonk.write_chunked(content, 4096);
         }
+    }
+
+    /// Edit reply content (entry point for form submissions, accepts String)
+    pub fn edit_reply_content(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        content: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        if let Some(mut reply) = env
+            .storage()
+            .persistent()
+            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
+        {
+            // Verify caller is author or moderator
+            let is_author = reply.creator == caller;
+            let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
+
+            if !is_author && !is_moderator {
+                panic!("Only author or moderator can edit reply");
+            }
+
+            reply.updated_at = env.ledger().timestamp();
+            env.storage()
+                .persistent()
+                .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+
+            // Convert String to Bytes
+            let content_len = content.len() as usize;
+            let content_bytes = if content_len > 0 && content_len <= 16384 {
+                let mut temp = [0u8; 16384];
+                content.copy_into_slice(&mut temp[..content_len]);
+                Bytes::from_slice(&env, &temp[..content_len])
+            } else if content_len > 16384 {
+                let mut temp = [0u8; 16384];
+                content.copy_into_slice(&mut temp[..16384]);
+                Bytes::from_slice(&env, &temp)
+            } else {
+                Bytes::new(&env)
+            };
+
+            // Update content
+            let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
+            let chonk = Chonk::open(&env, key);
+            chonk.clear();
+            chonk.write_chunked(content_bytes, 4096);
+        }
+    }
+
+    /// Helper: Check if user is moderator
+    fn check_is_moderator(env: &Env, board_id: u64, user: &Address) -> bool {
+        if !env.storage().instance().has(&ContentKey::Permissions) {
+            return false;
+        }
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Permissions)
+            .unwrap();
+
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+        let fn_name = Symbol::new(env, "can_moderate");
+        env.invoke_contract(&permissions, &fn_name, args)
     }
 
     /// Delete reply (soft delete - keeps metadata, clears content)
@@ -1062,7 +1280,7 @@ mod test {
         client.init(&registry, &None);
 
         let author = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"This is a reply!");
+        let content = String::from_str(&env, "This is a reply!");
 
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
         assert_eq!(reply_id, 0);
@@ -1072,7 +1290,8 @@ mod test {
         assert_eq!(reply.depth, 1);
 
         let reply_content = client.get_reply_content(&0, &0, &reply_id);
-        assert_eq!(reply_content, content);
+        let expected_bytes = Bytes::from_slice(&env, b"This is a reply!");
+        assert_eq!(reply_content, expected_bytes);
 
         assert_eq!(client.get_reply_count(&0, &0), 1);
     }
@@ -1090,7 +1309,7 @@ mod test {
         client.init(&registry, &None);
 
         let author = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"This reply will be deleted");
+        let content = String::from_str(&env, "This reply will be deleted");
 
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
 
@@ -1118,7 +1337,7 @@ mod test {
 
         let author = Address::generate(&env);
         let flagger = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"Controversial content");
+        let content = String::from_str(&env, "Controversial content");
 
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
 
@@ -1177,7 +1396,7 @@ mod test {
         client.init(&registry, &None);
 
         let author = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"Some content");
+        let content = String::from_str(&env, "Some content");
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
 
         // Flag 3 times (default threshold)
@@ -1204,7 +1423,7 @@ mod test {
         client.init(&registry, &None);
 
         let author = Address::generate(&env);
-        let original_content = Bytes::from_slice(&env, b"Original content");
+        let original_content = String::from_str(&env, "Original content");
         let reply_id = client.create_reply(&0, &0, &0, &1, &original_content, &author);
 
         // Edit the reply
@@ -1235,15 +1454,15 @@ mod test {
         let author3 = Address::generate(&env);
 
         // Create top-level reply
-        let content1 = Bytes::from_slice(&env, b"Top level reply");
+        let content1 = String::from_str(&env, "Top level reply");
         let reply1 = client.create_reply(&0, &0, &0, &0, &content1, &author1);
 
         // Create nested reply to reply1
-        let content2 = Bytes::from_slice(&env, b"Reply to reply 1");
+        let content2 = String::from_str(&env, "Reply to reply 1");
         let reply2 = client.create_reply(&0, &0, &reply1, &1, &content2, &author2);
 
         // Create deeply nested reply
-        let content3 = Bytes::from_slice(&env, b"Reply to reply 2");
+        let content3 = String::from_str(&env, "Reply to reply 2");
         let reply3 = client.create_reply(&0, &0, &reply2, &2, &content3, &author3);
 
         // Verify depths
@@ -1275,9 +1494,9 @@ mod test {
         let author = Address::generate(&env);
 
         // Create multiple replies
-        let contents = [b"Reply 0", b"Reply 1", b"Reply 2", b"Reply 3", b"Reply 4"];
-        for content_bytes in contents.iter() {
-            let content = Bytes::from_slice(&env, *content_bytes);
+        let contents = ["Reply 0", "Reply 1", "Reply 2", "Reply 3", "Reply 4"];
+        for content_str in contents.iter() {
+            let content = String::from_str(&env, *content_str);
             client.create_reply(&0, &0, &0, &1, &content, &author);
         }
 
@@ -1337,7 +1556,7 @@ mod test {
 
         let author = Address::generate(&env);
         let flagger = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"Content");
+        let content = String::from_str(&env, "Content");
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
 
         // Flag once
@@ -1362,7 +1581,7 @@ mod test {
 
         let author = Address::generate(&env);
         let moderator = Address::generate(&env);
-        let content = Bytes::from_slice(&env, b"Content");
+        let content = String::from_str(&env, "Content");
         let reply_id = client.create_reply(&0, &0, &0, &1, &content, &author);
 
         // Initially not hidden
@@ -1394,13 +1613,13 @@ mod test {
         let author = Address::generate(&env);
 
         // Create parent reply
-        let parent_content = Bytes::from_slice(&env, b"Parent");
+        let parent_content = String::from_str(&env, "Parent");
         let parent_id = client.create_reply(&0, &0, &0, &0, &parent_content, &author);
 
         // Create children
-        let child_contents = [b"Child 0", b"Child 1", b"Child 2"];
-        for content_bytes in child_contents.iter() {
-            let content = Bytes::from_slice(&env, *content_bytes);
+        let child_contents = ["Child 0", "Child 1", "Child 2"];
+        for content_str in child_contents.iter() {
+            let content = String::from_str(&env, *content_str);
             client.create_reply(&0, &0, &parent_id, &1, &content, &author);
         }
 
@@ -1444,7 +1663,7 @@ mod test {
         let author = Address::generate(&env);
 
         // Create replies and flag them
-        let content = Bytes::from_slice(&env, b"Content");
+        let content = String::from_str(&env, "Content");
         let reply1 = client.create_reply(&0, &0, &0, &1, &content, &author);
         let reply2 = client.create_reply(&0, &0, &0, &1, &content, &author);
 

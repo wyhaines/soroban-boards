@@ -1,6 +1,10 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_render_sdk::prelude::*;
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+
+// Declare render capabilities
+soroban_render!(markdown, styles);
 
 /// Storage keys for the registry contract
 #[contracttype]
@@ -105,14 +109,23 @@ impl BoardsRegistry {
     }
 
     /// Create a new board
+    /// Note: is_private is a String from form input ("true"/"false")
     pub fn create_board(
         env: Env,
         name: String,
         description: String,
-        creator: Address,
-        is_private: bool,
+        is_private: String,  // String from form, parse to bool
+        caller: Address,
     ) -> u64 {
-        creator.require_auth();
+        caller.require_auth();
+
+        // Parse is_private string to bool
+        // "true" = private, anything else = public
+        let is_private_bool = is_private.len() == 4 && {
+            let mut buf = [0u8; 4];
+            is_private.copy_into_slice(&mut buf);
+            &buf == b"true"
+        };
 
         // Check not paused
         let paused: bool = env
@@ -136,11 +149,11 @@ impl BoardsRegistry {
             id: board_id,
             name: name.clone(),
             description: description.clone(),
-            creator: creator.clone(),
+            creator: caller.clone(),
             created_at: env.ledger().timestamp(),
             thread_count: 0,
             is_readonly: false,
-            is_private,
+            is_private: is_private_bool,
         };
 
         // Store board
@@ -179,17 +192,18 @@ impl BoardsRegistry {
             );
 
             // Initialize the board contract
-            // Pass None for permissions to allow thread creation without permission checks
-            // (permission checks happen at the theme level instead)
+            // Pass contract addresses for rendering capabilities
             let init_args: Vec<Val> = Vec::from_array(
                 &env,
                 [
                     board_id.into_val(&env),
                     env.current_contract_address().into_val(&env),  // registry
-                    Option::<Address>::None.into_val(&env),  // permissions (None to skip checks)
+                    Option::<Address>::None.into_val(&env),  // permissions (None to skip checks for creation)
+                    Some(contracts.content.clone()).into_val(&env),  // content contract
+                    Some(contracts.theme.clone()).into_val(&env),  // theme contract
                     name.into_val(&env),
                     description.into_val(&env),
-                    is_private.into_val(&env),
+                    is_private_bool.into_val(&env),
                 ],
             );
             env.invoke_contract::<()>(
@@ -208,7 +222,7 @@ impl BoardsRegistry {
         // In tests without a real permissions contract, this will be a no-op
         let args: Vec<Val> = Vec::from_array(
             &env,
-            [board_id.into_val(&env), creator.into_val(&env)],
+            [board_id.into_val(&env), caller.into_val(&env)],
         );
         let fn_name = Symbol::new(&env, "set_board_owner");
 
@@ -442,6 +456,211 @@ impl BoardsRegistry {
             args,
         );
     }
+
+    /// Configure a board contract with content and theme addresses (admin only)
+    /// Used to update existing board contracts after adding these fields
+    pub fn configure_board(env: Env, board_id: u64) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        let board_contract: Address = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::BoardContract(board_id))
+            .expect("Board contract not found");
+
+        // Set content address
+        let content_args: Vec<Val> = Vec::from_array(&env, [contracts.content.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_content"),
+            content_args,
+        );
+
+        // Set theme address
+        let theme_args: Vec<Val> = Vec::from_array(&env, [contracts.theme.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_theme"),
+            theme_args,
+        );
+    }
+
+    // ========================================================================
+    // Rendering - Home page and board creation
+    // ========================================================================
+
+    /// Main render entry point for registry routes
+    pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
+        Router::new(&env, path.clone())
+            // Home page - board list
+            .handle(b"/", |_| Self::render_home(&env, &viewer))
+            // Create board form
+            .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
+            // Help page
+            .or_handle(b"/help", |_| Self::render_help(&env))
+            // Default - home page
+            .or_default(|_| Self::render_home(&env, &viewer))
+    }
+
+    /// Render the navigation bar
+    fn render_nav(env: &Env) -> MarkdownBuilder<'_> {
+        MarkdownBuilder::new(env)
+            .div_start("nav-bar")
+            .render_link("Soroban Boards", "/")
+            .render_link("Help", "/help")
+            .div_end()
+    }
+
+    /// Append footer to builder
+    fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
+        md.div_start("footer")
+            .text("Powered by ")
+            .link("Soroban Render", "https://github.com/wyhaines/soroban-render")
+            .text(" on ")
+            .link("Stellar", "https://stellar.org")
+            .div_end()
+    }
+
+    /// Render the home page with board list
+    fn render_home(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar div for markdown parsing
+            .h1("Soroban Boards")
+            .paragraph("Decentralized discussion forums on Stellar");
+
+        // Show connection status
+        if viewer.is_some() {
+            md = md.tip("Wallet connected! You can create boards and post.");
+        } else {
+            md = md.note("Connect your wallet to participate in discussions.");
+        }
+
+        md = md.h2("Boards")
+            .newline();
+
+        // Fetch boards from storage
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::BoardCount)
+            .unwrap_or(0);
+
+        if count == 0 {
+            md = md.paragraph("No boards yet. Be the first to create one!");
+        } else {
+            // List boards (up to 20)
+            let limit = if count > 20 { 20 } else { count };
+
+            md = md.raw_str("<div class=\"board-list\">\n");
+            for i in 0..limit {
+                if let Some(board) = env.storage().persistent().get::<_, BoardMeta>(&RegistryKey::Board(i)) {
+                    // Board card with link wrapper
+                    md = md.raw_str("<a href=\"render:/b/")
+                        .number(board.id as u32)
+                        .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
+                        .text_string(&board.name)
+                        .raw_str("</span><span class=\"board-card-desc\">")
+                        .text_string(&board.description)
+                        .raw_str("</span><span class=\"board-card-meta\">")
+                        .number(board.thread_count as u32)
+                        .text(" threads");
+                    if board.is_private {
+                        md = md.raw_str(" <span class=\"badge\">private</span>");
+                    }
+                    md = md.raw_str("</span></a>\n");
+                }
+            }
+            md = md.raw_str("</div>\n");
+        }
+
+        md = md.newline()
+            .render_link("+ Create New Board", "/create")
+            .newline();
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render create board form
+    fn render_create_board(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
+            .h1("Create New Board");
+
+        if viewer.is_none() {
+            md = md.warning("Please connect your wallet to create a board.");
+            return Self::render_footer_into(md).build();
+        }
+
+        md = md
+            .paragraph("Create a new discussion board.")
+            .newline()
+            .redirect("/")  // Return to board list after creating board
+            .input("name", "Board name")
+            .newline()
+            .textarea("description", 3, "Board description")
+            .newline()
+            // Private board checkbox - hidden field provides default "false", checkbox overrides to "true"
+            .raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n")
+            .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Make this board private</label>\n")
+            .newline()
+            // Caller address for the contract (must be last to match parameter order)
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer.as_ref().unwrap().to_string())
+            .raw_str("\" />\n")
+            .newline()
+            // Use form_link_to to target registry contract directly
+            .form_link_to("Create Board", "registry", "create_board")
+            .newline()
+            .newline()
+            .render_link("Cancel", "/");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render help page
+    fn render_help(env: &Env) -> Bytes {
+        let md = Self::render_nav(env)
+            .newline()  // Blank line after nav-bar for markdown parsing
+            .raw_str("<h1>Help</h1>\n")  // Use raw HTML for reliable rendering
+            .raw_str("<h2>What is Soroban Boards?</h2>\n")
+            .paragraph("Soroban Boards is a decentralized forum system running on Stellar's Soroban smart contract platform. All content is stored on-chain, and the UI is rendered directly from the smart contracts.")
+            .raw_str("<h2>Features</h2>\n")
+            .list_item("Create discussion boards")
+            .list_item("Post threads and replies")
+            .list_item("Nested comment threads")
+            .list_item("Role-based permissions (Owner, Admin, Moderator, Member)")
+            .list_item("Content moderation (flagging, banning)")
+            .list_item("Progressive loading for large threads")
+            .raw_str("<h2>How to Use</h2>\n")
+            .list_item("Connect your Stellar wallet")
+            .list_item("Browse existing boards or create a new one")
+            .list_item("Create threads and reply to discussions")
+            .list_item("Flag inappropriate content");
+        Self::render_footer_into(md).build()
+    }
+
+    /// Get CSS from Theme contract
+    pub fn styles(env: Env) -> Bytes {
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        // Call theme.styles() to get CSS
+        env.invoke_contract(&contracts.theme, &Symbol::new(&env, "styles"), Vec::new(&env))
+    }
 }
 
 #[cfg(test)]
@@ -474,8 +693,9 @@ mod test {
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
+        let is_private = String::from_str(&env, "false");
 
-        let board_id = client.create_board(&name, &desc, &creator, &false);
+        let board_id = client.create_board(&name, &desc, &is_private, &creator);
         assert_eq!(board_id, 0);
 
         // Verify board
@@ -505,13 +725,14 @@ mod test {
         client.init(&admin, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
+        let is_private = String::from_str(&env, "false");
 
         // Create multiple boards with different names
         let names = ["Board1", "Board2", "Board3", "Board4", "Board5"];
         for name in names.iter() {
             let name = String::from_str(&env, name);
             let desc = String::from_str(&env, "Description");
-            client.create_board(&name, &desc, &creator, &false);
+            client.create_board(&name, &desc, &is_private, &creator);
         }
 
         // List with pagination
@@ -574,7 +795,8 @@ mod test {
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "Test");
         let desc = String::from_str(&env, "Test desc");
-        client.create_board(&name, &desc, &creator, &false);
+        let is_private = String::from_str(&env, "false");
+        client.create_board(&name, &desc, &is_private, &creator);
     }
 
     #[test]
@@ -640,8 +862,9 @@ mod test {
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "Private Board");
         let desc = String::from_str(&env, "Secret discussions");
+        let is_private = String::from_str(&env, "true");
 
-        let board_id = client.create_board(&name, &desc, &creator, &true);
+        let board_id = client.create_board(&name, &desc, &is_private, &creator);
         let board = client.get_board(&board_id).unwrap();
 
         assert!(board.is_private);
@@ -668,11 +891,12 @@ mod test {
 
         let creator = Address::generate(&env);
         let desc = String::from_str(&env, "Desc");
+        let is_private = String::from_str(&env, "false");
 
         // Create boards and verify count increments
         for i in 0..5 {
             let name = String::from_str(&env, "Board");
-            let id = client.create_board(&name, &desc, &creator, &false);
+            let id = client.create_board(&name, &desc, &is_private, &creator);
             assert_eq!(id, i);
             assert_eq!(client.board_count(), i + 1);
         }

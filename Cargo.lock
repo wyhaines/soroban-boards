@@ -201,6 +201,7 @@ dependencies = [
 name = "boards-board"
 version = "0.1.0"
 dependencies = [
+ "soroban-render-sdk",
  "soroban-sdk",
 ]
 
@@ -223,6 +224,7 @@ dependencies = [
 name = "boards-registry"
 version = "0.1.0"
 dependencies = [
+ "soroban-render-sdk",
  "soroban-sdk",
 ]
 

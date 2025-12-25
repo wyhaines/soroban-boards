@@ -1,7 +1,6 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
-use soroban_render_sdk::bytes::string_to_bytes;
 use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 // Declare render capabilities
@@ -19,91 +18,6 @@ pub enum ThemeKey {
     Content,
     /// Admin contract address (for admin UI delegation)
     Admin,
-}
-
-// ============================================================================
-// External Types (must match registry/board/content contracts)
-// ============================================================================
-
-/// Board metadata from registry
-#[contracttype]
-#[derive(Clone)]
-pub struct BoardMeta {
-    pub id: u64,
-    pub name: String,
-    pub description: String,
-    pub creator: Address,
-    pub created_at: u64,
-    pub thread_count: u64,
-    pub is_readonly: bool,
-    pub is_private: bool,
-}
-
-/// Thread metadata from board contract
-#[contracttype]
-#[derive(Clone)]
-pub struct ThreadMeta {
-    pub id: u64,
-    pub board_id: u64,
-    pub title: String,
-    pub creator: Address,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub reply_count: u32,
-    pub is_locked: bool,
-    pub is_pinned: bool,
-    pub is_hidden: bool,
-    pub is_deleted: bool,
-}
-
-/// Reply metadata from content contract
-#[contracttype]
-#[derive(Clone)]
-pub struct ReplyMeta {
-    pub id: u64,
-    pub board_id: u64,
-    pub thread_id: u64,
-    pub parent_id: u64,
-    pub depth: u32,
-    pub creator: Address,
-    pub created_at: u64,
-    pub updated_at: u64,
-    pub is_hidden: bool,
-    pub is_deleted: bool,
-    pub flag_count: u32,
-}
-
-/// Role levels from permissions contract
-#[contracttype]
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u32)]
-pub enum Role {
-    Guest = 0,
-    Member = 1,
-    Moderator = 2,
-    Admin = 3,
-    Owner = 4,
-}
-
-/// Permission set from permissions contract
-#[contracttype]
-#[derive(Clone)]
-pub struct PermissionSet {
-    pub role: Role,
-    pub can_view: bool,
-    pub can_post: bool,
-    pub can_moderate: bool,
-    pub can_admin: bool,
-    pub is_banned: bool,
-}
-
-/// Invite request from permissions contract
-#[contracttype]
-#[derive(Clone)]
-pub struct InviteRequest {
-    pub user: Address,
-    pub board_id: u64,
-    pub created_at: u64,
 }
 
 #[contract]
@@ -154,97 +68,51 @@ impl BoardsTheme {
             .expect("Not initialized")
     }
 
-    /// Get chunk size for waterfall loading (defaults to 6)
-    /// This is a simple implementation that returns the default.
-    /// Board-specific chunk sizes can be added later once all boards are migrated.
-    fn get_chunk_size(_env: &Env, _board_id: u64) -> u32 {
-        // For now, return a sensible default
-        // TODO: Fetch from board contract once data migration is complete
-        6
-    }
-
-    /// Main render entry point
+    /// Main render entry point - delegates to domain-specific contracts
+    ///
+    /// Routing:
+    /// - `/`, `/create`, `/help` → Registry
+    /// - `/admin/*`, `/b/{id}/settings`, etc. → Admin
+    /// - `/b/{id}/*` → Board contract (looked up via Registry)
     pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+
         Router::new(&env, path.clone())
-            // Home page - board list
-            .handle(b"/", |_| Self::render_home(&env, &viewer))
-            // Help page
-            .or_handle(b"/help", |_| Self::render_help(&env))
-            // Create board form
-            .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
+            // Registry routes: home, create, help
+            .handle(b"/", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
+            .or_handle(b"/help", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
+            .or_handle(b"/create", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
             // Admin routes - delegate to admin contract
-            .or_handle(b"/b/{id}/members", |_| {
-                Self::delegate_to_admin(&env, &path, &viewer)
-            })
-            .or_handle(b"/b/{id}/banned", |_| {
-                Self::delegate_to_admin(&env, &path, &viewer)
-            })
-            .or_handle(b"/b/{id}/flags", |_| {
-                Self::delegate_to_admin(&env, &path, &viewer)
-            })
-            .or_handle(b"/b/{id}/settings", |_| {
-                Self::delegate_to_admin(&env, &path, &viewer)
-            })
-            // Thread reply form (must be before thread view to match first)
-            .or_handle(b"/b/{id}/t/{tid}/reply", |req| {
+            .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/b/{id}/banned", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/b/{id}/flags", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/b/{id}/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/b/{id}/invites", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            // Board routes - delegate to board contract
+            .or_handle(b"/b/{id}/*", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                Self::render_reply_form(&env, board_id, thread_id, None, &viewer)
+                Self::delegate_to_board(&env, &registry, board_id, &path, &viewer)
             })
-            // Load top-level replies batch (waterfall loading)
-            .or_handle(b"/b/{id}/t/{tid}/replies/{start}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                let start = req.get_var_u32(b"start").unwrap_or(0);
-                Self::render_replies_batch(&env, board_id, thread_id, start, &viewer)
-            })
-            // Load children of a reply batch (waterfall loading)
-            .or_handle(b"/b/{id}/t/{tid}/r/{rid}/children/{start}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
-                let start = req.get_var_u32(b"start").unwrap_or(0);
-                Self::render_children_batch(&env, board_id, thread_id, reply_id, start, &viewer)
-            })
-            // Load more children of a reply (legacy page view)
-            .or_handle(b"/b/{id}/t/{tid}/r/{rid}/children", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
-                Self::render_reply_children(&env, board_id, thread_id, reply_id, &viewer)
-            })
-            // Nested reply form
-            .or_handle(b"/b/{id}/t/{tid}/r/{rid}/reply", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
-                Self::render_reply_form(&env, board_id, thread_id, Some(reply_id), &viewer)
-            })
-            // Single reply view
-            .or_handle(b"/b/{id}/t/{tid}/r/{rid}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                let reply_id = req.get_var_u32(b"rid").unwrap_or(0) as u64;
-                Self::render_reply(&env, board_id, thread_id, reply_id, &viewer)
-            })
-            // Thread view with replies
-            .or_handle(b"/b/{id}/t/{tid}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
-                Self::render_thread(&env, board_id, thread_id, &viewer)
-            })
-            // Create thread form
-            .or_handle(b"/b/{id}/new", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_create_thread(&env, board_id, &viewer)
-            })
-            // Board view with thread list
             .or_handle(b"/b/{id}", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::render_board(&env, board_id, &viewer)
+                Self::delegate_to_board(&env, &registry, board_id, &path, &viewer)
             })
-            // Default
-            .or_default(|_| Self::render_home(&env, &viewer))
+            // Default - delegate to registry (home page)
+            .or_default(|_| Self::delegate_to_registry(&env, &registry, &None, &viewer))
+    }
+
+    /// Delegate rendering to the registry contract
+    fn delegate_to_registry(env: &Env, registry: &Address, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let args: Vec<Val> = Vec::from_array(env, [
+            path.into_val(env),
+            viewer.into_val(env),
+        ]);
+        env.invoke_contract(registry, &Symbol::new(env, "render"), args)
     }
 
     /// Delegate rendering to the admin contract
@@ -255,1101 +123,121 @@ impl BoardsTheme {
             .get(&ThemeKey::Admin)
             .expect("Admin contract not initialized");
 
-        // Call admin.render(path, viewer)
         let args: Vec<Val> = Vec::from_array(env, [
             path.into_val(env),
             viewer.into_val(env),
         ]);
-
         env.invoke_contract(&admin, &Symbol::new(env, "render"), args)
     }
 
-    /// Render the home page with board list
-    fn render_home(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar div for markdown parsing
-            .h1("Soroban Boards")
-            .paragraph("Decentralized discussion forums on Stellar");
-
-        // Show connection status
-        if viewer.is_some() {
-            md = md.tip("Wallet connected! You can create boards and post.");
-        } else {
-            md = md.note("Connect your wallet to participate in discussions.");
-        }
-
-        md = md.h2("Boards")
-            .newline();
-
-        // Fetch boards from registry
-        if let Some(registry) = env.storage().instance().get::<_, Address>(&ThemeKey::Registry) {
-            // Call registry.board_count()
-            let count: u64 = env.invoke_contract(
-                &registry,
-                &Symbol::new(env, "board_count"),
-                Vec::new(env),
-            );
-
-            if count == 0 {
-                md = md.paragraph("No boards yet. Be the first to create one!");
-            } else {
-                // Call registry.list_boards(0, 20)
-                let args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 20u64.into_val(env)]);
-                let boards: Vec<BoardMeta> = env.invoke_contract(
-                    &registry,
-                    &Symbol::new(env, "list_boards"),
-                    args,
-                );
-
-                md = md.raw_str("<div class=\"board-list\">\n");
-                for i in 0..boards.len() {
-                    if let Some(board) = boards.get(i) {
-                        // Board card with link wrapper
-                        md = md.raw_str("<a href=\"render:/b/")
-                            .number(board.id as u32)
-                            .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
-                            .text_string(&board.name)
-                            .raw_str("</span><span class=\"board-card-desc\">")
-                            .text_string(&board.description)
-                            .raw_str("</span><span class=\"board-card-meta\">")
-                            .number(board.thread_count as u32)
-                            .text(" threads");
-                        if board.is_private {
-                            md = md.raw_str(" <span class=\"badge\">private</span>");
-                        }
-                        md = md.raw_str("</span></a>\n");
-                    }
-                }
-                md = md.raw_str("</div>\n");
-            }
-        } else {
-            md = md.warning("Registry not configured");
-        }
-
-        md = md.newline()
-            .render_link("+ Create New Board", "/create")
-            .newline();
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render the navigation bar
-    fn render_nav(env: &Env) -> MarkdownBuilder<'_> {
-        MarkdownBuilder::new(env)
-            .div_start("nav-bar")
-            .render_link("Soroban Boards", "/")
-            .render_link("Help", "/help")
-            .div_end()
-    }
-
-    /// Append footer to builder
-    fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.div_start("footer")
-            .text("Powered by ")
-            .link("Soroban Render", "https://github.com/wyhaines/soroban-render")
-            .text(" on ")
-            .link("Stellar", "https://stellar.org")
-            .div_end()
-    }
-
-    /// Render help page
-    fn render_help(env: &Env) -> Bytes {
-        let md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("<h1>Help</h1>\n")  // Use raw HTML for reliable rendering
-            .raw_str("<h2>What is Soroban Boards?</h2>\n")
-            .paragraph("Soroban Boards is a decentralized forum system running on Stellar's Soroban smart contract platform. All content is stored on-chain, and the UI is rendered directly from the smart contracts.")
-            .raw_str("<h2>Features</h2>\n")
-            .list_item("Create discussion boards")
-            .list_item("Post threads and replies")
-            .list_item("Nested comment threads")
-            .list_item("Role-based permissions (Owner, Admin, Moderator, Member)")
-            .list_item("Content moderation (flagging, banning)")
-            .list_item("Progressive loading for large threads")
-            .raw_str("<h2>How to Use</h2>\n")
-            .list_item("Connect your Stellar wallet")
-            .list_item("Browse existing boards or create a new one")
-            .list_item("Create threads and reply to discussions")
-            .list_item("Flag inappropriate content");
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render create board form
-    fn render_create_board(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .h1("Create New Board");
-
-        if viewer.is_none() {
-            md = md.warning("Please connect your wallet to create a board.");
-            return Self::render_footer_into(md).build();
-        }
-
-        md = md
-            .paragraph("Create a new discussion board.")
-            .newline()
-            .redirect("/")  // Return to board list after creating board
-            .input("name", "Board name")
-            .newline()
-            .textarea("description", 3, "Board description")
-            .newline()
-            // Private board checkbox - hidden field provides default "false", checkbox overrides to "true"
-            .raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n")
-            .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Make this board private</label>\n")
-            .newline()
-            // Caller address for the contract (must be last to match parameter order)
-            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-            .text_string(&viewer.as_ref().unwrap().to_string())
-            .raw_str("\" />\n")
-            .newline()
-            .form_link("Create Board", "create_board")
-            .newline()
-            .newline()
-            .render_link("Cancel", "/");
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render a single board with thread list
-    fn render_board(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-
-        // Fetch board metadata
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_opt: Option<BoardMeta> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board"),
-            args,
+    /// Delegate rendering to a board contract
+    ///
+    /// Looks up the board contract address from registry, then calls its render()
+    /// with the relative path (stripping `/b/{id}` prefix).
+    fn delegate_to_board(env: &Env, registry: &Address, board_id: u64, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        // Get board contract address from registry
+        let board_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            registry,
+            &Symbol::new(env, "get_board_contract"),
+            board_args,
         );
 
-        let Some(board) = board_opt else {
-            return Self::render_nav(env)
+        let Some(board_contract) = board_contract_opt else {
+            // Board not found - return error page
+            return MarkdownBuilder::new(env)
                 .h1("Board Not Found")
                 .paragraph("The requested board does not exist.")
                 .render_link("Back to Home", "/")
                 .build();
         };
 
-        // For private boards, check if viewer has access
-        if board.is_private {
-            let permissions: Address = env
-                .storage()
-                .instance()
-                .get(&ThemeKey::Permissions)
-                .expect("Not initialized");
+        // Convert path to relative path for board contract
+        // e.g., "/b/0/t/1" -> "/t/1", "/b/0" -> "/"
+        let relative_path = Self::strip_board_prefix(env, path, board_id);
 
-            // Check viewer's role
-            let viewer_role = if let Some(user) = viewer {
-                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-                let role: Role = env.invoke_contract(
-                    &permissions,
-                    &Symbol::new(env, "get_role"),
-                    args,
-                );
-                role
-            } else {
-                Role::Guest
-            };
-
-            // If not a member (Guest), show access denied page
-            if (viewer_role as u32) < (Role::Member as u32) {
-                let mut md = Self::render_nav(env)
-                    .render_link("< Back", "/")
-                    .div_start("page-header")
-                    .raw_str("<h1>")
-                    .text_string(&board.name)
-                    .raw_str("</h1>")
-                    .raw_str("<p>")
-                    .text_string(&board.description)
-                    .raw_str("</p>")
-                    .div_end()
-                    .newline()
-                    .raw_str("<span class=\"badge badge-private\">private</span>")
-                    .newline()
-                    .newline();
-
-                if viewer.is_none() {
-                    md = md.warning("This is a private board. Please connect your wallet to request access.");
-                } else {
-                    // Check if user has a pending invite request
-                    let has_request_args: Vec<Val> = Vec::from_array(env, [
-                        board_id.into_val(env),
-                        viewer.as_ref().unwrap().into_val(env),
-                    ]);
-                    let has_request: bool = env.invoke_contract(
-                        &permissions,
-                        &Symbol::new(env, "has_invite_request"),
-                        has_request_args,
-                    );
-
-                    if has_request {
-                        md = md.tip("Your request to join this board is pending approval.");
-                    } else {
-                        md = md.note("This is a private board. You can request access from the board administrators.")
-                            .newline()
-                            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                            .number(board_id as u32)
-                            .raw_str("\" />\n")
-                            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-                            .text_string(&viewer.as_ref().unwrap().to_string())
-                            .raw_str("\" />\n")
-                            .form_link("Request to Join", "request_invite");
-                    }
-                }
-
-                return Self::render_footer_into(md).build();
-            }
-        }
-
-        let mut md = Self::render_nav(env)
-            .render_link("< Back", "/")
-            .div_start("page-header")
-            .raw_str("<h1>")
-            .text_string(&board.name)
-            .raw_str("</h1>")
-            .raw_str("<p>")
-            .text_string(&board.description)
-            .raw_str("</p>")
-            .div_end()
-            .newline();  // Blank line after page-header for markdown parsing
-
-        // Show private badge if applicable
-        if board.is_private {
-            md = md.raw_str("<span class=\"badge badge-private\">private</span> ");
-        }
-
-        if board.is_readonly {
-            md = md.note("This board is read-only.");
-        }
-
-        // Show create thread button if logged in
-        if viewer.is_some() && !board.is_readonly {
-            md = md.raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
-                .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
-                .newline();
-        }
-
-        // Show settings button for Admin+ users
-        if let Some(user) = viewer {
-            let permissions: Address = env
-                .storage()
-                .instance()
-                .get(&ThemeKey::Permissions)
-                .expect("Not initialized");
-
-            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let viewer_role: Role = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_role"),
-                role_args,
-            );
-
-            // Admin or Owner can access settings
-            if (viewer_role as u32) >= (Role::Admin as u32) {
-                md = md.raw_str("<a href=\"render:/admin/b/")
-                    .number(board_id as u32)
-                    .raw_str("/settings\" class=\"action-btn action-btn-secondary\">⚙ Settings</a>")
-                    .newline();
-            }
-        }
-
-        // Use raw HTML for h2 since markdown parsing after HTML blocks can be unreliable
-        md = md.raw_str("<h2>Threads</h2>\n")
-            .div_start("thread-list");
-
-        // Fetch board contract address from registry
-        let board_contract_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_contract_opt: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
-            board_contract_args,
-        );
-
-        if let Some(board_contract) = board_contract_opt {
-            // Fetch threads from board contract
-            let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 20u64.into_val(env)]);
-            let threads: Vec<ThreadMeta> = env.invoke_contract(
-                &board_contract,
-                &Symbol::new(env, "list_threads"),
-                list_args,
-            );
-
-            if threads.is_empty() {
-                md = md.div_end()  // close thread-list
-                    .paragraph("No threads yet. Be the first to post!");
-            } else {
-                for i in 0..threads.len() {
-                    let thread = threads.get(i).unwrap();
-                    // Thread card with link wrapper (similar to board cards)
-                    md = md.raw_str("<a href=\"render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("/t/")
-                        .number(thread.id as u32)
-                        .raw_str("\" class=\"thread-card\"><span class=\"thread-card-title\">")
-                        .text_string(&thread.title)
-                        .raw_str("</span><span class=\"thread-card-meta\">");
-                    // Show badges for pinned/locked threads
-                    if thread.is_pinned {
-                        md = md.raw_str("<span class=\"badge badge-pinned\">pinned</span> ");
-                    }
-                    if thread.is_locked {
-                        md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
-                    }
-                    md = md.number(thread.reply_count)
-                        .text(" replies")
-                        .raw_str("</span></a>\n");
-                }
-                md = md.div_end();  // close thread-list
-            }
-        } else {
-            // No board contract registered yet
-            md = md.div_end()  // close thread-list
-                .paragraph("No threads yet. Be the first to post!");
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render create thread form
-    fn render_create_thread(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .h1("New Thread");
-
-        if viewer.is_none() {
-            md = md.warning("Please connect your wallet to create a thread.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Hidden inputs for form metadata
-        md = md
-            // Redirect to board page after creating thread
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
-            .raw_str("\" />\n")
-            // Board ID for the contract
-            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-            .number(board_id as u32)
-            .raw_str("\" />\n")
-            .input("title", "Thread title")
-            .newline()
-            .textarea("body", 10, "Write your post content here...")
-            .newline()
-            // Caller address for the contract (must be last to match parameter order)
-            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-            .text_string(&viewer.as_ref().unwrap().to_string())
-            .raw_str("\" />\n")
-            .newline()
-            .form_link("Create Thread", "create_thread")
-            .newline()
-            .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")");
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render a thread with replies (uses waterfall loading)
-    fn render_thread(env: &Env, board_id: u64, thread_id: u64, viewer: &Option<Address>) -> Bytes {
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("[< Back to Board](render:/b/")
-            .number(board_id as u32)
-            .raw_str(")")
-            .newline()
-            .raw_str("<h1>Thread</h1>\n");  // Use raw HTML for reliable rendering
-
-        // Thread body in a container
-        md = md.div_start("thread-body");
-
-        // Get thread body from content contract
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
-        let body: Bytes = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_thread_body"),
-            args.clone(),
-        );
-
-        if body.len() > 0 {
-            md = md.raw(body);
-        } else {
-            md = md.italic("No content");
-        }
-
-        md = md.div_end()  // Close thread-body
-            .newline();  // Blank line for markdown parsing
-
-        // Thread actions (Reply button)
-        if viewer.is_some() {
-            md = md.div_start("thread-actions")
-                .raw_str("[Reply to Thread](render:/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/reply)")
-                .div_end()
-                .newline();  // Blank line for markdown parsing
-        }
-
-        // Use raw HTML for h2 since markdown parsing after HTML blocks can be unreliable
-        md = md.raw_str("<h2>Replies</h2>\n");
-
-        // Fetch reply count
-        let reply_count: u64 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply_count"),
-            args.clone(),
-        );
-
-        if reply_count == 0 {
-            md = md.paragraph("No replies yet. Be the first to respond!");
-        } else {
-            // Use waterfall loading: embed a continuation for the first batch
-            // The viewer will automatically fetch /b/{id}/t/{tid}/replies/0
-            // which returns the first chunk of replies + continuation for next chunk
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/replies/0\"}}");
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render a batch of top-level replies (for waterfall loading)
-    fn render_replies_batch(env: &Env, board_id: u64, thread_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let chunk_size = Self::get_chunk_size(env, board_id);
-
-        // Get total reply count
-        let count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
-        let total_count: u64 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply_count"),
-            count_args,
-        );
-
-        // Fetch this batch of replies
-        let list_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            start.into_val(env),
-            chunk_size.into_val(env),
-        ]);
-        let replies: Vec<ReplyMeta> = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "list_top_level_replies"),
-            list_args,
-        );
-
-        let mut md = MarkdownBuilder::new(env);
-
-        // Render each reply with child continuations (not eager loading)
-        for i in 0..replies.len() {
-            if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer);
-            }
-        }
-
-        // If more replies exist, add continuation for next batch
-        let next_start = start + chunk_size;
-        if (next_start as u64) < total_count {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/replies/")
-                .number(next_start)
-                .raw_str("\"}}");
-        }
-
-        md.build()
-    }
-
-    /// Render a batch of children for a reply (for waterfall loading)
-    fn render_children_batch(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let chunk_size = Self::get_chunk_size(env, board_id);
-
-        // Get total children count
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            parent_id.into_val(env),
-        ]);
-        let total_count: u32 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_children_count"),
-            count_args,
-        );
-
-        // Fetch this batch of children
-        let list_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            parent_id.into_val(env),
-            start.into_val(env),
-            chunk_size.into_val(env),
-        ]);
-        let children: Vec<ReplyMeta> = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "list_children_replies"),
-            list_args,
-        );
-
-        let mut md = MarkdownBuilder::new(env);
-
-        // Render each child with its own child continuations
-        for i in 0..children.len() {
-            if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer);
-            }
-        }
-
-        // If more children exist, add continuation for next batch
-        let next_start = start + chunk_size;
-        if next_start < total_count {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/r/")
-                .number(parent_id as u32)
-                .raw_str("/children/")
-                .number(next_start)
-                .raw_str("\"}}");
-        }
-
-        md.build()
-    }
-
-    /// Render a single reply with waterfall loading for children
-    /// (no eager child loading - uses render continuations)
-    fn render_reply_item_waterfall<'a>(
-        env: &Env,
-        mut md: MarkdownBuilder<'a>,
-        content: &Address,
-        reply: &ReplyMeta,
-        board_id: u64,
-        thread_id: u64,
-        viewer: &Option<Address>,
-    ) -> MarkdownBuilder<'a> {
-        // Open reply container
-        md = md.div_start("reply");
-
-        // Reply content
-        if reply.is_hidden {
-            md = md.div_start("reply-content reply-hidden")
-                .text("[This reply has been hidden by a moderator]")
-                .div_end();
-        } else if reply.is_deleted {
-            md = md.div_start("reply-content reply-deleted")
-                .text("[This reply has been deleted]")
-                .div_end();
-        } else {
-            // Get reply content from content contract
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                reply.id.into_val(env),
-            ]);
-            let content_bytes: Bytes = env.invoke_contract(
-                content,
-                &Symbol::new(env, "get_reply_content"),
-                args,
-            );
-
-            md = md.div_start("reply-content")
-                .raw(content_bytes)
-                .div_end();
-        }
-
-        // Reply metadata and actions
-        md = md.div_start("reply-meta")
-            .span_start("reply-id")
-            .text("Reply #")
-            .number(reply.id as u32)
-            .span_end();
-
-        if viewer.is_some() {
-            md = md.text(" ")
-                .raw_str("[Reply](render:/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/r/")
-                .number(reply.id as u32)
-                .raw_str("/reply)")
-                .text(" ")
-                // Flag link targets content contract directly with args
-                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
-                .number(board_id as u32)
-                .raw_str(",\"thread_id\":")
-                .number(thread_id as u32)
-                .raw_str(",\"reply_id\":")
-                .number(reply.id as u32)
-                .raw_str(",\"reason\":\"\"})");
-        }
-
-        md = md.div_end();  // Close reply-meta
-
-        // Get children count
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            reply.id.into_val(env),
-        ]);
-        let children_count: u32 = env.invoke_contract(
-            content,
-            &Symbol::new(env, "get_children_count"),
-            count_args,
-        );
-
-        // If has children, embed a continuation for them (waterfall loading)
-        if children_count > 0 {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/r/")
-                .number(reply.id as u32)
-                .raw_str("/children/0\"}}");
-        }
-
-        // Close reply container
-        md = md.div_end();
-
-        md
-    }
-
-    /// Render a single reply item with nested children
-    ///
-    /// Children are rendered INSIDE the parent div, creating true DOM nesting.
-    /// CSS handles indentation via margin-left on .reply class.
-    ///
-    /// To prevent budget exhaustion from deep nesting, we limit eager loading
-    /// to MAX_EAGER_DEPTH levels. Beyond that, a "view replies" link is shown.
-    fn render_reply_item<'a>(
-        env: &Env,
-        mut md: MarkdownBuilder<'a>,
-        content: &Address,
-        reply: &ReplyMeta,
-        board_id: u64,
-        thread_id: u64,
-        viewer: &Option<Address>,
-        depth: u32,  // Track depth for limiting recursion
-    ) -> MarkdownBuilder<'a> {
-        // Maximum depth for eager child loading (prevents budget exhaustion)
-        // Beyond this depth, show "view replies" link instead
-        const MAX_EAGER_DEPTH: u32 = 2;
-        // Open reply container - single class, nesting handles indentation
-        md = md.div_start("reply");
-
-        // Reply content
-        if reply.is_hidden {
-            md = md.div_start("reply-content reply-hidden")
-                .text("[This reply has been hidden by a moderator]")
-                .div_end();
-        } else if reply.is_deleted {
-            md = md.div_start("reply-content reply-deleted")
-                .text("[This reply has been deleted]")
-                .div_end();
-        } else {
-            // Get reply content from content contract
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                reply.id.into_val(env),
-            ]);
-            let content_bytes: Bytes = env.invoke_contract(
-                content,
-                &Symbol::new(env, "get_reply_content"),
-                args,
-            );
-
-            md = md.div_start("reply-content")
-                .raw(content_bytes)
-                .div_end();
-        }
-
-        // Reply metadata and actions
-        md = md.div_start("reply-meta")
-            .span_start("reply-id")
-            .text("Reply #")
-            .number(reply.id as u32)
-            .span_end();
-
-        if viewer.is_some() {
-            md = md.text(" ")
-                .raw_str("[Reply](render:/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/r/")
-                .number(reply.id as u32)
-                .raw_str("/reply)")
-                .text(" ")
-                // Flag link targets content contract directly with args
-                .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
-                .number(board_id as u32)
-                .raw_str(",\"thread_id\":")
-                .number(thread_id as u32)
-                .raw_str(",\"reply_id\":")
-                .number(reply.id as u32)
-                .raw_str(",\"reason\":\"\"})");
-        }
-
-        md = md.div_end();  // Close reply-meta
-
-        // Fetch children with progressive loading
-        // Load first 5 children initially, rest via continuation
-        const CHILDREN_LIMIT: u32 = 5;
-
-        // Get total children count first
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            reply.id.into_val(env),
-        ]);
-        let children_count: u32 = env.invoke_contract(
-            content,
-            &Symbol::new(env, "get_children_count"),
-            count_args,
-        );
-
-        if children_count > 0 {
-            // If we've hit max depth, don't eagerly load children - show link instead
-            if depth >= MAX_EAGER_DEPTH {
-                md = md.div_start("reply-more")
-                    .raw_str("[View ")
-                    .number(children_count)
-                    .raw_str(" ")
-                    .raw_str(if children_count == 1 { "reply" } else { "replies" })
-                    .raw_str("](render:/b/")
-                    .number(board_id as u32)
-                    .raw_str("/t/")
-                    .number(thread_id as u32)
-                    .raw_str("/r/")
-                    .number(reply.id as u32)
-                    .raw_str("/children)")
-                    .div_end();
-            } else {
-                // Fetch first batch of children
-                let children_args: Vec<Val> = Vec::from_array(env, [
-                    board_id.into_val(env),
-                    thread_id.into_val(env),
-                    reply.id.into_val(env),
-                    0u32.into_val(env),        // start
-                    CHILDREN_LIMIT.into_val(env),  // limit
-                ]);
-                let children: Vec<ReplyMeta> = env.invoke_contract(
-                    content,
-                    &Symbol::new(env, "list_children_replies"),
-                    children_args,
-                );
-
-                for i in 0..children.len() {
-                    if let Some(child) = children.get(i) {
-                        // Children rendered inside parent - nesting creates indentation
-                        md = Self::render_reply_item(env, md, content, &child, board_id, thread_id, viewer, depth + 1);
-                    }
-                }
-
-                // Add "load more" link if more children exist
-                if children_count > CHILDREN_LIMIT {
-                    let remaining = children_count - CHILDREN_LIMIT;
-                    md = md.div_start("reply-more")
-                        .raw_str("[Load ")
-                        .number(remaining)
-                        .raw_str(" more ")
-                        .raw_str(if remaining == 1 { "reply" } else { "replies" })
-                        .raw_str("](render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("/t/")
-                        .number(thread_id as u32)
-                        .raw_str("/r/")
-                        .number(reply.id as u32)
-                        .raw_str("/children)")
-                        .div_end();
-                }
-            }
-        }
-
-        // Close reply container AFTER children
-        md = md.div_end();
-
-        md
-    }
-
-    /// Render children of a reply (for "load more" progressive loading)
-    /// This is a dedicated page, so we have more budget - but still limit to prevent exhaustion
-    fn render_reply_children(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, viewer: &Option<Address>) -> Bytes {
-        const PAGE_LIMIT: u32 = 10;  // Max children per page
-
-        let content = Self::get_content(env.clone());
-
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/t/")
-            .number(thread_id as u32)
-            .raw_str(")")
-            .newline()
-            .raw_str("<h2>Replies</h2>\n");  // Use raw HTML for reliable rendering
-
-        // Get total children count
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            parent_id.into_val(env),
-        ]);
-        let children_count: u32 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_children_count"),
-            count_args,
-        );
-
-        if children_count == 0 {
-            md = md.paragraph("No replies found.");
-        } else {
-            // Fetch limited batch of children
-            let fetch_limit = if children_count > PAGE_LIMIT { PAGE_LIMIT } else { children_count };
-            let children_args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                parent_id.into_val(env),
-                0u32.into_val(env),
-                fetch_limit.into_val(env),
-            ]);
-            let children: Vec<ReplyMeta> = env.invoke_contract(
-                &content,
-                &Symbol::new(env, "list_children_replies"),
-                children_args,
-            );
-
-            for i in 0..children.len() {
-                if let Some(child) = children.get(i) {
-                    // Start at depth 0 - this page is the "root" context
-                    md = Self::render_reply_item(env, md, &content, &child, board_id, thread_id, viewer, 0);
-                }
-            }
-
-            // Show message if more exist
-            if children_count > PAGE_LIMIT {
-                md = md.div_start("reply-more")
-                    .paragraph("More replies exist. View the thread for full context.")
-                    .div_end();
-            }
-        }
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render reply form
-    /// parent_reply_id: None for thread replies, Some(id) for nested replies
-    fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/t/")
-            .number(thread_id as u32)
-            .raw_str(")")
-            .newline()
-            .newline();  // Blank line before h1 for markdown parsing
-
-        // Use raw HTML for headings to ensure reliable rendering after HTML blocks
-        if parent_reply_id.is_some() {
-            md = md.raw_str("<h1>Reply to Comment</h1>\n");
-        } else {
-            md = md.raw_str("<h1>Reply to Thread</h1>\n");
-        }
-
-        if viewer.is_none() {
-            md = md.warning("Please connect your wallet to reply.");
-            return Self::render_footer_into(md).build();
-        }
-
-        // Hidden inputs for board_id, thread_id, parent_id, depth
-        // Depth is parent_depth + 1, or 0 for top-level replies
-        let (parent_id, depth): (u64, u32) = if let Some(pid) = parent_reply_id {
-            // Replying to another reply - look up parent's depth
-            let content: Address = env
-                .storage()
-                .instance()
-                .get(&ThemeKey::Content)
-                .expect("Not initialized");
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                pid.into_val(env),
-            ]);
-            let parent_reply: Option<ReplyMeta> = env.invoke_contract(
-                &content,
-                &Symbol::new(env, "get_reply"),
-                args,
-            );
-            match parent_reply {
-                Some(reply) => (pid, reply.depth + 1),
-                None => (pid, 1), // Fallback if parent not found
-            }
-        } else {
-            // Top-level reply to thread
-            (0, 0)
-        };
-        md = md
-            // Redirect to thread view after posting reply
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
-            .raw_str("/t/")
-            .number(thread_id as u32)
-            .raw_str("\" />\n")
-            // Form data for contract
-            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-            .number(board_id as u32)
-            .raw_str("\" />\n")
-            .raw_str("<input type=\"hidden\" name=\"thread_id\" value=\"")
-            .number(thread_id as u32)
-            .raw_str("\" />\n")
-            .raw_str("<input type=\"hidden\" name=\"parent_id\" value=\"")
-            .number(parent_id as u32)
-            .raw_str("\" />\n")
-            .raw_str("<input type=\"hidden\" name=\"depth\" value=\"")
-            .number(depth)
-            .raw_str("\" />\n")
-            .textarea("content_str", 6, "Write your reply...")
-            .newline()
-            // Caller address for the contract (must be last to match parameter order)
-            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-            .text_string(&viewer.as_ref().unwrap().to_string())
-            .raw_str("\" />\n")
-            .newline()
-            .form_link("Post Reply", "create_reply")
-            .newline()
-            .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/t/")
-            .number(thread_id as u32)
-            .raw_str(")");
-
-        Self::render_footer_into(md).build()
-    }
-
-    /// Render a single reply view
-    fn render_reply(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, viewer: &Option<Address>) -> Bytes {
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let mut md = Self::render_nav(env)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
-            .raw_str("/t/")
-            .number(thread_id as u32)
-            .raw_str(")")
-            .newline()
-            .raw_str("<h1>Reply #")
-            .number(reply_id as u32)
-            .raw_str("</h1>\n");
-
-        // Fetch reply metadata
         let args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            reply_id.into_val(env),
+            relative_path.into_val(env),
+            viewer.into_val(env),
         ]);
-        let reply_opt: Option<ReplyMeta> = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply"),
-            args.clone(),
-        );
+        env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
+    }
 
-        let Some(reply) = reply_opt else {
-            return md.warning("Reply not found.").build();
+    /// Strip the `/b/{id}` prefix from a path to get relative path for board contract
+    fn strip_board_prefix(env: &Env, path: &Option<String>, board_id: u64) -> Option<String> {
+        let Some(p) = path else {
+            return Some(String::from_str(env, "/"));
         };
 
-        if reply.is_hidden {
-            md = md.warning("This reply has been hidden by a moderator.");
-        } else if reply.is_deleted {
-            md = md.note("This reply has been deleted.");
-        } else {
-            // Get reply content
-            let content_bytes: Bytes = env.invoke_contract(
-                &content,
-                &Symbol::new(env, "get_reply_content"),
-                args,
-            );
-            md = md.div_start("thread-body")
-                .raw(content_bytes)
-                .div_end();
+        // Build the prefix we need to strip: "/b/{board_id}"
+        // For simplicity, we'll use a fixed approach
+        let path_len = p.len() as usize;
+
+        // Calculate prefix length: "/b/" + digits + optional rest
+        // We need to find where the board_id ends
+        let mut prefix = [0u8; 32];
+        let prefix_start = b"/b/";
+        prefix[0..3].copy_from_slice(prefix_start);
+
+        // Convert board_id to string
+        let mut id_bytes = [0u8; 20];
+        let id_len = Self::u64_to_bytes(board_id, &mut id_bytes);
+        prefix[3..3 + id_len].copy_from_slice(&id_bytes[0..id_len]);
+        let prefix_len = 3 + id_len;
+
+        // Copy path to buffer for comparison
+        let mut path_buf = [0u8; 256];
+        let copy_len = if path_len > 256 { 256 } else { path_len };
+        p.copy_into_slice(&mut path_buf[0..copy_len]);
+
+        // Check if path starts with prefix
+        if copy_len >= prefix_len && &path_buf[0..prefix_len] == &prefix[0..prefix_len] {
+            // Path matches prefix, extract the rest
+            if copy_len == prefix_len {
+                // Exact match like "/b/0", return "/"
+                return Some(String::from_str(env, "/"));
+            } else if path_buf[prefix_len] == b'/' {
+                // Path has more after prefix, like "/b/0/t/1"
+                // Return from the slash onwards
+                let rest_len = copy_len - prefix_len;
+                let rest_slice = &path_buf[prefix_len..copy_len];
+                // Convert slice to String
+                return Some(Self::bytes_to_string(env, rest_slice, rest_len));
+            }
         }
 
-        // Actions
-        if viewer.is_some() {
-            md = md.div_start("actions")
-                .raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
-                .raw_str("/t/")
-                .number(thread_id as u32)
-                .raw_str("/r/")
-                .number(reply_id as u32)
-                .raw_str("/reply\" class=\"action-btn\">Reply</a>")
-                // Flag link targets content contract directly with args
-                .raw_str("<a href=\"tx:@content:flag_reply {&quot;board_id&quot;:")
-                .number(board_id as u32)
-                .raw_str(",&quot;thread_id&quot;:")
-                .number(thread_id as u32)
-                .raw_str(",&quot;reply_id&quot;:")
-                .number(reply_id as u32)
-                .raw_str(",&quot;reason&quot;:&quot;&quot;}\" class=\"action-btn action-btn-secondary\">Flag</a>")
-                .div_end();
+        // Fallback - return root
+        Some(String::from_str(env, "/"))
+    }
+
+    /// Convert u64 to byte slice, return number of bytes written
+    fn u64_to_bytes(mut n: u64, buf: &mut [u8; 20]) -> usize {
+        if n == 0 {
+            buf[0] = b'0';
+            return 1;
         }
 
-        Self::render_footer_into(md).build()
+        let mut temp = [0u8; 20];
+        let mut len = 0;
+
+        while n > 0 {
+            temp[len] = b'0' + (n % 10) as u8;
+            n /= 10;
+            len += 1;
+        }
+
+        // Reverse into buf
+        for i in 0..len {
+            buf[i] = temp[len - 1 - i];
+        }
+
+        len
     }
 
-    /// Render header component
-    pub fn render_header(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
-        Self::render_nav(&env).build()
-    }
-
-    /// Render footer component
-    pub fn render_footer(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
-        MarkdownBuilder::new(&env)
-            .hr()
-            .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
-            .build()
+    /// Convert byte slice to String
+    fn bytes_to_string(env: &Env, bytes: &[u8], len: usize) -> String {
+        // Create String from byte slice
+        String::from_bytes(env, &bytes[0..len])
     }
 
     /// Public styles method for viewer/test access
@@ -1528,6 +416,24 @@ impl BoardsTheme {
             .build()
     }
 
+    /// Render header component
+    pub fn render_header(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
+        MarkdownBuilder::new(&env)
+            .div_start("nav-bar")
+            .render_link("Soroban Boards", "/")
+            .render_link("Help", "/help")
+            .div_end()
+            .build()
+    }
+
+    /// Render footer component
+    pub fn render_footer(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
+        MarkdownBuilder::new(&env)
+            .hr()
+            .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
+            .build()
+    }
+
     /// Upgrade the contract WASM
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let registry: Address = env
@@ -1539,321 +445,6 @@ impl BoardsTheme {
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
-
-    // ========================================================================
-    // Write Operations (proxy methods for forms)
-    // ========================================================================
-
-    /// Create a new board (proxies to registry)
-    pub fn create_board(
-        env: Env,
-        name: String,
-        description: String,
-        is_private: String,  // String from form, parse to bool ("true" = private)
-        caller: Address,
-    ) -> u64 {
-        caller.require_auth();
-
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-
-        // Parse is_private string to bool
-        // "true" = private, anything else = public
-        let is_private_bool = is_private.len() == 4 && {
-            let mut buf = [0u8; 4];
-            is_private.copy_into_slice(&mut buf);
-            &buf == b"true"
-        };
-
-        // Call registry.create_board
-        let args: Vec<Val> = Vec::from_array(&env, [
-            name.into_val(&env),
-            description.into_val(&env),
-            caller.into_val(&env),
-            is_private_bool.into_val(&env),
-        ]);
-
-        env.invoke_contract(&registry, &Symbol::new(&env, "create_board"), args)
-    }
-
-    /// Request an invite to join a private board (proxies to permissions contract)
-    pub fn request_invite(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
-        caller.require_auth();
-
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Permissions)
-            .expect("Not initialized");
-
-        // Call permissions.request_invite
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-
-        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "request_invite"), args)
-    }
-
-    /// Create a new thread (proxies to board contract)
-    pub fn create_thread(
-        env: Env,
-        board_id: u64,
-        title: String,
-        body: String,
-        caller: Address,
-    ) -> u64 {
-        caller.require_auth();
-
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        // Get board contract from registry
-        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                board_args,
-            )
-            .expect("Board contract not found");
-
-        // Create thread on board contract
-        let create_args: Vec<Val> = Vec::from_array(&env, [
-            title.into_val(&env),
-            caller.clone().into_val(&env),
-        ]);
-        let thread_id: u64 = env.invoke_contract(
-            &board_contract,
-            &Symbol::new(&env, "create_thread"),
-            create_args,
-        );
-
-        // Increment thread count in registry
-        let inc_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        env.invoke_contract::<()>(
-            &registry,
-            &Symbol::new(&env, "increment_thread_count"),
-            inc_args,
-        );
-
-        // Set thread body on content contract
-        let body_bytes = string_to_bytes(&env, &body);
-
-        let body_args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            body_bytes.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "set_thread_body"),
-            body_args,
-        );
-
-        thread_id
-    }
-
-    /// Create a reply (proxies to content contract)
-    pub fn create_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        parent_id: u64,
-        depth: u32,
-        content_str: String,
-        caller: Address,
-    ) -> u64 {
-        caller.require_auth();
-
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        // Get board contract to check thread lock state
-        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let board_contract_opt: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            board_args,
-        );
-
-        if let Some(board_contract) = board_contract_opt {
-            // Check if thread is locked
-            let thread_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
-            let thread_opt: Option<ThreadMeta> = env.invoke_contract(
-                &board_contract,
-                &Symbol::new(&env, "get_thread"),
-                thread_args,
-            );
-
-            if let Some(thread) = thread_opt {
-                if thread.is_locked {
-                    panic!("Thread is locked - replies are not allowed");
-                }
-                if thread.is_deleted {
-                    panic!("Thread has been deleted");
-                }
-            }
-        }
-
-        // Convert content string to bytes
-        let content_bytes = string_to_bytes(&env, &content_str);
-
-        // Call content.create_reply
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            parent_id.into_val(&env),
-            depth.into_val(&env),
-            content_bytes.into_val(&env),
-            caller.into_val(&env),
-        ]);
-
-        let reply_id: u64 = env.invoke_contract(&content, &Symbol::new(&env, "create_reply"), args);
-
-        // Increment reply count in board contract
-        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        if let Some(board_contract) = env.invoke_contract::<Option<Address>>(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            board_args,
-        ) {
-            let inc_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
-            env.invoke_contract::<()>(
-                &board_contract,
-                &Symbol::new(&env, "increment_reply_count"),
-                inc_args,
-            );
-        }
-
-        reply_id
-    }
-
-    /// Edit a thread's title and/or body
-    pub fn edit_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        new_title: Option<String>,
-        new_body: Option<String>,
-        caller: Address,
-    ) {
-        caller.require_auth();
-
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        // Get board contract
-        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                board_args,
-            )
-            .expect("Board contract not found");
-
-        // Update title if provided
-        if let Some(title) = new_title {
-            let title_args: Vec<Val> = Vec::from_array(&env, [
-                thread_id.into_val(&env),
-                title.into_val(&env),
-                caller.clone().into_val(&env),
-            ]);
-            env.invoke_contract::<()>(
-                &board_contract,
-                &Symbol::new(&env, "edit_thread_title"),
-                title_args,
-            );
-        }
-
-        // Update body if provided
-        if let Some(body) = new_body {
-            let body_bytes = string_to_bytes(&env, &body);
-            let body_args: Vec<Val> = Vec::from_array(&env, [
-                board_id.into_val(&env),
-                thread_id.into_val(&env),
-                body_bytes.into_val(&env),
-                caller.into_val(&env),
-            ]);
-            env.invoke_contract::<()>(
-                &content,
-                &Symbol::new(&env, "edit_thread_body"),
-                body_args,
-            );
-        }
-    }
-
-    /// Edit a reply's content
-    pub fn edit_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reply_id: u64,
-        new_content: String,
-        caller: Address,
-    ) {
-        caller.require_auth();
-
-        let content: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Content)
-            .expect("Not initialized");
-
-        let content_bytes = string_to_bytes(&env, &new_content);
-
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            content_bytes.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "edit_reply"),
-            args,
-        );
-    }
-
-    // ========================================================================
-    // NOTE: Admin proxy methods removed - now handled via contract aliasing
-    // Forms use form:@admin:method and tx:@admin:method to target admin directly
-    // Flag links use tx:@content:flag_reply to target content directly
-    // ========================================================================
 }
 
 #[cfg(test)]
@@ -1861,47 +452,6 @@ mod test {
     use super::*;
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
-
-    #[test]
-    fn test_render_help() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsTheme, ());
-        let client = BoardsThemeClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let admin = Address::generate(&env);
-        client.init(&registry, &permissions, &content, &admin);
-
-        // Render help page (doesn't require external contracts)
-        let help_path = String::from_str(&env, "/help");
-        let html = client.render(&Some(help_path), &None);
-        assert!(html.len() > 0);
-    }
-
-    #[test]
-    fn test_render_create_board() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsTheme, ());
-        let client = BoardsThemeClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let admin = Address::generate(&env);
-        client.init(&registry, &permissions, &content, &admin);
-
-        // Render create board form (doesn't require external contracts)
-        let path = String::from_str(&env, "/create");
-        let viewer = Address::generate(&env);
-        let html = client.render(&Some(path), &Some(viewer));
-        assert!(html.len() > 0);
-    }
 
     #[test]
     fn test_styles() {

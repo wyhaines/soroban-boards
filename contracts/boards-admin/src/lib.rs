@@ -727,6 +727,35 @@ impl BoardsAdmin {
                 .form_link_to("Update Chunk Size", "admin", "set_chunk_size")
                 .newline()
                 .newline();
+
+            // Edit window setting
+            let edit_window: u64 = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "get_edit_window"),
+                Vec::new(env),
+            );
+
+            // Convert seconds to hours for display
+            let edit_hours = if edit_window == 0 { 0 } else { edit_window / 3600 };
+
+            md = md.h2("Content Editing")
+                .text("**Edit window:** ");
+
+            if edit_window == 0 {
+                md = md.text("No limit (users can always edit their content)").newline();
+            } else {
+                md = md.number(edit_hours as u32).text(" hours").newline();
+            }
+
+            md = md.paragraph("Controls how long users can edit their posts after creation. Moderators can always edit.")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .input("edit_hours", "Edit window in hours (0 = no limit)")
+                .newline()
+                .form_link_to("Update Edit Window", "admin", "set_edit_window")
+                .newline()
+                .newline();
         }
 
         md = md.h2("Quick Links")
@@ -1352,6 +1381,67 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_chunk_size"),
+            args,
+        );
+    }
+
+    /// Update edit window for a board (admin+)
+    /// Accepts edit_hours as String since HTML forms submit strings
+    /// Input is in hours, stored as seconds
+    pub fn set_edit_window(
+        env: Env,
+        board_id: u64,
+        edit_hours: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Parse string to u32 (hours)
+        let hours_u32 = parse_string_to_u32(&env, &edit_hours);
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Convert hours to seconds (0 stays 0 for "no limit")
+        let seconds: u64 = (hours_u32 as u64) * 3600;
+
+        // Get board contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Set the edit window
+        let args: Vec<Val> = Vec::from_array(&env, [
+            seconds.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_edit_window"),
             args,
         );
     }
