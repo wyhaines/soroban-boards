@@ -36,7 +36,6 @@
         }
       ]
     ],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
@@ -47,10 +46,10 @@
               "function_name": "create_board",
               "args": [
                 {
-                  "string": "General"
+                  "string": "SameName"
                 },
                 {
-                  "string": "General discussion"
+                  "string": "Description"
                 },
                 {
                   "string": "false"
@@ -68,7 +67,6 @@
         }
       ]
     ],
-    [],
     []
   ],
   "ledger": {
@@ -139,7 +137,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "General discussion"
+                        "string": "Description"
                       }
                     },
                     {
@@ -171,7 +169,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "General"
+                        "string": "SameName"
                       }
                     },
                     {
@@ -291,7 +289,7 @@
                   "symbol": "BoardNameToId"
                 },
                 {
-                  "string": "General"
+                  "string": "SameName"
                 }
               ]
             },
@@ -311,7 +309,7 @@
                       "symbol": "BoardNameToId"
                     },
                     {
-                      "string": "General"
+                      "string": "SameName"
                     }
                   ]
                 },

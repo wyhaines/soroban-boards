@@ -36,7 +36,6 @@
         }
       ]
     ],
-    [],
     [
       [
         "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAOLZM",
@@ -47,10 +46,10 @@
               "function_name": "create_board",
               "args": [
                 {
-                  "string": "General"
+                  "string": "TestBoard"
                 },
                 {
-                  "string": "General discussion"
+                  "string": "Test Description"
                 },
                 {
                   "string": "false"
@@ -139,7 +138,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "General discussion"
+                        "string": "Test Description"
                       }
                     },
                     {
@@ -171,7 +170,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "General"
+                        "string": "TestBoard"
                       }
                     },
                     {
@@ -291,7 +290,7 @@
                   "symbol": "BoardNameToId"
                 },
                 {
-                  "string": "General"
+                  "string": "TestBoard"
                 }
               ]
             },
@@ -311,7 +310,7 @@
                       "symbol": "BoardNameToId"
                     },
                     {
-                      "string": "General"
+                      "string": "TestBoard"
                     }
                   ]
                 },

@@ -139,6 +139,9 @@ impl BoardsContent {
             .get(&ContentKey::Registry)
             .expect("Not initialized");
 
+        // Check board is not readonly
+        Self::check_board_not_readonly(&env, &registry, board_id);
+
         // Get the board contract address from registry
         let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
         let board_contract: Address = env
@@ -191,6 +194,52 @@ impl BoardsContent {
     }
 
     // Permission check helpers
+
+    /// Check if board is readonly and panic if so
+    /// Gracefully handles missing function for backwards compatibility
+    fn check_board_not_readonly(env: &Env, registry: &Address, board_id: u64) {
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let is_readonly: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                registry,
+                &Symbol::new(env, "get_board_readonly"),
+                args,
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false);
+        if is_readonly {
+            panic!("Board is read-only");
+        }
+    }
+
+    /// Check if thread is locked and panic if so
+    /// Gracefully handles missing function for backwards compatibility
+    fn check_thread_not_locked(env: &Env, registry: &Address, board_id: u64, thread_id: u64) {
+        // Get board contract (gracefully handle missing function)
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let board_contract_result = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            registry,
+            &Symbol::new(env, "get_board_contract"),
+            args,
+        );
+
+        if let Ok(Ok(Some(board_contract))) = board_contract_result {
+            let thread_args: Vec<Val> = Vec::from_array(env, [thread_id.into_val(env)]);
+            let is_locked: bool = env
+                .try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "is_thread_locked"),
+                    thread_args,
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+
+            if is_locked {
+                panic!("Thread is locked");
+            }
+        }
+        // If board contract not found, allow the operation (backwards compatibility)
+    }
 
     /// Check if user can reply on this board
     fn check_can_reply(env: &Env, board_id: u64, user: &Address) {
@@ -313,6 +362,13 @@ impl BoardsContent {
             .get(&ContentKey::Registry)
             .expect("Not initialized");
 
+        // Check board is not readonly (moderators bypass this via permissions contract)
+        // For now, block all edits on readonly boards - moderators can use admin actions
+        Self::check_board_not_readonly(&env, &registry, board_id);
+
+        // Check thread is not locked
+        Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
+
         // Get the board contract address from registry
         let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
         let board_contract: Address = env
@@ -370,6 +426,19 @@ impl BoardsContent {
         creator: Address,
     ) -> u64 {
         creator.require_auth();
+
+        // Get registry for checks
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Registry)
+            .expect("Not initialized");
+
+        // Check board is not readonly
+        Self::check_board_not_readonly(&env, &registry, board_id);
+
+        // Check thread is not locked
+        Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
 
         let reply_id = Self::next_reply_id(&env, board_id, thread_id);
 
@@ -604,6 +673,17 @@ impl BoardsContent {
                 panic!("Only author or moderator can edit reply");
             }
 
+            // Non-moderators cannot edit on readonly boards or locked threads
+            if !is_moderator {
+                let registry: Address = env
+                    .storage()
+                    .instance()
+                    .get(&ContentKey::Registry)
+                    .expect("Not initialized");
+                Self::check_board_not_readonly(&env, &registry, board_id);
+                Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
+            }
+
             reply.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
@@ -639,6 +719,17 @@ impl BoardsContent {
 
             if !is_author && !is_moderator {
                 panic!("Only author or moderator can edit reply");
+            }
+
+            // Non-moderators cannot edit on readonly boards or locked threads
+            if !is_moderator {
+                let registry: Address = env
+                    .storage()
+                    .instance()
+                    .get(&ContentKey::Registry)
+                    .expect("Not initialized");
+                Self::check_board_not_readonly(&env, &registry, board_id);
+                Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
             }
 
             reply.updated_at = env.ledger().timestamp();

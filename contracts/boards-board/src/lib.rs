@@ -1159,11 +1159,23 @@ impl BoardsBoard {
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
 
+        // Get board config for readonly check
+        let config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+
         // Get thread metadata
         let thread = env
             .storage()
             .persistent()
             .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+
+        // Determine if posting is allowed
+        let is_readonly = config.is_readonly;
+        let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
+        let can_post = !is_readonly && !is_locked;
 
         let mut md = Self::render_nav(env, board_id)
             .newline()
@@ -1179,6 +1191,17 @@ impl BoardsBoard {
                 .raw_str("</h1>\n");
         } else {
             md = md.raw_str("<h1>Thread</h1>\n");
+        }
+
+        // Show status badges
+        if is_readonly {
+            md = md.raw_str("<span class=\"badge badge-readonly\">read-only board</span> ");
+        }
+        if is_locked {
+            md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
+        }
+        if is_readonly || is_locked {
+            md = md.newline();
         }
 
         // Thread body in a container
@@ -1201,8 +1224,8 @@ impl BoardsBoard {
         md = md.div_end()
             .newline();
 
-        // Thread actions
-        if viewer.is_some() {
+        // Thread actions (only show if viewer is logged in and posting is allowed)
+        if viewer.is_some() && can_post {
             md = md.div_start("thread-actions")
                 .raw_str("[Reply to Thread](render:/b/")
                 .number(board_id as u32)
@@ -1212,18 +1235,16 @@ impl BoardsBoard {
 
             // Show edit button if user can edit
             if let Some(ref t) = thread {
-                if !t.is_locked {
-                    let (is_author, is_moderator) = Self::can_edit(env, board_id, &t.creator, viewer);
-                    let can_edit_time = is_moderator || Self::is_within_edit_window(env, t.created_at);
+                let (is_author, is_moderator) = Self::can_edit(env, board_id, &t.creator, viewer);
+                let can_edit_time = is_moderator || Self::is_within_edit_window(env, t.created_at);
 
-                    if (is_author || is_moderator) && can_edit_time {
-                        md = md.text(" ")
-                            .raw_str("[Edit](render:/b/")
-                            .number(board_id as u32)
-                            .raw_str("/t/")
-                            .number(thread_id as u32)
-                            .raw_str("/edit)");
-                    }
+                if (is_author || is_moderator) && can_edit_time {
+                    md = md.text(" ")
+                        .raw_str("[Edit](render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("/t/")
+                        .number(thread_id as u32)
+                        .raw_str("/edit)");
                 }
             }
 
@@ -1269,6 +1290,14 @@ impl BoardsBoard {
             .expect("Not initialized");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
+        // Determine if posting is allowed
+        let thread = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+        let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
+        let can_post = !config.is_readonly && !is_locked;
+
         // Get total reply count
         let count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
         let total_count: u64 = env.invoke_contract(
@@ -1294,7 +1323,7 @@ impl BoardsBoard {
 
         for i in 0..replies.len() {
             if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer);
+                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post);
             }
         }
 
@@ -1328,6 +1357,14 @@ impl BoardsBoard {
             .expect("Not initialized");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
+        // Determine if posting is allowed
+        let thread = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+        let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
+        let can_post = !config.is_readonly && !is_locked;
+
         // Get total children count
         let count_args: Vec<Val> = Vec::from_array(env, [
             board_id.into_val(env),
@@ -1358,7 +1395,7 @@ impl BoardsBoard {
 
         for i in 0..children.len() {
             if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer);
+                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post);
             }
         }
 
@@ -1388,6 +1425,7 @@ impl BoardsBoard {
         board_id: u64,
         thread_id: u64,
         viewer: &Option<Address>,
+        can_post: bool,
     ) -> MarkdownBuilder<'a> {
         md = md.div_start("reply");
 
@@ -1424,7 +1462,8 @@ impl BoardsBoard {
             .number(reply.id as u32)
             .span_end();
 
-        if viewer.is_some() {
+        // Only show Reply button if posting is allowed
+        if viewer.is_some() && can_post {
             md = md.text(" ")
                 .raw_str("[Reply](render:/b/")
                 .number(board_id as u32)
@@ -1450,7 +1489,10 @@ impl BoardsBoard {
                         .raw_str("/edit)");
                 }
             }
+        }
 
+        // Flag button is always available to logged in users
+        if viewer.is_some() {
             md = md.text(" ")
                 .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
                 .number(board_id as u32)

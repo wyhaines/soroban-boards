@@ -34,6 +34,10 @@ pub enum RegistryKey {
     BoardPrivate(u64),
     /// Whether a board is read-only (stored separately for backwards compatibility)
     BoardReadonly(u64),
+    /// Maps board name (and aliases) to board ID for lookup
+    BoardNameToId(String),
+    /// Stores aliases for a board (previous names that still resolve)
+    BoardAliases(u64),
 }
 
 /// Addresses of shared service contracts
@@ -209,6 +213,24 @@ impl BoardsRegistry {
             .persistent()
             .set(&RegistryKey::BoardListed(board_id), &is_listed_bool);
 
+        // Register board name for lookup (check for conflicts first)
+        if env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::BoardNameToId(name.clone()))
+        {
+            panic!("Board name already exists");
+        }
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardNameToId(name.clone()), &board_id);
+
+        // Initialize empty aliases list
+        let aliases: Vec<String> = Vec::new(&env);
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardAliases(board_id), &aliases);
+
         // Update count
         env.storage()
             .instance()
@@ -289,6 +311,141 @@ impl BoardsRegistry {
         env.storage()
             .persistent()
             .get(&RegistryKey::Board(board_id))
+    }
+
+    /// Get board by name or alias
+    /// Returns the board metadata if found by name or any alias
+    pub fn get_board_by_name(env: Env, name: String) -> Option<BoardMeta> {
+        // Look up board ID by name (includes aliases)
+        if let Some(board_id) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&RegistryKey::BoardNameToId(name))
+        {
+            return env
+                .storage()
+                .persistent()
+                .get(&RegistryKey::Board(board_id));
+        }
+        None
+    }
+
+    /// Get aliases for a board
+    pub fn get_board_aliases(env: Env, board_id: u64) -> Vec<String> {
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::BoardAliases(board_id))
+            .unwrap_or_else(|| Vec::new(&env))
+    }
+
+    /// Rename a board (Admin+ on board only)
+    /// The old name becomes an alias that continues to resolve to this board
+    pub fn rename_board(env: Env, board_id: u64, new_name: String, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists and get current metadata
+        let mut board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Board(board_id))
+            .expect("Board does not exist");
+
+        // Verify caller has admin permission on this board
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [board_id.into_val(&env), caller.into_val(&env)],
+        );
+        let perms: PermissionSet = env.invoke_contract(
+            &contracts.permissions,
+            &Symbol::new(&env, "get_permissions"),
+            args,
+        );
+
+        if !perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Check new name doesn't conflict with existing name or alias
+        if env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::BoardNameToId(new_name.clone()))
+        {
+            panic!("Name already in use");
+        }
+
+        // Validate new name (3-50 chars, alphanumeric + underscore + hyphen, starts with letter)
+        Self::validate_board_name(&env, &new_name);
+
+        // Get current aliases and add old name
+        let mut aliases: Vec<String> = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::BoardAliases(board_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        let old_name = board.name.clone();
+        aliases.push_back(old_name);
+
+        // Register new name in lookup
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardNameToId(new_name.clone()), &board_id);
+
+        // Update board metadata with new name
+        board.name = new_name;
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::Board(board_id), &board);
+
+        // Update aliases list
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardAliases(board_id), &aliases);
+    }
+
+    /// Validate board name format
+    /// - 3-50 characters
+    /// - Alphanumeric + underscore + hyphen
+    /// - Must start with a letter
+    fn validate_board_name(env: &Env, name: &String) {
+        let len = name.len() as usize;
+        if len < 3 || len > 50 {
+            panic!("Board name must be 3-50 characters");
+        }
+
+        // Copy name to buffer for validation
+        let mut buf = [0u8; 50];
+        let copy_len = core::cmp::min(len, 50);
+        name.copy_into_slice(&mut buf[..copy_len]);
+
+        // First character must be a letter
+        let first = buf[0];
+        if !((first >= b'a' && first <= b'z') || (first >= b'A' && first <= b'Z')) {
+            panic!("Board name must start with a letter");
+        }
+
+        // Remaining characters must be alphanumeric, underscore, or hyphen
+        for i in 1..copy_len {
+            let c = buf[i];
+            let valid = (c >= b'a' && c <= b'z')
+                || (c >= b'A' && c <= b'Z')
+                || (c >= b'0' && c <= b'9')
+                || c == b'_'
+                || c == b'-';
+            if !valid {
+                panic!("Board name can only contain letters, numbers, underscore, and hyphen");
+            }
+        }
+
+        // Suppress unused warning
+        let _ = env;
     }
 
     /// List boards with pagination (all boards, for admin use)
@@ -1198,12 +1355,13 @@ mod test {
         let is_private = String::from_str(&env, "false");
         let is_listed = String::from_str(&env, "true");
 
-        // Create boards and verify count increments
-        for i in 0..5 {
-            let name = String::from_str(&env, "Board");
+        // Create boards with unique names and verify count increments
+        let names = ["Board0", "Board1", "Board2", "Board3", "Board4"];
+        for (i, name_str) in names.iter().enumerate() {
+            let name = String::from_str(&env, name_str);
             let id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
-            assert_eq!(id, i);
-            assert_eq!(client.board_count(), i + 1);
+            assert_eq!(id, i as u64);
+            assert_eq!(client.board_count(), (i + 1) as u64);
         }
     }
 
@@ -1361,5 +1519,98 @@ mod test {
         // Test pagination - skip 1, get 2
         let listed_boards_page = client.list_listed_boards(&1, &2);
         assert_eq!(listed_boards_page.len(), 2);
+    }
+
+    #[test]
+    fn test_get_board_by_name() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        let creator = Address::generate(&env);
+        let name = String::from_str(&env, "TestBoard");
+        let desc = String::from_str(&env, "Test Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
+
+        // Lookup by name should work
+        let board = client.get_board_by_name(&name).unwrap();
+        assert_eq!(board.id, board_id);
+        assert_eq!(board.name, name);
+
+        // Lookup nonexistent name should return None
+        let nonexistent = String::from_str(&env, "NonExistent");
+        assert!(client.get_board_by_name(&nonexistent).is_none());
+    }
+
+    #[test]
+    fn test_board_aliases() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        let creator = Address::generate(&env);
+        let name = String::from_str(&env, "OriginalName");
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
+
+        // Initially no aliases
+        let aliases = client.get_board_aliases(&board_id);
+        assert_eq!(aliases.len(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Board name already exists")]
+    fn test_duplicate_board_name() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        let creator = Address::generate(&env);
+        let name = String::from_str(&env, "SameName");
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+
+        // First create should succeed
+        client.create_board(&name, &desc, &is_private, &is_listed, &creator);
+
+        // Second create with same name should fail
+        client.create_board(&name, &desc, &is_private, &is_listed, &creator);
     }
 }

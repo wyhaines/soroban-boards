@@ -678,6 +678,54 @@ impl BoardsAdmin {
             return Self::render_footer_into(md).build();
         }
 
+        // Get registry for board info
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Get board metadata for current name
+        let board_opt: Option<BoardMeta> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if let Some(board) = board_opt {
+            md = md.h2("Board Name")
+                .text("**Current name:** ").text_string(&board.name).newline();
+
+            // Get aliases
+            let aliases: Vec<String> = env.invoke_contract(
+                &registry,
+                &Symbol::new(env, "get_board_aliases"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            );
+
+            if !aliases.is_empty() {
+                md = md.text("**Aliases:** ");
+                for i in 0..aliases.len() {
+                    if i > 0 {
+                        md = md.text(", ");
+                    }
+                    md = md.text_string(&aliases.get(i).unwrap());
+                }
+                md = md.newline();
+            }
+
+            md = md.newline()
+                .note("Rename the board. The old name will become an alias that continues to work.")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .input("new_name", "New board name (3-50 chars, letters/numbers/-/_)")
+                .newline()
+                .form_link_to("Rename Board", "admin", "rename_board")
+                .newline()
+                .newline();
+        }
+
         // Get flag threshold
         let threshold: u32 = env.invoke_contract(
             &permissions,
@@ -718,7 +766,8 @@ impl BoardsAdmin {
 
             md = md.h2("Display Settings")
                 .text("**Reply chunk size:** ").number(chunk_size).text(" replies per batch").newline()
-                .paragraph("Controls how many replies load at once in waterfall loading. Lower values load faster but require more scrolling.")
+                .newline()
+                .note("Controls how many replies load at once in waterfall loading. Lower values load faster but require more scrolling.")
                 .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                 .number(board_id as u32)
                 .raw_str("\" />\n")
@@ -747,7 +796,8 @@ impl BoardsAdmin {
                 md = md.number(edit_hours as u32).text(" hours").newline();
             }
 
-            md = md.paragraph("Controls how long users can edit their posts after creation. Moderators can always edit.")
+            md = md.newline()
+                .note("Controls how long users can edit their posts after creation. Moderators can always edit.")
                 .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                 .number(board_id as u32)
                 .raw_str("\" />\n")
@@ -774,7 +824,8 @@ impl BoardsAdmin {
             md = md.text("No (hidden from home page, accessible via direct link)").newline();
         }
 
-        md = md.paragraph("Controls whether this board appears in the public board list on the home page. Unlisted boards are still accessible via direct link.")
+        md = md.newline()
+            .note("Controls whether this board appears in the public board list on the home page. Unlisted boards are still accessible via direct link.")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
             .raw_str("\" />\n");
@@ -804,7 +855,8 @@ impl BoardsAdmin {
             md = md.text("Public (anyone can view and post)").newline();
         }
 
-        md = md.paragraph("Controls who can access this board. Private boards require membership to view or post content.")
+        md = md.newline()
+            .note("Controls who can access this board. Private boards require membership to view or post content.")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
             .raw_str("\" />\n");
@@ -834,7 +886,8 @@ impl BoardsAdmin {
             md = md.text("Open (members can post)").newline();
         }
 
-        md = md.paragraph("Controls whether new threads and replies can be created. Use read-only mode to archive a board.")
+        md = md.newline()
+            .note("Controls whether new threads and replies can be created. Use read-only mode to archive a board.")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
             .raw_str("\" />\n");
@@ -1532,6 +1585,52 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_edit_window"),
+            args,
+        );
+    }
+
+    /// Rename a board (admin+)
+    /// The old name becomes an alias that continues to resolve
+    pub fn rename_board(
+        env: Env,
+        board_id: u64,
+        new_name: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Call registry's rename_board function
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            new_name.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "rename_board"),
             args,
         );
     }
