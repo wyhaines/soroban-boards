@@ -298,6 +298,57 @@ impl BoardsBoard {
         env.storage().instance().set(&BoardKey::Config, &config);
     }
 
+    /// Get maximum reply depth for nested replies
+    pub fn get_max_reply_depth(env: Env) -> u32 {
+        let config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        config.max_reply_depth
+    }
+
+    /// Set maximum reply depth (must be >= 1, owner/admin only)
+    pub fn set_max_reply_depth(env: Env, depth: u32, caller: Address) {
+        caller.require_auth();
+
+        if depth < 1 {
+            panic!("Max reply depth must be at least 1");
+        }
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can change max reply depth");
+            }
+        }
+
+        let mut config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        config.max_reply_depth = depth;
+        env.storage().instance().set(&BoardKey::Config, &config);
+    }
+
     /// Get edit window in seconds (0 = no limit)
     pub fn get_edit_window(env: Env) -> u64 {
         // Use separate storage key for backwards compatibility

@@ -504,7 +504,7 @@ impl BoardsContent {
                 .set(&ContentKey::ChildReplies(board_id, thread_id, parent_id), &child_replies);
         }
 
-        // Increment reply count
+        // Increment reply count (local)
         let count: u64 = env
             .storage()
             .persistent()
@@ -518,6 +518,21 @@ impl BoardsContent {
         env.storage()
             .persistent()
             .set(&ContentKey::NextReplyId(board_id, thread_id), &(reply_id + 1));
+
+        // Increment reply count in board contract (for ThreadMeta.reply_count)
+        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        if let Ok(Ok(Some(board_contract))) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            board_args,
+        ) {
+            let incr_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(&env, "increment_reply_count"),
+                incr_args,
+            );
+        }
 
         reply_id
     }

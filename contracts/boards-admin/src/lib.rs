@@ -777,6 +777,26 @@ impl BoardsAdmin {
                 .newline()
                 .newline();
 
+            // Max reply depth setting
+            let max_depth: u32 = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "get_max_reply_depth"),
+                Vec::new(env),
+            );
+
+            md = md.h2("Reply Threading")
+                .text("**Maximum reply depth:** ").number(max_depth).text(" levels").newline()
+                .newline()
+                .note("Controls how deeply nested replies can be. Replies at the maximum depth cannot have children. Setting this lower helps keep discussions focused.")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .input("max_depth", "New max depth (1-20)")
+                .newline()
+                .form_link_to("Update Max Depth", "admin", "set_max_reply_depth")
+                .newline()
+                .newline();
+
             // Edit window setting
             let edit_window: u64 = env.invoke_contract(
                 &board_addr,
@@ -1524,6 +1544,68 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_chunk_size"),
+            args,
+        );
+    }
+
+    /// Update maximum reply depth for a board (admin+)
+    /// Accepts max_depth as String since HTML forms submit strings
+    pub fn set_max_reply_depth(
+        env: Env,
+        board_id: u64,
+        max_depth: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Parse string to u32
+        let max_depth_u32 = parse_string_to_u32(&env, &max_depth);
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Validate max depth (1-20 is reasonable range)
+        if max_depth_u32 < 1 || max_depth_u32 > 20 {
+            panic!("Max reply depth must be between 1 and 20");
+        }
+
+        // Get board contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Set the max reply depth
+        let args: Vec<Val> = Vec::from_array(&env, [
+            max_depth_u32.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_max_reply_depth"),
             args,
         );
     }
