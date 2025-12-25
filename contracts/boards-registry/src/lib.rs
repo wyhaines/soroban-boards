@@ -28,6 +28,12 @@ pub enum RegistryKey {
     Paused,
     /// WASM hash for deploying board contracts
     BoardWasmHash,
+    /// Whether a board is listed publicly (stored separately for backwards compatibility)
+    BoardListed(u64),
+    /// Whether a board is private (stored separately for backwards compatibility)
+    BoardPrivate(u64),
+    /// Whether a board is read-only (stored separately for backwards compatibility)
+    BoardReadonly(u64),
 }
 
 /// Addresses of shared service contracts
@@ -52,6 +58,30 @@ pub struct BoardMeta {
     pub thread_count: u64,
     pub is_readonly: bool,
     pub is_private: bool,
+}
+
+/// Role levels from permissions contract
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum Role {
+    Guest = 0,
+    Member = 1,
+    Moderator = 2,
+    Admin = 3,
+    Owner = 4,
+}
+
+/// Permission set from permissions contract
+#[contracttype]
+#[derive(Clone)]
+pub struct PermissionSet {
+    pub role: Role,
+    pub can_view: bool,
+    pub can_post: bool,
+    pub can_moderate: bool,
+    pub can_admin: bool,
+    pub is_banned: bool,
 }
 
 #[contract]
@@ -109,12 +139,13 @@ impl BoardsRegistry {
     }
 
     /// Create a new board
-    /// Note: is_private is a String from form input ("true"/"false")
+    /// Note: is_private and is_listed are Strings from form input ("true"/"false")
     pub fn create_board(
         env: Env,
         name: String,
         description: String,
         is_private: String,  // String from form, parse to bool
+        is_listed: String,   // String from form, parse to bool (default: true if empty)
         caller: Address,
     ) -> u64 {
         caller.require_auth();
@@ -125,6 +156,18 @@ impl BoardsRegistry {
             let mut buf = [0u8; 4];
             is_private.copy_into_slice(&mut buf);
             &buf == b"true"
+        };
+
+        // Parse is_listed string to bool
+        // Empty string or "true" = listed (default), "false" = unlisted
+        let is_listed_bool = if is_listed.len() == 0 {
+            true  // Default to listed
+        } else if is_listed.len() == 5 {
+            let mut buf = [0u8; 5];
+            is_listed.copy_into_slice(&mut buf);
+            &buf != b"false"  // Listed unless explicitly "false"
+        } else {
+            true  // Listed for any other value
         };
 
         // Check not paused
@@ -160,6 +203,11 @@ impl BoardsRegistry {
         env.storage()
             .persistent()
             .set(&RegistryKey::Board(board_id), &board);
+
+        // Store listed status separately (for backwards compatibility)
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardListed(board_id), &is_listed_bool);
 
         // Update count
         env.storage()
@@ -243,7 +291,7 @@ impl BoardsRegistry {
             .get(&RegistryKey::Board(board_id))
     }
 
-    /// List boards with pagination
+    /// List boards with pagination (all boards, for admin use)
     pub fn list_boards(env: Env, start: u64, limit: u64) -> Vec<BoardMeta> {
         let count: u64 = env
             .storage()
@@ -261,6 +309,218 @@ impl BoardsRegistry {
         }
 
         boards
+    }
+
+    /// List only publicly listed boards with pagination (for home page)
+    pub fn list_listed_boards(env: Env, start: u64, limit: u64) -> Vec<BoardMeta> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::BoardCount)
+            .unwrap_or(0);
+
+        let mut boards = Vec::new(&env);
+        let mut collected = 0u64;
+        let mut skipped = 0u64;
+
+        for i in 0..count {
+            // Check if board is listed (default to true for backwards compatibility)
+            let is_listed: bool = env
+                .storage()
+                .persistent()
+                .get(&RegistryKey::BoardListed(i))
+                .unwrap_or(true);
+
+            if is_listed {
+                if skipped < start {
+                    skipped += 1;
+                    continue;
+                }
+                if collected >= limit {
+                    break;
+                }
+                if let Some(board) = env.storage().persistent().get(&RegistryKey::Board(i)) {
+                    boards.push_back(board);
+                    collected += 1;
+                }
+            }
+        }
+
+        boards
+    }
+
+    /// Check if a board is listed publicly
+    pub fn get_board_listed(env: Env, board_id: u64) -> bool {
+        // Default to true for backwards compatibility with existing boards
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::BoardListed(board_id))
+            .unwrap_or(true)
+    }
+
+    /// Set whether a board is listed publicly (admin+ on board only)
+    pub fn set_listed(env: Env, board_id: u64, is_listed: bool, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::Board(board_id))
+        {
+            panic!("Board does not exist");
+        }
+
+        // Verify caller has admin permission on this board
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        // Check permissions
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [board_id.into_val(&env), caller.into_val(&env)],
+        );
+        let perms: PermissionSet = env.invoke_contract(
+            &contracts.permissions,
+            &Symbol::new(&env, "get_permissions"),
+            args,
+        );
+
+        if !perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Set listed status
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardListed(board_id), &is_listed);
+    }
+
+    /// Check if a board is private
+    /// Falls back to BoardMeta.is_private for backwards compatibility
+    pub fn get_board_private(env: Env, board_id: u64) -> bool {
+        // First check the separate storage key
+        if let Some(is_private) = env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&RegistryKey::BoardPrivate(board_id))
+        {
+            return is_private;
+        }
+        // Fall back to BoardMeta for backwards compatibility
+        if let Some(board) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&RegistryKey::Board(board_id))
+        {
+            return board.is_private;
+        }
+        false
+    }
+
+    /// Set whether a board is private (admin+ on board only)
+    pub fn set_private(env: Env, board_id: u64, is_private: bool, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::Board(board_id))
+        {
+            panic!("Board does not exist");
+        }
+
+        // Verify caller has admin permission on this board
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [board_id.into_val(&env), caller.into_val(&env)],
+        );
+        let perms: PermissionSet = env.invoke_contract(
+            &contracts.permissions,
+            &Symbol::new(&env, "get_permissions"),
+            args,
+        );
+
+        if !perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Set private status
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardPrivate(board_id), &is_private);
+    }
+
+    /// Check if a board is read-only
+    /// Falls back to BoardMeta.is_readonly for backwards compatibility
+    pub fn get_board_readonly(env: Env, board_id: u64) -> bool {
+        // First check the separate storage key
+        if let Some(is_readonly) = env
+            .storage()
+            .persistent()
+            .get::<_, bool>(&RegistryKey::BoardReadonly(board_id))
+        {
+            return is_readonly;
+        }
+        // Fall back to BoardMeta for backwards compatibility
+        if let Some(board) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&RegistryKey::Board(board_id))
+        {
+            return board.is_readonly;
+        }
+        false
+    }
+
+    /// Set whether a board is read-only (admin+ on board only)
+    pub fn set_readonly(env: Env, board_id: u64, is_readonly: bool, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists
+        if !env
+            .storage()
+            .persistent()
+            .has(&RegistryKey::Board(board_id))
+        {
+            panic!("Board does not exist");
+        }
+
+        // Verify caller has admin permission on this board
+        let contracts: ContractAddresses = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Contracts)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [board_id.into_val(&env), caller.into_val(&env)],
+        );
+        let perms: PermissionSet = env.invoke_contract(
+            &contracts.permissions,
+            &Symbol::new(&env, "get_permissions"),
+            args,
+        );
+
+        if !perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Set readonly status
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardReadonly(board_id), &is_readonly);
     }
 
     /// Get the total number of boards
@@ -457,7 +717,7 @@ impl BoardsRegistry {
         );
     }
 
-    /// Configure a board contract with content and theme addresses (admin only)
+    /// Configure a board contract with permissions, content, and theme addresses (admin only)
     /// Used to update existing board contracts after adding these fields
     pub fn configure_board(env: Env, board_id: u64) {
         let admin: Address = env
@@ -478,6 +738,14 @@ impl BoardsRegistry {
             .persistent()
             .get(&RegistryKey::BoardContract(board_id))
             .expect("Board contract not found");
+
+        // Set permissions address
+        let perms_args: Vec<Val> = Vec::from_array(&env, [contracts.permissions.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_permissions"),
+            perms_args,
+        );
 
         // Set content address
         let content_args: Vec<Val> = Vec::from_array(&env, [contracts.content.into_val(&env)]);
@@ -549,7 +817,7 @@ impl BoardsRegistry {
         md = md.h2("Boards")
             .newline();
 
-        // Fetch boards from storage
+        // Fetch only listed boards for home page
         let count: u64 = env
             .storage()
             .instance()
@@ -559,12 +827,33 @@ impl BoardsRegistry {
         if count == 0 {
             md = md.paragraph("No boards yet. Be the first to create one!");
         } else {
-            // List boards (up to 20)
-            let limit = if count > 20 { 20 } else { count };
+            // List only publicly listed boards (up to 20)
+            let mut displayed = 0u32;
 
             md = md.raw_str("<div class=\"board-list\">\n");
-            for i in 0..limit {
+            for i in 0..count {
+                if displayed >= 20 {
+                    break;
+                }
+                // Check if board is listed (default to true for backwards compatibility)
+                let is_listed: bool = env
+                    .storage()
+                    .persistent()
+                    .get(&RegistryKey::BoardListed(i))
+                    .unwrap_or(true);
+
+                if !is_listed {
+                    continue;
+                }
+
                 if let Some(board) = env.storage().persistent().get::<_, BoardMeta>(&RegistryKey::Board(i)) {
+                    // Check private status from separate key first, then fall back to BoardMeta
+                    let is_private: bool = env
+                        .storage()
+                        .persistent()
+                        .get(&RegistryKey::BoardPrivate(i))
+                        .unwrap_or(board.is_private);
+
                     // Board card with link wrapper
                     md = md.raw_str("<a href=\"render:/b/")
                         .number(board.id as u32)
@@ -575,13 +864,18 @@ impl BoardsRegistry {
                         .raw_str("</span><span class=\"board-card-meta\">")
                         .number(board.thread_count as u32)
                         .text(" threads");
-                    if board.is_private {
+                    if is_private {
                         md = md.raw_str(" <span class=\"badge\">private</span>");
                     }
                     md = md.raw_str("</span></a>\n");
+                    displayed += 1;
                 }
             }
             md = md.raw_str("</div>\n");
+
+            if displayed == 0 {
+                md = md.paragraph("No boards yet. Be the first to create one!");
+            }
         }
 
         md = md.newline()
@@ -613,6 +907,12 @@ impl BoardsRegistry {
             // Private board checkbox - hidden field provides default "false", checkbox overrides to "true"
             .raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n")
             .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Make this board private</label>\n")
+            .newline()
+            // Listed board checkbox - hidden field provides default "true", checkbox unchecked overrides to "false"
+            // Note: We use a hidden field for "false" and checkbox for "true" with different approach:
+            // The hidden field "true" is always sent, checkbox with value "false" only sent when checked
+            .raw_str("<input type=\"hidden\" name=\"is_listed\" value=\"true\" />\n")
+            .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_listed\" value=\"false\" /> Hide from public board list (unlisted)</label>\n")
             .newline()
             // Caller address for the contract (must be last to match parameter order)
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
@@ -694,8 +994,9 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
         let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
 
-        let board_id = client.create_board(&name, &desc, &is_private, &creator);
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
         assert_eq!(board_id, 0);
 
         // Verify board
@@ -726,13 +1027,14 @@ mod test {
 
         let creator = Address::generate(&env);
         let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
 
         // Create multiple boards with different names
         let names = ["Board1", "Board2", "Board3", "Board4", "Board5"];
         for name in names.iter() {
             let name = String::from_str(&env, name);
             let desc = String::from_str(&env, "Description");
-            client.create_board(&name, &desc, &is_private, &creator);
+            client.create_board(&name, &desc, &is_private, &is_listed, &creator);
         }
 
         // List with pagination
@@ -796,7 +1098,8 @@ mod test {
         let name = String::from_str(&env, "Test");
         let desc = String::from_str(&env, "Test desc");
         let is_private = String::from_str(&env, "false");
-        client.create_board(&name, &desc, &is_private, &creator);
+        let is_listed = String::from_str(&env, "true");
+        client.create_board(&name, &desc, &is_private, &is_listed, &creator);
     }
 
     #[test]
@@ -863,8 +1166,9 @@ mod test {
         let name = String::from_str(&env, "Private Board");
         let desc = String::from_str(&env, "Secret discussions");
         let is_private = String::from_str(&env, "true");
+        let is_listed = String::from_str(&env, "true");
 
-        let board_id = client.create_board(&name, &desc, &is_private, &creator);
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
         let board = client.get_board(&board_id).unwrap();
 
         assert!(board.is_private);
@@ -892,11 +1196,12 @@ mod test {
         let creator = Address::generate(&env);
         let desc = String::from_str(&env, "Desc");
         let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
 
         // Create boards and verify count increments
         for i in 0..5 {
             let name = String::from_str(&env, "Board");
-            let id = client.create_board(&name, &desc, &is_private, &creator);
+            let id = client.create_board(&name, &desc, &is_private, &is_listed, &creator);
             assert_eq!(id, i);
             assert_eq!(client.board_count(), i + 1);
         }
@@ -966,5 +1271,95 @@ mod test {
             client.get_contract_by_alias(&Symbol::new(&env, "unknown")),
             None
         );
+    }
+
+    #[test]
+    fn test_listed_unlisted_boards() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        let creator = Address::generate(&env);
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let is_unlisted = String::from_str(&env, "false");
+
+        // Create a listed board
+        let name1 = String::from_str(&env, "Listed Board");
+        let board1_id = client.create_board(&name1, &desc, &is_private, &is_listed, &creator);
+
+        // Create an unlisted board
+        let name2 = String::from_str(&env, "Unlisted Board");
+        let board2_id = client.create_board(&name2, &desc, &is_private, &is_unlisted, &creator);
+
+        // Verify listed status
+        assert!(client.get_board_listed(&board1_id));
+        assert!(!client.get_board_listed(&board2_id));
+
+        // list_boards should return both
+        let all_boards = client.list_boards(&0, &10);
+        assert_eq!(all_boards.len(), 2);
+
+        // list_listed_boards should return only listed board
+        let listed_boards = client.list_listed_boards(&0, &10);
+        assert_eq!(listed_boards.len(), 1);
+        assert_eq!(listed_boards.get(0).unwrap().id, board1_id);
+
+        // Both boards should still be accessible directly
+        assert!(client.get_board(&board1_id).is_some());
+        assert!(client.get_board(&board2_id).is_some());
+    }
+
+    #[test]
+    fn test_list_listed_boards_pagination() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        let creator = Address::generate(&env);
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let is_unlisted = String::from_str(&env, "false");
+
+        // Create 5 boards: listed, unlisted, listed, unlisted, listed
+        let names = ["Board0", "Board1", "Board2", "Board3", "Board4"];
+        for (i, name) in names.iter().enumerate() {
+            let name = String::from_str(&env, name);
+            let listed = if i % 2 == 0 { &is_listed } else { &is_unlisted };
+            client.create_board(&name, &desc, &is_private, listed, &creator);
+        }
+
+        // Total boards = 5, listed boards = 3 (indices 0, 2, 4)
+        let all_boards = client.list_boards(&0, &10);
+        assert_eq!(all_boards.len(), 5);
+
+        let listed_boards = client.list_listed_boards(&0, &10);
+        assert_eq!(listed_boards.len(), 3);
+
+        // Test pagination - skip 1, get 2
+        let listed_boards_page = client.list_listed_boards(&1, &2);
+        assert_eq!(listed_boards_page.len(), 2);
     }
 }

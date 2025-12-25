@@ -173,6 +173,17 @@ impl BoardsBoard {
         env.storage().instance().set(&BoardKey::Theme, &theme);
     }
 
+    /// Set permissions contract address (for boards created before this was added)
+    pub fn set_permissions(env: Env, permissions: Address) {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Not initialized");
+        registry.require_auth();
+        env.storage().instance().set(&BoardKey::Permissions, &permissions);
+    }
+
     // Permission check helpers
 
     /// Check if user can create threads on this board

@@ -758,6 +758,96 @@ impl BoardsAdmin {
                 .newline();
         }
 
+        // Board visibility setting
+        let is_listed: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_listed"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        md = md.h2("Board Visibility")
+            .text("**Listed publicly:** ");
+
+        if is_listed {
+            md = md.text("Yes (appears on home page)").newline();
+        } else {
+            md = md.text("No (hidden from home page, accessible via direct link)").newline();
+        }
+
+        md = md.paragraph("Controls whether this board appears in the public board list on the home page. Unlisted boards are still accessible via direct link.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n");
+
+        if is_listed {
+            md = md.form_link_to("Hide from Public List", "admin", "unlist_board");
+        } else {
+            md = md.form_link_to("Show on Public List", "admin", "list_board");
+        }
+
+        md = md.newline()
+            .newline();
+
+        // Board access control (public/private)
+        let is_private: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_private"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        md = md.h2("Access Control")
+            .text("**Board type:** ");
+
+        if is_private {
+            md = md.text("Private (members only)").newline();
+        } else {
+            md = md.text("Public (anyone can view and post)").newline();
+        }
+
+        md = md.paragraph("Controls who can access this board. Private boards require membership to view or post content.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n");
+
+        if is_private {
+            md = md.form_link_to("Make Public", "admin", "make_public");
+        } else {
+            md = md.form_link_to("Make Private", "admin", "make_private");
+        }
+
+        md = md.newline()
+            .newline();
+
+        // Board read-only status
+        let is_readonly: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_readonly"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        md = md.h2("Posting Status")
+            .text("**Current status:** ");
+
+        if is_readonly {
+            md = md.text("Read-only (no new posts allowed)").newline();
+        } else {
+            md = md.text("Open (members can post)").newline();
+        }
+
+        md = md.paragraph("Controls whether new threads and replies can be created. Use read-only mode to archive a board.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n");
+
+        if is_readonly {
+            md = md.form_link_to("Enable Posting", "admin", "enable_posting");
+        } else {
+            md = md.form_link_to("Make Read-Only", "admin", "make_readonly");
+        }
+
+        md = md.newline()
+            .newline();
+
         md = md.h2("Quick Links")
             .raw_str("[View Members](render:/admin/b/")
             .number(board_id as u32)
@@ -1442,6 +1532,197 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_edit_window"),
+            args,
+        );
+    }
+
+    /// List a board publicly (admin+)
+    /// Makes the board appear on the home page
+    pub fn list_board(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_listed(env, board_id, true, caller);
+    }
+
+    /// Unlist a board (admin+)
+    /// Hides the board from the home page but keeps it accessible via direct link
+    pub fn unlist_board(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_listed(env, board_id, false, caller);
+    }
+
+    /// Helper to set board listed status
+    fn set_board_listed(
+        env: Env,
+        board_id: u64,
+        is_listed: bool,
+        caller: Address,
+    ) {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Call registry's set_listed function
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            is_listed.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "set_listed"),
+            args,
+        );
+    }
+
+    /// Make a board public (admin+)
+    pub fn make_public(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_private(env, board_id, false, caller);
+    }
+
+    /// Make a board private (admin+)
+    pub fn make_private(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_private(env, board_id, true, caller);
+    }
+
+    /// Helper to set board private status
+    fn set_board_private(
+        env: Env,
+        board_id: u64,
+        is_private: bool,
+        caller: Address,
+    ) {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Call registry's set_private function
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            is_private.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "set_private"),
+            args,
+        );
+    }
+
+    /// Enable posting on a board (admin+)
+    pub fn enable_posting(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_readonly(env, board_id, false, caller);
+    }
+
+    /// Make a board read-only (admin+)
+    pub fn make_readonly(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+        Self::set_board_readonly(env, board_id, true, caller);
+    }
+
+    /// Helper to set board readonly status
+    fn set_board_readonly(
+        env: Env,
+        board_id: u64,
+        is_readonly: bool,
+        caller: Address,
+    ) {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Call registry's set_readonly function
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
+            is_readonly.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "set_readonly"),
             args,
         );
     }
