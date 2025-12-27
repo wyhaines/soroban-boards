@@ -22,8 +22,10 @@ pub enum RegistryKey {
     BoardByName(Symbol),
     /// Board contract address by ID
     BoardContract(u64),
-    /// Contract addresses for shared services
+    /// Contract addresses for shared services (legacy, for backwards compatibility)
     Contracts,
+    /// Generic contract storage by alias (e.g., "perms", "content", "theme", "profile")
+    Contract(Symbol),
     /// Global pause flag
     Paused,
     /// WASM hash for deploying board contracts
@@ -112,14 +114,34 @@ impl BoardsRegistry {
         env.storage().instance().set(&RegistryKey::Admin, &admin);
         env.storage().instance().set(&RegistryKey::BoardCount, &0u64);
         env.storage().instance().set(&RegistryKey::Paused, &false);
+
+        // Store in legacy Contracts struct for backwards compatibility
         env.storage().instance().set(
             &RegistryKey::Contracts,
             &ContractAddresses {
-                permissions,
-                content,
-                theme,
-                admin: admin_contract,
+                permissions: permissions.clone(),
+                content: content.clone(),
+                theme: theme.clone(),
+                admin: admin_contract.clone(),
             },
+        );
+
+        // Also store in generic Contract keys for new lookup pattern
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "perms")),
+            &permissions,
+        );
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "content")),
+            &content,
+        );
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "theme")),
+            &theme,
+        );
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "admin")),
+            &admin_contract,
         );
     }
 
@@ -699,37 +721,48 @@ impl BoardsRegistry {
     /// Get a contract address by its alias name.
     ///
     /// This enables the `form:@alias:method` protocol in soroban-render.
-    /// Valid aliases:
+    /// Built-in aliases:
     /// - "registry" → This registry contract
+    ///
+    /// Registered aliases (set via init or set_contract):
     /// - "perms" → Permissions contract
     /// - "content" → Content contract
     /// - "theme" → Theme contract
     /// - "admin" → Admin contract
+    /// - "profile" → User profile contract (if registered)
+    /// - Any other alias registered via set_contract
     pub fn get_contract_by_alias(env: Env, alias: Symbol) -> Option<Address> {
         // Handle "registry" specially - return self
         if alias == Symbol::new(&env, "registry") {
             return Some(env.current_contract_address());
         }
 
-        let contracts: ContractAddresses = env
+        // Look up in generic contract storage
+        env.storage()
+            .instance()
+            .get(&RegistryKey::Contract(alias))
+    }
+
+    /// Get a contract address by alias (convenience wrapper).
+    pub fn get_contract(env: Env, alias: Symbol) -> Option<Address> {
+        Self::get_contract_by_alias(env, alias)
+    }
+
+    /// Register or update a contract address by alias (admin only).
+    ///
+    /// This allows adding new service contracts (e.g., "profile") without
+    /// code changes. The alias can then be used with `form:@alias:method`.
+    pub fn set_contract(env: Env, alias: Symbol, address: Address) {
+        let admin: Address = env
             .storage()
             .instance()
-            .get(&RegistryKey::Contracts)?;
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
 
-        // Map aliases to contract addresses
-        // Note: Using Symbol::new instead of symbol_short! for comparison
-        // since the alias comes from the viewer as a regular Symbol
-        if alias == Symbol::new(&env, "perms") {
-            Some(contracts.permissions)
-        } else if alias == Symbol::new(&env, "content") {
-            Some(contracts.content)
-        } else if alias == Symbol::new(&env, "theme") {
-            Some(contracts.theme)
-        } else if alias == Symbol::new(&env, "admin") {
-            Some(contracts.admin)
-        } else {
-            None
-        }
+        env.storage()
+            .instance()
+            .set(&RegistryKey::Contract(alias), &address);
     }
 
     /// Get admin address
@@ -770,6 +803,45 @@ impl BoardsRegistry {
         admin.require_auth();
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Migrate from legacy Contracts struct to generic Contract(Symbol) storage.
+    ///
+    /// Call this after upgrading an existing registry to populate the new
+    /// generic contract storage from the legacy ContractAddresses struct.
+    /// Safe to call multiple times - will overwrite existing values.
+    pub fn migrate_contracts(env: Env) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        // Read from legacy Contracts struct
+        if let Some(contracts) = env
+            .storage()
+            .instance()
+            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
+        {
+            // Populate generic Contract keys
+            env.storage().instance().set(
+                &RegistryKey::Contract(Symbol::new(&env, "perms")),
+                &contracts.permissions,
+            );
+            env.storage().instance().set(
+                &RegistryKey::Contract(Symbol::new(&env, "content")),
+                &contracts.content,
+            );
+            env.storage().instance().set(
+                &RegistryKey::Contract(Symbol::new(&env, "theme")),
+                &contracts.theme,
+            );
+            env.storage().instance().set(
+                &RegistryKey::Contract(Symbol::new(&env, "admin")),
+                &contracts.admin,
+            );
+        }
     }
 
     /// Transfer admin to a new address (two-step process)
@@ -1428,6 +1500,47 @@ mod test {
         assert_eq!(
             client.get_contract_by_alias(&Symbol::new(&env, "unknown")),
             None
+        );
+    }
+
+    #[test]
+    fn test_set_contract() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let admin_contract = Address::generate(&env);
+
+        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+
+        // Register a new contract (e.g., profile service)
+        let profile_contract = Address::generate(&env);
+        client.set_contract(&Symbol::new(&env, "profile"), &profile_contract);
+
+        // Should be retrievable via get_contract_by_alias
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "profile")),
+            Some(profile_contract.clone())
+        );
+
+        // Should also work via get_contract convenience method
+        assert_eq!(
+            client.get_contract(&Symbol::new(&env, "profile")),
+            Some(profile_contract)
+        );
+
+        // Can update existing contract
+        let new_permissions = Address::generate(&env);
+        client.set_contract(&Symbol::new(&env, "perms"), &new_permissions);
+        assert_eq!(
+            client.get_contract(&Symbol::new(&env, "perms")),
+            Some(new_permissions)
         );
     }
 

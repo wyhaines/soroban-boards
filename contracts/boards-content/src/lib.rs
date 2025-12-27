@@ -2,8 +2,27 @@
 
 use soroban_chonk::prelude::*;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
 };
+
+/// Errors that can occur in the content contract
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum ContentError {
+    /// Board is read-only and does not accept new content
+    BoardReadOnly = 1,
+    /// Thread is locked and does not accept new replies
+    ThreadLocked = 2,
+    /// User is not authorized to perform this action
+    NotAuthorized = 3,
+    /// Content not found
+    NotFound = 4,
+    /// Contract not initialized
+    NotInitialized = 5,
+    /// Already flagged by this user
+    AlreadyFlagged = 6,
+}
 
 /// Storage keys for the content contract
 #[contracttype]
@@ -122,14 +141,14 @@ impl BoardsContent {
     /// This function:
     /// 1. Calls the Board contract to create thread metadata
     /// 2. Stores the thread body content
-    /// Returns the thread ID
+    /// Returns the thread ID, or an error if the board is read-only
     pub fn create_thread(
         env: Env,
         board_id: u64,
         title: String,
         body: String,
         caller: Address,
-    ) -> u64 {
+    ) -> Result<u64, ContentError> {
         caller.require_auth();
 
         // Get the registry to look up the board contract
@@ -137,10 +156,10 @@ impl BoardsContent {
             .storage()
             .instance()
             .get(&ContentKey::Registry)
-            .expect("Not initialized");
+            .ok_or(ContentError::NotInitialized)?;
 
         // Check board is not readonly
-        Self::check_board_not_readonly(&env, &registry, board_id);
+        Self::check_board_not_readonly(&env, &registry, board_id)?;
 
         // Get the board contract address from registry
         let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
@@ -190,31 +209,44 @@ impl BoardsContent {
             incr_args,
         );
 
-        thread_id
+        Ok(thread_id)
     }
 
     // Permission check helpers
 
-    /// Check if board is readonly and panic if so
-    /// Gracefully handles missing function for backwards compatibility
-    fn check_board_not_readonly(env: &Env, registry: &Address, board_id: u64) {
+    /// Check if board is readonly - returns error if so
+    /// Queries the board contract directly for its readonly status
+    fn check_board_not_readonly(env: &Env, registry: &Address, board_id: u64) -> Result<(), ContentError> {
+        // Get board contract address from registry
         let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let is_readonly: bool = env
-            .try_invoke_contract::<bool, soroban_sdk::Error>(
-                registry,
-                &Symbol::new(env, "get_board_readonly"),
-                args,
-            )
-            .unwrap_or(Ok(false))
-            .unwrap_or(false);
-        if is_readonly {
-            panic!("Board is read-only");
+        let board_contract_result = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            registry,
+            &Symbol::new(env, "get_board_contract"),
+            args,
+        );
+
+        if let Ok(Ok(Some(board_contract))) = board_contract_result {
+            // Query the board contract's is_readonly function (no args needed)
+            let is_readonly: bool = env
+                .try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "is_readonly"),
+                    Vec::new(env),
+                )
+                .unwrap_or(Ok(false))
+                .unwrap_or(false);
+
+            if is_readonly {
+                return Err(ContentError::BoardReadOnly);
+            }
         }
+        // If board contract not found, allow the operation (backwards compatibility)
+        Ok(())
     }
 
-    /// Check if thread is locked and panic if so
+    /// Check if thread is locked - returns error if so
     /// Gracefully handles missing function for backwards compatibility
-    fn check_thread_not_locked(env: &Env, registry: &Address, board_id: u64, thread_id: u64) {
+    fn check_thread_not_locked(env: &Env, registry: &Address, board_id: u64, thread_id: u64) -> Result<(), ContentError> {
         // Get board contract (gracefully handle missing function)
         let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
         let board_contract_result = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
@@ -235,10 +267,11 @@ impl BoardsContent {
                 .unwrap_or(false);
 
             if is_locked {
-                panic!("Thread is locked");
+                return Err(ContentError::ThreadLocked);
             }
         }
         // If board contract not found, allow the operation (backwards compatibility)
+        Ok(())
     }
 
     /// Check if user can reply on this board
@@ -345,6 +378,7 @@ impl BoardsContent {
     /// This function:
     /// 1. Updates thread title in the Board contract
     /// 2. Updates thread body content in this contract
+    /// Returns an error if the board is read-only or thread is locked
     pub fn edit_thread(
         env: Env,
         board_id: u64,
@@ -352,7 +386,7 @@ impl BoardsContent {
         new_title: String,
         new_body: String,
         caller: Address,
-    ) {
+    ) -> Result<(), ContentError> {
         caller.require_auth();
 
         // Get the registry to look up the board contract
@@ -360,14 +394,14 @@ impl BoardsContent {
             .storage()
             .instance()
             .get(&ContentKey::Registry)
-            .expect("Not initialized");
+            .ok_or(ContentError::NotInitialized)?;
 
         // Check board is not readonly (moderators bypass this via permissions contract)
         // For now, block all edits on readonly boards - moderators can use admin actions
-        Self::check_board_not_readonly(&env, &registry, board_id);
+        Self::check_board_not_readonly(&env, &registry, board_id)?;
 
         // Check thread is not locked
-        Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
+        Self::check_thread_not_locked(&env, &registry, board_id, thread_id)?;
 
         // Get the board contract address from registry
         let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
@@ -412,10 +446,13 @@ impl BoardsContent {
         let chonk = Chonk::open(&env, key);
         chonk.clear();
         chonk.write_chunked(body_bytes, 4096);
+
+        Ok(())
     }
 
     /// Create a reply
     /// Called directly from forms via form:@content:create_reply
+    /// Returns the reply ID, or an error if the board is read-only or thread is locked
     pub fn create_reply(
         env: Env,
         board_id: u64,
@@ -424,7 +461,7 @@ impl BoardsContent {
         depth: u32,
         content: String,
         creator: Address,
-    ) -> u64 {
+    ) -> Result<u64, ContentError> {
         creator.require_auth();
 
         // Get registry for checks
@@ -432,13 +469,13 @@ impl BoardsContent {
             .storage()
             .instance()
             .get(&ContentKey::Registry)
-            .expect("Not initialized");
+            .ok_or(ContentError::NotInitialized)?;
 
         // Check board is not readonly
-        Self::check_board_not_readonly(&env, &registry, board_id);
+        Self::check_board_not_readonly(&env, &registry, board_id)?;
 
         // Check thread is not locked
-        Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
+        Self::check_thread_not_locked(&env, &registry, board_id, thread_id)?;
 
         let reply_id = Self::next_reply_id(&env, board_id, thread_id);
 
@@ -534,7 +571,7 @@ impl BoardsContent {
             );
         }
 
-        reply_id
+        Ok(reply_id)
     }
 
     /// Get reply metadata
@@ -672,47 +709,52 @@ impl BoardsContent {
     }
 
     /// Edit reply content (takes Bytes, for internal use)
-    pub fn edit_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, content: Bytes, caller: Address) {
+    /// Returns an error if not authorized or if the board is read-only/thread is locked
+    pub fn edit_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, content: Bytes, caller: Address) -> Result<(), ContentError> {
         caller.require_auth();
 
-        if let Some(mut reply) = env
+        let reply_opt = env
             .storage()
             .persistent()
-            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
-        {
-            // Verify caller is author or moderator
-            let is_author = reply.creator == caller;
-            let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
+            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id));
 
-            if !is_author && !is_moderator {
-                panic!("Only author or moderator can edit reply");
-            }
+        let mut reply = reply_opt.ok_or(ContentError::NotFound)?;
 
-            // Non-moderators cannot edit on readonly boards or locked threads
-            if !is_moderator {
-                let registry: Address = env
-                    .storage()
-                    .instance()
-                    .get(&ContentKey::Registry)
-                    .expect("Not initialized");
-                Self::check_board_not_readonly(&env, &registry, board_id);
-                Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
-            }
+        // Verify caller is author or moderator
+        let is_author = reply.creator == caller;
+        let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
 
-            reply.updated_at = env.ledger().timestamp();
-            env.storage()
-                .persistent()
-                .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
-
-            // Update content
-            let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
-            let chonk = Chonk::open(&env, key);
-            chonk.clear();
-            chonk.write_chunked(content, 4096);
+        if !is_author && !is_moderator {
+            return Err(ContentError::NotAuthorized);
         }
+
+        // Non-moderators cannot edit on readonly boards or locked threads
+        if !is_moderator {
+            let registry: Address = env
+                .storage()
+                .instance()
+                .get(&ContentKey::Registry)
+                .ok_or(ContentError::NotInitialized)?;
+            Self::check_board_not_readonly(&env, &registry, board_id)?;
+            Self::check_thread_not_locked(&env, &registry, board_id, thread_id)?;
+        }
+
+        reply.updated_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+
+        // Update content
+        let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
+        let chonk = Chonk::open(&env, key);
+        chonk.clear();
+        chonk.write_chunked(content, 4096);
+
+        Ok(())
     }
 
     /// Edit reply content (entry point for form submissions, accepts String)
+    /// Returns an error if not authorized or if the board is read-only/thread is locked
     pub fn edit_reply_content(
         env: Env,
         board_id: u64,
@@ -720,58 +762,61 @@ impl BoardsContent {
         reply_id: u64,
         content: String,
         caller: Address,
-    ) {
+    ) -> Result<(), ContentError> {
         caller.require_auth();
 
-        if let Some(mut reply) = env
+        let reply_opt = env
             .storage()
             .persistent()
-            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id))
-        {
-            // Verify caller is author or moderator
-            let is_author = reply.creator == caller;
-            let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
+            .get::<_, ReplyMeta>(&ContentKey::Reply(board_id, thread_id, reply_id));
 
-            if !is_author && !is_moderator {
-                panic!("Only author or moderator can edit reply");
-            }
+        let mut reply = reply_opt.ok_or(ContentError::NotFound)?;
 
-            // Non-moderators cannot edit on readonly boards or locked threads
-            if !is_moderator {
-                let registry: Address = env
-                    .storage()
-                    .instance()
-                    .get(&ContentKey::Registry)
-                    .expect("Not initialized");
-                Self::check_board_not_readonly(&env, &registry, board_id);
-                Self::check_thread_not_locked(&env, &registry, board_id, thread_id);
-            }
+        // Verify caller is author or moderator
+        let is_author = reply.creator == caller;
+        let is_moderator = Self::check_is_moderator(&env, board_id, &caller);
 
-            reply.updated_at = env.ledger().timestamp();
-            env.storage()
-                .persistent()
-                .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
-
-            // Convert String to Bytes
-            let content_len = content.len() as usize;
-            let content_bytes = if content_len > 0 && content_len <= 16384 {
-                let mut temp = [0u8; 16384];
-                content.copy_into_slice(&mut temp[..content_len]);
-                Bytes::from_slice(&env, &temp[..content_len])
-            } else if content_len > 16384 {
-                let mut temp = [0u8; 16384];
-                content.copy_into_slice(&mut temp[..16384]);
-                Bytes::from_slice(&env, &temp)
-            } else {
-                Bytes::new(&env)
-            };
-
-            // Update content
-            let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
-            let chonk = Chonk::open(&env, key);
-            chonk.clear();
-            chonk.write_chunked(content_bytes, 4096);
+        if !is_author && !is_moderator {
+            return Err(ContentError::NotAuthorized);
         }
+
+        // Non-moderators cannot edit on readonly boards or locked threads
+        if !is_moderator {
+            let registry: Address = env
+                .storage()
+                .instance()
+                .get(&ContentKey::Registry)
+                .ok_or(ContentError::NotInitialized)?;
+            Self::check_board_not_readonly(&env, &registry, board_id)?;
+            Self::check_thread_not_locked(&env, &registry, board_id, thread_id)?;
+        }
+
+        reply.updated_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&ContentKey::Reply(board_id, thread_id, reply_id), &reply);
+
+        // Convert String to Bytes
+        let content_len = content.len() as usize;
+        let content_bytes = if content_len > 0 && content_len <= 16384 {
+            let mut temp = [0u8; 16384];
+            content.copy_into_slice(&mut temp[..content_len]);
+            Bytes::from_slice(&env, &temp[..content_len])
+        } else if content_len > 16384 {
+            let mut temp = [0u8; 16384];
+            content.copy_into_slice(&mut temp[..16384]);
+            Bytes::from_slice(&env, &temp)
+        } else {
+            Bytes::new(&env)
+        };
+
+        // Update content
+        let key = Self::get_or_create_reply_chonk(&env, board_id, thread_id, reply_id);
+        let chonk = Chonk::open(&env, key);
+        chonk.clear();
+        chonk.write_chunked(content_bytes, 4096);
+
+        Ok(())
     }
 
     /// Helper: Check if user is moderator

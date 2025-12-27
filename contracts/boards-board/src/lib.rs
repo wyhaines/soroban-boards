@@ -391,6 +391,52 @@ impl BoardsBoard {
         env.storage().instance().set(&BoardKey::EditWindow, &seconds);
     }
 
+    /// Check if board is read-only
+    pub fn is_readonly(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, BoardConfig>(&BoardKey::Config)
+            .map(|c| c.is_readonly)
+            .unwrap_or(false)
+    }
+
+    /// Set board read-only status (owner/admin only)
+    pub fn set_readonly(env: Env, is_readonly: bool, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can change read-only status");
+            }
+        }
+
+        let mut config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        config.is_readonly = is_readonly;
+        env.storage().instance().set(&BoardKey::Config, &config);
+    }
+
     /// Check if content is within the edit window
     /// Returns true if content can be edited (within window or no limit)
     fn is_within_edit_window(env: &Env, created_at: u64) -> bool {
@@ -1172,6 +1218,14 @@ impl BoardsBoard {
             .newline()  // Blank line before h1 for markdown parsing
             .h1("New Thread");
 
+        // Check if board is read-only
+        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+            if config.is_readonly {
+                md = md.warning("This board is read-only. New threads cannot be created.");
+                return Self::render_footer_into(md).build();
+            }
+        }
+
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to create a thread.");
             return Self::render_footer_into(md).build();
@@ -1210,6 +1264,9 @@ impl BoardsBoard {
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
 
+        // Get profile contract for author display
+        let profile_contract = Self::get_profile_contract(env);
+
         // Get board config for readonly check
         let config: BoardConfig = env
             .storage()
@@ -1240,6 +1297,11 @@ impl BoardsBoard {
             md = md.raw_str("<h1>")
                 .text_string(&t.title)
                 .raw_str("</h1>\n");
+
+            // Show author
+            md = md.raw_str("<div class=\"thread-meta\">by ");
+            md = Self::render_author(env, md, &t.creator, &profile_contract);
+            md = md.raw_str("</div>\n");
         } else {
             md = md.raw_str("<h1>Thread</h1>\n");
         }
@@ -1334,6 +1396,9 @@ impl BoardsBoard {
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
 
+        // Get profile contract for author display
+        let profile_contract = Self::get_profile_contract(env);
+
         let config: BoardConfig = env
             .storage()
             .instance()
@@ -1374,7 +1439,7 @@ impl BoardsBoard {
 
         for i in 0..replies.len() {
             if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post);
+                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post, &profile_contract);
             }
         }
 
@@ -1400,6 +1465,9 @@ impl BoardsBoard {
             .instance()
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
+
+        // Get profile contract for author display
+        let profile_contract = Self::get_profile_contract(env);
 
         let config: BoardConfig = env
             .storage()
@@ -1446,7 +1514,7 @@ impl BoardsBoard {
 
         for i in 0..children.len() {
             if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post);
+                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post, &profile_contract);
             }
         }
 
@@ -1477,8 +1545,16 @@ impl BoardsBoard {
         thread_id: u64,
         viewer: &Option<Address>,
         can_post: bool,
+        profile_contract: &Option<Address>,
     ) -> MarkdownBuilder<'a> {
         md = md.div_start("reply");
+
+        // Reply header with author
+        md = md.div_start("reply-header");
+        md = Self::render_author(env, md, &reply.creator, profile_contract);
+        md = md.raw_str(" · Reply #")
+            .number(reply.id as u32)
+            .div_end();
 
         // Reply content
         if reply.is_hidden {
@@ -1506,17 +1582,12 @@ impl BoardsBoard {
                 .div_end();
         }
 
-        // Reply metadata and actions
-        md = md.div_start("reply-meta")
-            .span_start("reply-id")
-            .text("Reply #")
-            .number(reply.id as u32)
-            .span_end();
+        // Reply actions
+        md = md.div_start("reply-meta");
 
         // Only show Reply button if posting is allowed
         if viewer.is_some() && can_post {
-            md = md.text(" ")
-                .raw_str("[Reply](render:/b/")
+            md = md.raw_str("[Reply](render:/b/")
                 .number(board_id as u32)
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -1599,6 +1670,22 @@ impl BoardsBoard {
             md = md.raw_str("<h1>Reply to Comment</h1>\n");
         } else {
             md = md.raw_str("<h1>Reply to Thread</h1>\n");
+        }
+
+        // Check if board is read-only
+        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+            if config.is_readonly {
+                md = md.warning("This board is read-only. Replies cannot be posted.");
+                return Self::render_footer_into(md).build();
+            }
+        }
+
+        // Check if thread is locked
+        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+            if thread.is_locked {
+                md = md.warning("This thread is locked. Replies cannot be posted.");
+                return Self::render_footer_into(md).build();
+            }
         }
 
         if viewer.is_none() {
@@ -1715,6 +1802,14 @@ impl BoardsBoard {
             .newline()
             .h1("Edit Thread");
 
+        // Check if board is read-only
+        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+            if config.is_readonly {
+                md = md.warning("This board is read-only. Threads cannot be edited.");
+                return Self::render_footer_into(md).build();
+            }
+        }
+
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to edit.");
             return Self::render_footer_into(md).build();
@@ -1822,6 +1917,22 @@ impl BoardsBoard {
             .newline()
             .newline()
             .h1("Edit Reply");
+
+        // Check if board is read-only
+        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+            if config.is_readonly {
+                md = md.warning("This board is read-only. Replies cannot be edited.");
+                return Self::render_footer_into(md).build();
+            }
+        }
+
+        // Check if thread is locked
+        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+            if thread.is_locked {
+                md = md.warning("This thread is locked. Replies cannot be edited.");
+                return Self::render_footer_into(md).build();
+            }
+        }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to edit.");
@@ -1937,6 +2048,74 @@ impl BoardsBoard {
         registry.require_auth();
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
+    }
+
+    /// Get profile contract from registry (if available)
+    fn get_profile_contract(env: &Env) -> Option<Address> {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)?;
+
+        // Look up profile contract from registry using get_contract
+        let args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
+        env.invoke_contract(&registry, &Symbol::new(env, "get_contract"), args)
+    }
+
+    /// Render author info (username link or truncated address)
+    fn render_author<'a>(env: &Env, md: MarkdownBuilder<'a>, creator: &Address, profile_contract: &Option<Address>) -> MarkdownBuilder<'a> {
+        match profile_contract {
+            Some(profile_addr) => {
+                // Use include to embed the profile compact card
+                let args: Vec<Val> = Vec::from_array(env, [creator.into_val(env)]);
+                let rendered: Bytes = env.invoke_contract(
+                    profile_addr,
+                    &Symbol::new(env, "render_profile_card_compact"),
+                    args,
+                );
+                md.raw(rendered)
+            }
+            None => {
+                // Fallback: show truncated address
+                md.raw_str("<span class=\"author\">")
+                    .raw(Self::truncate_address(env, creator))
+                    .raw_str("</span>")
+            }
+        }
+    }
+
+    /// Truncate an address for display
+    fn truncate_address(env: &Env, address: &Address) -> Bytes {
+        let addr_string = address.to_string();
+        let full_bytes = soroban_render_sdk::bytes::string_to_bytes(env, &addr_string);
+        let len = full_bytes.len();
+
+        if len <= 12 {
+            return full_bytes;
+        }
+
+        let mut result = Bytes::new(env);
+
+        // First 4 characters
+        for i in 0..4 {
+            if let Some(c) = full_bytes.get(i) {
+                result.push_back(c);
+            }
+        }
+
+        // Ellipsis
+        result.push_back(b'.');
+        result.push_back(b'.');
+        result.push_back(b'.');
+
+        // Last 4 characters
+        for i in (len - 4)..len {
+            if let Some(c) = full_bytes.get(i) {
+                result.push_back(c);
+            }
+        }
+
+        result
     }
 }
 

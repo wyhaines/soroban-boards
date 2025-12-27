@@ -355,6 +355,14 @@ impl BoardsTheme {
             // Lists
             .rule("ul, ol", "padding-left: var(--space-lg); margin: 0 0 var(--space-md) 0;")
             .rule("li", "margin-bottom: var(--space-xs);")
+            // Profile integration
+            .rule(".thread-meta", "font-size: 0.875rem; color: var(--text-muted); margin-bottom: var(--space-md);")
+            .rule(".reply-header", "font-size: 0.8125rem; color: var(--text-muted); margin-bottom: var(--space-xs);")
+            .rule(".reply-header a", "color: var(--primary); font-weight: 500;")
+            .rule(".profile-compact", "display: inline;")
+            .rule(".profile-compact a", "color: var(--primary); font-weight: 500;")
+            .rule(".profile-anonymous", "font-family: monospace; font-size: 0.75rem;")
+            .rule(".author", "font-family: monospace; font-size: 0.75rem;")
             // Action links row
             .rule(".actions", "display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.875rem;")
             // Badge/Tag

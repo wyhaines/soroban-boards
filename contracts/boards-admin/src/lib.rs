@@ -657,8 +657,27 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
-            .h1("Board Settings");
+        // Get registry for board info (needed for title)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Get board metadata for title
+        let board_opt: Option<BoardMeta> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        // Build title with board name
+        let mut md = Self::render_nav(env, board_id);
+        if let Some(ref board) = board_opt {
+            md = md.h1("Settings: ").text_string(&board.name);
+        } else {
+            md = md.h1("Board Settings");
+        }
 
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
@@ -677,20 +696,6 @@ impl BoardsAdmin {
             md = md.warning("You must be an admin to view this page.");
             return Self::render_footer_into(md).build();
         }
-
-        // Get registry for board info
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
-
-        // Get board metadata for current name
-        let board_opt: Option<BoardMeta> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
 
         if let Some(board) = board_opt {
             md = md.h2("Board Name")
@@ -744,13 +749,7 @@ impl BoardsAdmin {
             .newline()
             .newline();
 
-        // Get board contract for chunk size
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
-
+        // Get board contract for chunk size and other settings
         let board_contract: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(env, "get_board_contract"),
@@ -890,11 +889,17 @@ impl BoardsAdmin {
         md = md.newline()
             .newline();
 
-        // Board read-only status
-        let is_readonly: bool = env.invoke_contract(
+        // Board read-only status - query board contract directly
+        let board_contract: Address = env.invoke_contract::<Option<Address>>(
             &registry,
-            &Symbol::new(env, "get_board_readonly"),
+            &Symbol::new(env, "get_board_contract"),
             Vec::from_array(env, [board_id.into_val(env)]),
+        ).expect("Board contract not found");
+
+        let is_readonly: bool = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "is_readonly"),
+            Vec::new(env),
         );
 
         md = md.h2("Posting Status")
@@ -1889,20 +1894,26 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Call registry's set_readonly function
+        // Get board contract address from registry
         let registry: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
+        let board_contract: Address = env.invoke_contract::<Option<Address>>(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            Vec::from_array(&env, [board_id.into_val(&env)]),
+        ).expect("Board contract not found");
+
+        // Call board contract's set_readonly function
         let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
             is_readonly.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
-            &registry,
+            &board_contract,
             &Symbol::new(&env, "set_readonly"),
             args,
         );
