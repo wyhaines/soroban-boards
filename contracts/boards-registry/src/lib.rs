@@ -1005,18 +1005,34 @@ impl BoardsRegistry {
             // Create board form
             .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
             // Help page
-            .or_handle(b"/help", |_| Self::render_help(&env))
+            .or_handle(b"/help", |_| Self::render_help(&env, &viewer))
             // Default - home page
             .or_default(|_| Self::render_home(&env, &viewer))
     }
 
     /// Render the navigation bar
-    fn render_nav(env: &Env) -> MarkdownBuilder<'_> {
-        MarkdownBuilder::new(env)
+    fn render_nav<'a>(env: &'a Env, viewer: &Option<Address>) -> MarkdownBuilder<'a> {
+        let mut md = MarkdownBuilder::new(env)
             .div_start("nav-bar")
             .render_link("Soroban Boards", "/")
-            .render_link("Help", "/help")
-            .div_end()
+            .render_link("Help", "/help");
+
+        // Add profile link if profile contract is registered
+        if let Some(profile_addr) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&RegistryKey::Contract(Symbol::new(env, "profile")))
+        {
+            let args: Vec<Val> = Vec::from_array(env, [viewer.into_val(env)]);
+            let profile_link: Bytes = env.invoke_contract(
+                &profile_addr,
+                &Symbol::new(env, "render_nav_link"),
+                args,
+            );
+            md = md.raw(profile_link);
+        }
+
+        md.div_end()
     }
 
     /// Append footer to builder
@@ -1031,7 +1047,7 @@ impl BoardsRegistry {
 
     /// Render the home page with board list
     fn render_home(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
+        let mut md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar div for markdown parsing
             .h1("Soroban Boards")
             .paragraph("Decentralized discussion forums on Stellar");
@@ -1116,7 +1132,7 @@ impl BoardsRegistry {
 
     /// Render create board form
     fn render_create_board(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env)
+        let mut md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar for markdown parsing
             .h1("Create New Board");
 
@@ -1158,8 +1174,8 @@ impl BoardsRegistry {
     }
 
     /// Render help page
-    fn render_help(env: &Env) -> Bytes {
-        let md = Self::render_nav(env)
+    fn render_help(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar for markdown parsing
             .raw_str("<h1>Help</h1>\n")  // Use raw HTML for reliable rendering
             .raw_str("<h2>What is Soroban Boards?</h2>\n")

@@ -1012,12 +1012,24 @@ impl BoardsBoard {
     }
 
     /// Render navigation bar
-    fn render_nav(env: &Env, _board_id: u64) -> MarkdownBuilder<'_> {
-        MarkdownBuilder::new(env)
+    fn render_nav<'a>(env: &'a Env, _board_id: u64, viewer: &Option<Address>) -> MarkdownBuilder<'a> {
+        let mut md = MarkdownBuilder::new(env)
             .div_start("nav-bar")
             .render_link("Soroban Boards", "/")
-            .render_link("Help", "/help")
-            .div_end()
+            .render_link("Help", "/help");
+
+        // Add profile link if profile contract is available
+        if let Some(profile_addr) = Self::get_profile_contract(env) {
+            let args: Vec<Val> = Vec::from_array(env, [viewer.into_val(env)]);
+            let profile_link: Bytes = env.invoke_contract(
+                &profile_addr,
+                &Symbol::new(env, "render_nav_link"),
+                args,
+            );
+            md = md.raw(profile_link);
+        }
+
+        md.div_end()
     }
 
     /// Append footer to builder
@@ -1089,7 +1101,7 @@ impl BoardsBoard {
             }
         }
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .render_link("< Back", "/")
             .div_start("page-header")
             .raw_str("<h1>")
@@ -1211,7 +1223,7 @@ impl BoardsBoard {
         viewer: &Option<Address>,
         perms_addr: &Address,
     ) -> Bytes {
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .render_link("< Back", "/")
             .div_start("page-header")
             .raw_str("<h1>")
@@ -1259,8 +1271,8 @@ impl BoardsBoard {
     }
 
     /// Render hidden thread access denied message
-    fn render_hidden_thread_message(env: &Env, board_id: u64) -> Bytes {
-        let md = Self::render_nav(env, board_id)
+    fn render_hidden_thread_message(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let md = Self::render_nav(env, board_id, viewer)
             .newline()
             .raw_str("[< Back to Board](render:/b/")
             .number(board_id as u32)
@@ -1273,7 +1285,7 @@ impl BoardsBoard {
 
     /// Render create thread form
     fn render_create_thread(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .newline()  // Blank line after nav-bar div for markdown parsing
             .raw_str("[< Back to Board](render:/b/")
             .number(board_id as u32)
@@ -1361,7 +1373,7 @@ impl BoardsBoard {
         // Check if thread is hidden - only moderators can view hidden threads
         let is_hidden = thread.as_ref().map(|t| t.is_hidden).unwrap_or(false);
         if is_hidden && !viewer_can_moderate {
-            return Self::render_hidden_thread_message(env, board_id);
+            return Self::render_hidden_thread_message(env, board_id, viewer);
         }
 
         // Determine if posting is allowed
@@ -1369,7 +1381,7 @@ impl BoardsBoard {
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
         let can_post = !is_readonly && !is_locked;
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
             .raw_str("[< Back to Board](render:/b/")
             .number(board_id as u32)
@@ -1791,7 +1803,7 @@ impl BoardsBoard {
 
     /// Render reply form
     fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
@@ -1926,7 +1938,7 @@ impl BoardsBoard {
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
@@ -2042,7 +2054,7 @@ impl BoardsBoard {
             .get(&BoardKey::Content)
             .expect("Content contract not configured");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
