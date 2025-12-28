@@ -1023,10 +1023,15 @@ impl BoardsRegistry {
             .instance()
             .get::<_, Address>(&RegistryKey::Contract(Symbol::new(env, "profile")))
         {
-            let args: Vec<Val> = Vec::from_array(env, [viewer.into_val(env)]);
+            // Pass return path so "Go Back" returns to boards home
+            let return_path = Bytes::from_slice(env, b"@registry:/");
+            let args: Vec<Val> = Vec::from_array(env, [
+                viewer.into_val(env),
+                return_path.into_val(env),
+            ]);
             let profile_link: Bytes = env.invoke_contract(
                 &profile_addr,
-                &Symbol::new(env, "render_nav_link"),
+                &Symbol::new(env, "render_nav_link_return"),
                 args,
             );
             md = md.raw(profile_link);
@@ -1108,7 +1113,8 @@ impl BoardsRegistry {
                         .text_string(&board.description)
                         .raw_str("</span><span class=\"board-card-meta\">")
                         .number(board.thread_count as u32)
-                        .text(" threads");
+                        .text(" threads · ")
+                        .raw(Self::format_timestamp(env, board.created_at));
                     if is_private {
                         md = md.raw_str(" <span class=\"badge\">private</span>");
                     }
@@ -1205,6 +1211,104 @@ impl BoardsRegistry {
 
         // Call theme.styles() to get CSS
         env.invoke_contract(&contracts.theme, &Symbol::new(&env, "styles"), Vec::new(&env))
+    }
+
+    /// Format a Unix timestamp as a human-readable date string.
+    /// Returns "YYYY-MM-DD HH:MM UTC" format.
+    fn format_timestamp(env: &Env, timestamp: u64) -> Bytes {
+        // Handle legacy ledger sequence numbers (small values)
+        // Unix timestamps for 2024+ are ~1700000000+
+        if timestamp < 1_000_000_000 {
+            // This is likely a ledger sequence, not a timestamp
+            let mut result = Bytes::from_slice(env, b"Ledger ");
+            result.append(&Self::u64_to_bytes(env, timestamp));
+            return result;
+        }
+
+        // Convert Unix timestamp to date components
+        let total_seconds = timestamp;
+        let total_minutes = total_seconds / 60;
+        let total_hours = total_minutes / 60;
+        let total_days = total_hours / 24;
+
+        let minutes = (total_minutes % 60) as u8;
+        let hours = (total_hours % 24) as u8;
+
+        // Calculate year, month, day from days since epoch (Jan 1, 1970)
+        let (year, month, day) = Self::days_to_date(total_days as i64);
+
+        // Format: "YYYY-MM-DD HH:MM UTC"
+        let mut buffer = [0u8; 20];
+
+        // Year (4 digits)
+        buffer[0] = b'0' + ((year / 1000) % 10) as u8;
+        buffer[1] = b'0' + ((year / 100) % 10) as u8;
+        buffer[2] = b'0' + ((year / 10) % 10) as u8;
+        buffer[3] = b'0' + (year % 10) as u8;
+        buffer[4] = b'-';
+
+        // Month (2 digits)
+        buffer[5] = b'0' + ((month / 10) % 10) as u8;
+        buffer[6] = b'0' + (month % 10) as u8;
+        buffer[7] = b'-';
+
+        // Day (2 digits)
+        buffer[8] = b'0' + ((day / 10) % 10) as u8;
+        buffer[9] = b'0' + (day % 10) as u8;
+        buffer[10] = b' ';
+
+        // Hour (2 digits)
+        buffer[11] = b'0' + ((hours / 10) % 10) as u8;
+        buffer[12] = b'0' + (hours % 10) as u8;
+        buffer[13] = b':';
+
+        // Minute (2 digits)
+        buffer[14] = b'0' + ((minutes / 10) % 10) as u8;
+        buffer[15] = b'0' + (minutes % 10) as u8;
+        buffer[16] = b' ';
+
+        // UTC
+        buffer[17] = b'U';
+        buffer[18] = b'T';
+        buffer[19] = b'C';
+
+        Bytes::from_slice(env, &buffer)
+    }
+
+    /// Convert days since Unix epoch to (year, month, day).
+    /// Algorithm based on Howard Hinnant's date algorithms.
+    fn days_to_date(days: i64) -> (i32, u8, u8) {
+        let z = days + 719468;
+        let era = if z >= 0 { z } else { z - 146096 } / 146097;
+        let doe = (z - era * 146097) as u32; // day of era
+        let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365; // year of era
+        let y = yoe as i64 + era * 400;
+        let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // day of year
+        let mp = (5 * doy + 2) / 153; // month index
+        let d = doy - (153 * mp + 2) / 5 + 1;
+        let m = if mp < 10 { mp + 3 } else { mp - 9 };
+        let year = if m <= 2 { y + 1 } else { y };
+
+        (year as i32, m as u8, d as u8)
+    }
+
+    /// Convert u64 to Bytes for display.
+    fn u64_to_bytes(env: &Env, n: u64) -> Bytes {
+        if n == 0 {
+            return Bytes::from_slice(env, b"0");
+        }
+
+        let mut buffer = [0u8; 20];
+        let mut idx = 20;
+        let mut num = n;
+
+        while num > 0 {
+            idx -= 1;
+            buffer[idx] = b'0' + (num % 10) as u8;
+            num /= 10;
+        }
+
+        Bytes::from_slice(env, &buffer[idx..])
     }
 }
 
