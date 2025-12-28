@@ -1382,9 +1382,10 @@ impl BoardsBoard {
                 .text_string(&t.title)
                 .raw_str("</h1>\n");
 
-            // Show author
+            // Show author (with return path so "Go Back" returns here)
+            let return_path = Self::build_thread_return_path(env, board_id, thread_id);
             md = md.raw_str("<div class=\"thread-meta\">by ");
-            md = Self::render_author(env, md, &t.creator, &profile_contract);
+            md = Self::render_author(env, md, &t.creator, &profile_contract, Some(return_path));
             md = md.raw_str("</div>\n");
         } else {
             md = md.raw_str("<h1>Thread</h1>\n");
@@ -1682,9 +1683,10 @@ impl BoardsBoard {
     ) -> MarkdownBuilder<'a> {
         md = md.div_start("reply");
 
-        // Reply header with author
+        // Reply header with author (with return path so "Go Back" returns to thread)
+        let return_path = Self::build_thread_return_path(env, board_id, thread_id);
         md = md.div_start("reply-header");
-        md = Self::render_author(env, md, &reply.creator, profile_contract);
+        md = Self::render_author(env, md, &reply.creator, profile_contract, Some(return_path));
         md = md.raw_str(" · Reply #")
             .number(reply.id as u32)
             .div_end();
@@ -2196,16 +2198,40 @@ impl BoardsBoard {
     }
 
     /// Render author info (username link or truncated address)
-    fn render_author<'a>(env: &Env, md: MarkdownBuilder<'a>, creator: &Address, profile_contract: &Option<Address>) -> MarkdownBuilder<'a> {
+    ///
+    /// When return_path is provided, clicking the author link and then "Go Back"
+    /// on the profile page will return to that path.
+    fn render_author<'a>(
+        env: &Env,
+        md: MarkdownBuilder<'a>,
+        creator: &Address,
+        profile_contract: &Option<Address>,
+        return_path: Option<Bytes>,
+    ) -> MarkdownBuilder<'a> {
         match profile_contract {
             Some(profile_addr) => {
-                // Use include to embed the profile compact card
-                let args: Vec<Val> = Vec::from_array(env, [creator.into_val(env)]);
-                let rendered: Bytes = env.invoke_contract(
-                    profile_addr,
-                    &Symbol::new(env, "render_profile_card_compact"),
-                    args,
-                );
+                // Use the return path variant if we have a return path
+                let rendered: Bytes = match return_path {
+                    Some(path) => {
+                        let args: Vec<Val> = Vec::from_array(
+                            env,
+                            [creator.into_val(env), path.into_val(env)],
+                        );
+                        env.invoke_contract(
+                            profile_addr,
+                            &Symbol::new(env, "render_profile_compact_return"),
+                            args,
+                        )
+                    }
+                    None => {
+                        let args: Vec<Val> = Vec::from_array(env, [creator.into_val(env)]);
+                        env.invoke_contract(
+                            profile_addr,
+                            &Symbol::new(env, "render_profile_card_compact"),
+                            args,
+                        )
+                    }
+                };
                 md.raw(rendered)
             }
             None => {
@@ -2215,6 +2241,16 @@ impl BoardsBoard {
                     .raw_str("</span>")
             }
         }
+    }
+
+    /// Build a return path for the current thread view
+    fn build_thread_return_path(env: &Env, board_id: u64, thread_id: u64) -> Bytes {
+        // Build path: b/{board_id}/t/{thread_id} (without leading slash since profile adds it)
+        let mut path = Bytes::from_slice(env, b"b/");
+        path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, board_id as u32));
+        path.append(&Bytes::from_slice(env, b"/t/"));
+        path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, thread_id as u32));
+        path
     }
 
     /// Truncate an address for display
