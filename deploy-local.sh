@@ -78,6 +78,7 @@ CONTENT_ID=$(deploy_contract "boards_content")
 THEME_ID=$(deploy_contract "boards_theme")
 ADMIN_CONTRACT_ID=$(deploy_contract "boards_admin")
 REGISTRY_ID=$(deploy_contract "boards_registry")
+MAIN_ID=$(deploy_contract "boards_main")
 
 # Save contract IDs to file (board contracts are auto-deployed)
 echo ""
@@ -90,6 +91,9 @@ cat > .deployed-contracts.env << EOF
 NETWORK=$NETWORK
 RPC_URL=$RPC_URL
 ADMIN=$ADMIN
+
+# Main entry point contract (use this as VITE_CONTRACT_ID)
+MAIN_ID=$MAIN_ID
 
 REGISTRY_ID=$REGISTRY_ID
 PERMISSIONS_ID=$PERMISSIONS_ID
@@ -194,6 +198,35 @@ stellar contract invoke \
 
 echo -e "${GREEN}Admin initialized${NC}"
 
+# Initialize Main (needs registry, theme, permissions, content, and admin)
+echo ""
+echo -e "${GREEN}=== Initializing Main ===${NC}"
+stellar contract invoke \
+    --id $MAIN_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID \
+    --theme $THEME_ID \
+    --permissions $PERMISSIONS_ID \
+    --content $CONTENT_ID \
+    --admin $ADMIN_CONTRACT_ID
+
+echo -e "${GREEN}Main initialized${NC}"
+
+# Register main contract with registry as "main" alias
+echo ""
+echo -e "${GREEN}=== Registering Main with Registry ===${NC}"
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_contract \
+    --alias main \
+    --address $MAIN_ID
+
+echo -e "${GREEN}Main registered as @main${NC}"
+
 # Create first board via registry (board contract is auto-deployed)
 echo ""
 echo -e "${GREEN}=== Creating First Board ===${NC}"
@@ -204,8 +237,9 @@ BOARD_OUTPUT=$(stellar contract invoke \
     -- create_board \
     --name "General" \
     --description "General discussion board" \
-    --creator $ADMIN \
-    --is_private false 2>&1)
+    --is_private '""' \
+    --is_listed '"true"' \
+    --caller $ADMIN 2>&1)
 # Extract board number (single digit at end)
 BOARD_NUM=$(echo "$BOARD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
@@ -255,12 +289,13 @@ echo ""
 echo -e "${GREEN}=== Deployment Complete! ===${NC}"
 echo ""
 echo "Contract IDs:"
-echo "  Registry:    $REGISTRY_ID"
-echo "  Permissions: $PERMISSIONS_ID"
-echo "  Content:     $CONTENT_ID"
-echo "  Theme:       $THEME_ID"
-echo "  Admin:       $ADMIN_CONTRACT_ID"
-echo "  Board 0:     $BOARD_CONTRACT (auto-deployed)"
+echo "  Main (entry): $MAIN_ID"
+echo "  Registry:     $REGISTRY_ID"
+echo "  Permissions:  $PERMISSIONS_ID"
+echo "  Content:      $CONTENT_ID"
+echo "  Theme:        $THEME_ID"
+echo "  Admin:        $ADMIN_CONTRACT_ID"
+echo "  Board 0:      $BOARD_CONTRACT (auto-deployed)"
 echo ""
 echo "To interact with the contracts:"
 echo "  source .deployed-contracts.env"

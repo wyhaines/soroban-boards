@@ -2,6 +2,7 @@
 resolver = "2"
 
 members = [
+    "contracts/boards-main",
     "contracts/boards-registry",
     "contracts/boards-board",
     "contracts/boards-content",

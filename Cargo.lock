@@ -214,6 +214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "boards-main"
+version = "0.1.0"
+dependencies = [
+ "soroban-render-sdk",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "boards-permissions"
 version = "0.1.0"
 dependencies = [
@@ -224,7 +232,6 @@ dependencies = [
 name = "boards-registry"
 version = "0.1.0"
 dependencies = [
- "soroban-render-sdk",
  "soroban-sdk",
 ]
 

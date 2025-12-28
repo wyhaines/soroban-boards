@@ -30,8 +30,9 @@ else
 fi
 
 # Invoke render and decode the hex output
+# Use MAIN_ID as the entry point contract
 OUTPUT=$(stellar contract invoke \
-    --id $THEME_ID \
+    --id $MAIN_ID \
     --source local-deployer \
     --network local \
     -- render \

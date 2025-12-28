@@ -40,6 +40,7 @@ UPGRADE_PERMISSIONS=false
 UPGRADE_CONTENT=false
 UPGRADE_THEME=false
 UPGRADE_ADMIN=false
+UPGRADE_MAIN=false
 UPGRADE_BOARDS=false
 
 if [ $# -gt 0 ]; then
@@ -51,11 +52,12 @@ if [ $# -gt 0 ]; then
             content)     UPGRADE_CONTENT=true ;;
             theme)       UPGRADE_THEME=true ;;
             admin)       UPGRADE_ADMIN=true ;;
+            main)        UPGRADE_MAIN=true ;;
             boards)      UPGRADE_BOARDS=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, admin, boards, all"
+                echo "Valid options: registry, permissions, content, theme, admin, main, boards, all"
                 exit 1
                 ;;
         esac
@@ -68,6 +70,7 @@ if [ "$UPGRADE_ALL" = true ]; then
     UPGRADE_CONTENT=true
     UPGRADE_THEME=true
     UPGRADE_ADMIN=true
+    UPGRADE_MAIN=true
     UPGRADE_BOARDS=true
 fi
 
@@ -187,6 +190,15 @@ if [ "$UPGRADE_ADMIN" = true ]; then
     echo ""
 fi
 
+# Upgrade Main (via registry proxy)
+if [ "$UPGRADE_MAIN" = true ]; then
+    echo -e "${GREEN}=== Upgrading Main ===${NC}"
+    MAIN_HASH=$(install_wasm "boards_main")
+    echo -e "WASM hash: ${BLUE}$MAIN_HASH${NC}"
+    upgrade_contract_via_registry "Main" "$MAIN_ID" "$MAIN_HASH"
+    echo ""
+fi
+
 # Upgrade Board contracts (need to iterate through all boards)
 if [ "$UPGRADE_BOARDS" = true ]; then
     echo -e "${GREEN}=== Upgrading Board Contracts ===${NC}"
@@ -243,10 +255,11 @@ fi
 echo -e "${GREEN}=== Upgrade Complete! ===${NC}"
 echo ""
 echo "Contract addresses remain unchanged:"
-echo "  Registry:    $REGISTRY_ID"
-echo "  Permissions: $PERMISSIONS_ID"
-echo "  Content:     $CONTENT_ID"
-echo "  Theme:       $THEME_ID"
-echo "  Admin:       $ADMIN_CONTRACT_ID"
+echo "  Main (entry): $MAIN_ID"
+echo "  Registry:     $REGISTRY_ID"
+echo "  Permissions:  $PERMISSIONS_ID"
+echo "  Content:      $CONTENT_ID"
+echo "  Theme:        $THEME_ID"
+echo "  Admin:        $ADMIN_CONTRACT_ID"
 echo ""
 echo "All existing data has been preserved."
