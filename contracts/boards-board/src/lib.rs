@@ -1020,8 +1020,8 @@ impl BoardsBoard {
 
         // Add profile link if profile contract is available
         if let Some(profile_addr) = Self::get_profile_contract(env) {
-            // Build return path to current board: @registry:/b/{board_id}
-            let mut return_path = Bytes::from_slice(env, b"@registry:/b/");
+            // Build return path to current board: @main:/b/{board_id}
+            let mut return_path = Bytes::from_slice(env, b"@main:/b/");
             return_path.append(&Self::u64_to_bytes(env, board_id));
 
             let args: Vec<Val> = Vec::from_array(env, [
@@ -2270,8 +2270,8 @@ impl BoardsBoard {
 
     /// Build a return path for the current thread view
     fn build_thread_return_path(env: &Env, board_id: u64, thread_id: u64) -> Bytes {
-        // Build path: b/{board_id}/t/{thread_id} (without leading slash since profile adds it)
-        let mut path = Bytes::from_slice(env, b"b/");
+        // Build cross-contract return path: @main:/b/{board_id}/t/{thread_id}
+        let mut path = Bytes::from_slice(env, b"@main:/b/");
         path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, board_id as u32));
         path.append(&Bytes::from_slice(env, b"/t/"));
         path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, thread_id as u32));

@@ -674,7 +674,7 @@ impl BoardsAdmin {
         // Build title with board name
         let mut md = Self::render_nav(env, board_id);
         if let Some(ref board) = board_opt {
-            md = md.h1("Settings: ").text_string(&board.name);
+            md = md.h1("Settings: ").text_string(&board.name).newline().newline();
         } else {
             md = md.h1("Board Settings");
         }
