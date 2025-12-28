@@ -370,6 +370,9 @@ impl BoardsTheme {
             .rule(".badge-pinned", "background: #ffeeba; color: #856404;")
             .rule(".badge-locked", "background: #f8d7da; color: #721c24;")
             .rule(".badge-private", "background: #e7d4ff; color: #5a3d7a;")
+            .rule(".badge-hidden", "background: #ccc; color: #333;")
+            .rule(".badge-readonly", "background: #d4edda; color: #155724;")
+            .rule(".mod-actions", "margin: var(--space-sm) 0; padding: var(--space-sm); background: var(--bg-muted); border-radius: var(--radius-md); font-size: 0.875rem;")
             // Section spacing
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
@@ -392,6 +395,8 @@ impl BoardsTheme {
             .rule(".badge-pinned", "background: #3a3019; color: #ffd859;")
             .rule(".badge-locked", "background: #3a1c1c; color: #ff8080;")
             .rule(".badge-private", "background: #3a2d4a; color: #c9a5ff;")
+            .rule(".badge-hidden", "background: #2a2a2a; color: #888;")
+            .rule(".badge-readonly", "background: #1e3a28; color: #6fdd8b;")
             .media_end()
             // Mobile responsive styles
             .media_start("(max-width: 640px)")

@@ -1030,6 +1030,33 @@ impl BoardsBoard {
             .div_end()
     }
 
+    /// Render a thread card for the board list
+    fn render_thread_card<'a>(
+        md: MarkdownBuilder<'a>,
+        board_id: u64,
+        thread: &ThreadMeta,
+    ) -> MarkdownBuilder<'a> {
+        let mut md = md.raw_str("<a href=\"render:/b/")
+            .number(board_id as u32)
+            .raw_str("/t/")
+            .number(thread.id as u32)
+            .raw_str("\" class=\"thread-card\"><span class=\"thread-card-title\">")
+            .text_string(&thread.title)
+            .raw_str("</span><span class=\"thread-card-meta\">");
+        if thread.is_hidden {
+            md = md.raw_str("<span class=\"badge badge-hidden\">hidden</span> ");
+        }
+        if thread.is_pinned {
+            md = md.raw_str("<span class=\"badge badge-pinned\">pinned</span> ");
+        }
+        if thread.is_locked {
+            md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
+        }
+        md.number(thread.reply_count)
+            .text(" replies")
+            .raw_str("</span></a>\n")
+    }
+
     /// Render board view with thread list
     fn render_board(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let config: BoardConfig = env
@@ -1038,24 +1065,26 @@ impl BoardsBoard {
             .get(&BoardKey::Config)
             .expect("Not initialized");
 
+        // Get viewer role (needed for private board check, admin button, and hidden thread filtering)
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+        let viewer_can_moderate = (viewer_role as u32) >= (Role::Moderator as u32);
+
         // Check permissions for private boards
         if config.is_private {
-            if let Some(perms_addr) = env.storage().instance().get::<_, Address>(&BoardKey::Permissions) {
-                let viewer_role = if let Some(user) = viewer {
-                    let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-                    let role: Role = env.invoke_contract(
-                        &perms_addr,
-                        &Symbol::new(env, "get_role"),
-                        args,
-                    );
-                    role
-                } else {
-                    Role::Guest
-                };
-
+            if let Some(ref perms_addr) = perms_addr_opt {
                 // If not a member, show access denied
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, &perms_addr);
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
                 }
             }
         }
@@ -1089,22 +1118,11 @@ impl BoardsBoard {
         }
 
         // Show settings button for Admin+ users
-        if let Some(user) = viewer {
-            if let Some(perms_addr) = env.storage().instance().get::<_, Address>(&BoardKey::Permissions) {
-                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-                let viewer_role: Role = env.invoke_contract(
-                    &perms_addr,
-                    &Symbol::new(env, "get_role"),
-                    role_args,
-                );
-
-                if (viewer_role as u32) >= (Role::Admin as u32) {
-                    md = md.raw_str("<a href=\"render:/admin/b/")
-                        .number(board_id as u32)
-                        .raw_str("/settings\" class=\"action-btn action-btn-secondary\">⚙ Settings</a>")
-                        .newline();
-                }
-            }
+        if (viewer_role as u32) >= (Role::Admin as u32) {
+            md = md.raw_str("<a href=\"render:/admin/b/")
+                .number(board_id as u32)
+                .raw_str("/settings\" class=\"action-btn action-btn-secondary\">⚙ Settings</a>")
+                .newline();
         }
 
         md = md.raw_str("<h2>Threads</h2>\n")
@@ -1121,29 +1139,62 @@ impl BoardsBoard {
             md = md.div_end()
                 .paragraph("No threads yet. Be the first to post!");
         } else {
-            // List threads (newest first, up to 20)
-            let limit = if thread_count > 20 { 20 } else { thread_count };
-            let start_idx = thread_count - 1;
+            // Get pinned threads list
+            let pinned_threads: Vec<u64> = env
+                .storage()
+                .instance()
+                .get(&BoardKey::PinnedThreads)
+                .unwrap_or(Vec::new(env));
 
-            for i in 0..limit {
-                let idx = start_idx - i;
+            let limit = 20u64;
+            let mut shown = 0u64;
+
+            // First, render pinned threads
+            for i in 0..pinned_threads.len() {
+                if shown >= limit {
+                    break;
+                }
+                let thread_id = pinned_threads.get(i).unwrap();
+                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+                    // Skip hidden threads for non-moderators
+                    if thread.is_hidden && !viewer_can_moderate {
+                        continue;
+                    }
+                    md = Self::render_thread_card(md, board_id, &thread);
+                    shown += 1;
+                }
+            }
+
+            // Then render remaining threads (newest first), skipping pinned ones
+            let start_idx = thread_count - 1;
+            let mut idx = start_idx;
+            while shown < limit && idx < thread_count {
                 if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(idx)) {
-                    md = md.raw_str("<a href=\"render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("/t/")
-                        .number(thread.id as u32)
-                        .raw_str("\" class=\"thread-card\"><span class=\"thread-card-title\">")
-                        .text_string(&thread.title)
-                        .raw_str("</span><span class=\"thread-card-meta\">");
+                    // Skip pinned threads (already shown above)
                     if thread.is_pinned {
-                        md = md.raw_str("<span class=\"badge badge-pinned\">pinned</span> ");
+                        if idx > 0 {
+                            idx -= 1;
+                        } else {
+                            break;
+                        }
+                        continue;
                     }
-                    if thread.is_locked {
-                        md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
+                    // Skip hidden threads for non-moderators
+                    if thread.is_hidden && !viewer_can_moderate {
+                        if idx > 0 {
+                            idx -= 1;
+                        } else {
+                            break;
+                        }
+                        continue;
                     }
-                    md = md.number(thread.reply_count)
-                        .text(" replies")
-                        .raw_str("</span></a>\n");
+                    md = Self::render_thread_card(md, board_id, &thread);
+                    shown += 1;
+                }
+                if idx > 0 {
+                    idx -= 1;
+                } else {
+                    break;
                 }
             }
             md = md.div_end();
@@ -1204,6 +1255,19 @@ impl BoardsBoard {
             }
         }
 
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render hidden thread access denied message
+    fn render_hidden_thread_message(env: &Env, board_id: u64) -> Bytes {
+        let md = Self::render_nav(env, board_id)
+            .newline()
+            .raw_str("[< Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
+            .newline()
+            .newline()
+            .warning("This thread has been hidden by a moderator.");
         Self::render_footer_into(md).build()
     }
 
@@ -1280,6 +1344,26 @@ impl BoardsBoard {
             .persistent()
             .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
 
+        // Get viewer role for hidden thread check and moderator controls
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+        let viewer_can_moderate = (viewer_role as u32) >= (Role::Moderator as u32);
+
+        // Check if thread is hidden - only moderators can view hidden threads
+        let is_hidden = thread.as_ref().map(|t| t.is_hidden).unwrap_or(false);
+        if is_hidden && !viewer_can_moderate {
+            return Self::render_hidden_thread_message(env, board_id);
+        }
+
         // Determine if posting is allowed
         let is_readonly = config.is_readonly;
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
@@ -1307,13 +1391,20 @@ impl BoardsBoard {
         }
 
         // Show status badges
-        if is_readonly {
-            md = md.raw_str("<span class=\"badge badge-readonly\">read-only board</span> ");
+        let is_pinned = thread.as_ref().map(|t| t.is_pinned).unwrap_or(false);
+        if is_hidden && viewer_can_moderate {
+            md = md.raw_str("<span class=\"badge badge-hidden\">hidden</span> ");
+        }
+        if is_pinned {
+            md = md.raw_str("<span class=\"badge badge-pinned\">pinned</span> ");
         }
         if is_locked {
             md = md.raw_str("<span class=\"badge badge-locked\">locked</span> ");
         }
-        if is_readonly || is_locked {
+        if is_readonly {
+            md = md.raw_str("<span class=\"badge badge-readonly\">read-only board</span> ");
+        }
+        if is_hidden || is_pinned || is_locked || is_readonly {
             md = md.newline();
         }
 
@@ -1363,6 +1454,48 @@ impl BoardsBoard {
 
             md = md.div_end()
                 .newline();
+        }
+
+        // Moderator controls (only show for moderator+ users)
+        // Uses raw HTML links since we're inside a div (markdown not processed in HTML blocks)
+        if viewer_can_moderate {
+            if let Some(ref user) = viewer {
+                md = md.div_start("mod-actions")
+                    .raw_str("<strong>Mod Actions:</strong> ")
+                    // Hidden fields for all actions
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                    .number(board_id as u32)
+                    .raw_str("\" />")
+                    .raw_str("<input type=\"hidden\" name=\"thread_id\" value=\"")
+                    .number(thread_id as u32)
+                    .raw_str("\" />")
+                    .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+                    .text_string(&user.to_string())
+                    .raw_str("\" />");
+
+                // Lock/Unlock
+                if is_locked {
+                    md = md.raw_str("<a href=\"form:@admin:unlock_thread\">[Unlock]</a>");
+                } else {
+                    md = md.raw_str("<a href=\"form:@admin:lock_thread\">[Lock]</a>");
+                }
+
+                // Hide/Unhide
+                if is_hidden {
+                    md = md.raw_str(" <a href=\"form:@admin:unhide_thread\">[Unhide]</a>");
+                } else {
+                    md = md.raw_str(" <a href=\"form:@admin:hide_thread\">[Hide]</a>");
+                }
+
+                // Pin/Unpin
+                if is_pinned {
+                    md = md.raw_str(" <a href=\"form:@admin:unpin_thread\">[Unpin]</a>");
+                } else {
+                    md = md.raw_str(" <a href=\"form:@admin:pin_thread\">[Pin]</a>");
+                }
+
+                md = md.div_end().newline();
+            }
         }
 
         md = md.raw_str("<h2>Replies</h2>\n");
