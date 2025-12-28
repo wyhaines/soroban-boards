@@ -286,7 +286,7 @@ impl BoardsRegistry {
                 [
                     board_id.into_val(&env),
                     env.current_contract_address().into_val(&env),  // registry
-                    Option::<Address>::None.into_val(&env),  // permissions (None to skip checks for creation)
+                    Some(contracts.permissions.clone()).into_val(&env),  // permissions contract
                     Some(contracts.content.clone()).into_val(&env),  // content contract
                     Some(contracts.theme.clone()).into_val(&env),  // theme contract
                     name.into_val(&env),
