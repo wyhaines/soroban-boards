@@ -1,7 +1,7 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, IntoVal, String, Symbol, Val, Vec};
 
 // Declare render capabilities
 soroban_render!(markdown);
@@ -74,6 +74,20 @@ pub struct CommunityRules {
     pub auto_approve_members: bool,
     /// Minimum account age in days to join
     pub min_account_age_days: u32,
+}
+
+/// Board metadata (mirrors registry BoardMeta for cross-contract calls)
+#[contracttype]
+#[derive(Clone)]
+pub struct BoardMeta {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub creator: Address,
+    pub created_at: u64,
+    pub thread_count: u64,
+    pub is_readonly: bool,
+    pub is_private: bool,
 }
 
 /// Role levels (mirrors permissions contract)
@@ -989,6 +1003,53 @@ impl BoardsCommunity {
         builder
     }
 
+    /// Render a list of boards as cards (fetches metadata from registry)
+    fn render_board_cards<'a>(env: &'a Env, mut builder: MarkdownBuilder<'a>, board_ids: &Vec<u64>) -> MarkdownBuilder<'a> {
+        if board_ids.is_empty() {
+            return builder.paragraph("No boards in this community yet.");
+        }
+
+        // Get registry to fetch board metadata
+        let registry: Address = match env.storage().instance().get(&CommunityKey::Registry) {
+            Some(r) => r,
+            None => {
+                return builder.paragraph("Registry not configured.");
+            }
+        };
+
+        builder = builder.raw_str("<div class=\"board-list\">\n");
+
+        for board_id in board_ids.iter() {
+            // Fetch board metadata from registry
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+            let board_opt: Option<BoardMeta> = env.invoke_contract(
+                &registry,
+                &Symbol::new(env, "get_board"),
+                args,
+            );
+
+            if let Some(board) = board_opt {
+                // Board card with link wrapper - use render:/b/ to go through main contract
+                builder = builder.raw_str("<a href=\"render:/b/")
+                    .number(board.id as u32)
+                    .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
+                    .text_string(&board.name)
+                    .raw_str("</span><span class=\"board-card-desc\">")
+                    .text_string(&board.description)
+                    .raw_str("</span><span class=\"board-card-meta\">")
+                    .number(board.thread_count as u32)
+                    .text(" threads");
+                if board.is_private {
+                    builder = builder.raw_str(" <span class=\"badge\">private</span>");
+                }
+                builder = builder.raw_str("</span></a>\n");
+            }
+        }
+
+        builder = builder.raw_str("</div>\n");
+        builder
+    }
+
     fn render_community_home(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
         let community = match Self::get_community_by_name(env.clone(), name.clone()) {
             Some(c) => c,
@@ -1066,20 +1127,7 @@ impl BoardsCommunity {
         builder = builder.newline();
         builder = builder.h2("Boards");
         let board_ids = Self::get_community_boards(env.clone(), community.id);
-
-        if board_ids.is_empty() {
-            builder = builder.paragraph("No boards in this community yet.");
-        } else {
-            builder = builder.raw_str("<ul class=\"board-list\">\n");
-            for board_id in board_ids.iter() {
-                builder = builder.raw_str("<li><a href=\"render:@registry:/b/");
-                builder = builder.number(board_id as u32);
-                builder = builder.raw_str("\">Board #");
-                builder = builder.number(board_id as u32);
-                builder = builder.raw_str("</a></li>\n");
-            }
-            builder = builder.raw_str("</ul>\n");
-        }
+        builder = Self::render_board_cards(env, builder, &board_ids);
 
         // Rules if set
         if let Some(rules) = Self::get_rules(env.clone(), community.id) {
@@ -1117,20 +1165,7 @@ impl BoardsCommunity {
         builder = builder.h2("Boards");
 
         let board_ids = Self::get_community_boards(env.clone(), community.id);
-
-        if board_ids.is_empty() {
-            builder = builder.paragraph("No boards in this community yet.");
-        } else {
-            builder = builder.raw_str("<ul>\n");
-            for board_id in board_ids.iter() {
-                builder = builder.raw_str("<li><a href=\"render:@registry:/b/");
-                builder = builder.number(board_id as u32);
-                builder = builder.raw_str("\">Board #");
-                builder = builder.number(board_id as u32);
-                builder = builder.raw_str("</a></li>\n");
-            }
-            builder = builder.raw_str("</ul>\n");
-        }
+        builder = Self::render_board_cards(env, builder, &board_ids);
 
         builder.build()
     }
