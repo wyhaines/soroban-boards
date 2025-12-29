@@ -108,6 +108,146 @@ impl BoardsMain {
             .get(&MainKey::Community)
     }
 
+    /// Proxy function to create a community
+    /// This allows forms on community pages (rendered via main) to call create_community
+    pub fn create_community(
+        env: Env,
+        name: String,
+        display_name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        caller: Address,
+    ) -> u64 {
+        // Authenticate at the root level so nested call doesn't fail
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            name.into_val(&env),
+            display_name.into_val(&env),
+            description.into_val(&env),
+            is_private.into_val(&env),
+            is_listed.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract(&community, &Symbol::new(&env, "create_community"), args)
+    }
+
+    /// Proxy function to update a community
+    pub fn update_community(
+        env: Env,
+        community_id: u64,
+        display_name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            display_name.into_val(&env),
+            description.into_val(&env),
+            is_private.into_val(&env),
+            is_listed.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&community, &Symbol::new(&env, "update_community"), args);
+    }
+
+    /// Proxy function to initiate ownership transfer
+    pub fn initiate_transfer(
+        env: Env,
+        community_id: u64,
+        new_owner: Address,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            new_owner.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&community, &Symbol::new(&env, "initiate_transfer"), args);
+    }
+
+    /// Proxy function to cancel ownership transfer
+    pub fn cancel_transfer(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&community, &Symbol::new(&env, "cancel_transfer"), args);
+    }
+
+    /// Proxy function to accept ownership transfer
+    pub fn accept_transfer(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&community, &Symbol::new(&env, "accept_transfer"), args);
+    }
+
+    /// Proxy function to delete a community
+    pub fn delete_community(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            caller.into_val(&env),
+        ]);
+
+        env.invoke_contract::<()>(&community, &Symbol::new(&env, "delete_community"), args);
+    }
+
     /// Set community contract address (for upgrades - requires registry admin auth)
     pub fn set_community(env: Env, community: Address, caller: Address) {
         caller.require_auth();
@@ -636,7 +776,7 @@ impl BoardsMain {
     // Delegation to Other Contracts
     // ========================================================================
 
-    /// Delegate rendering to the community contract
+    /// Delegate rendering to the community contract with consistent nav/footer
     fn delegate_to_community(env: &Env, path: &String, viewer: &Option<Address>) -> Bytes {
         let community: Address = env
             .storage()
@@ -648,7 +788,10 @@ impl BoardsMain {
             path.into_val(env),
             viewer.into_val(env),
         ]);
-        env.invoke_contract(&community, &Symbol::new(env, "render"), args)
+        let content: Bytes = env.invoke_contract(&community, &Symbol::new(env, "render"), args);
+
+        // Wrap with nav and footer for consistent UI
+        Self::wrap_with_nav_footer(env, viewer, content)
     }
 
     /// Delegate rendering to the community contract with the full path
@@ -670,7 +813,18 @@ impl BoardsMain {
             community_path.into_val(env),
             viewer.into_val(env),
         ]);
-        env.invoke_contract(&community, &Symbol::new(env, "render"), args)
+        let content: Bytes = env.invoke_contract(&community, &Symbol::new(env, "render"), args);
+
+        // Wrap with nav and footer for consistent UI
+        Self::wrap_with_nav_footer(env, viewer, content)
+    }
+
+    /// Wrap content with navigation bar and footer for consistent UI
+    fn wrap_with_nav_footer(env: &Env, viewer: &Option<Address>, content: Bytes) -> Bytes {
+        let md = Self::render_nav(env, viewer)
+            .newline()  // Blank line after nav-bar for markdown parsing
+            .raw(content);
+        Self::render_footer_into(md).build()
     }
 
     /// Delegate rendering to the admin contract

@@ -36,6 +36,8 @@ pub enum CommunityKey {
     CommunityPermDefaults(u64),
     /// Whether community is listed publicly
     CommunityListed(u64),
+    /// Pending ownership transfer request
+    PendingOwnershipTransfer(u64),
 }
 
 /// Community metadata
@@ -107,6 +109,20 @@ pub struct JoinRequest {
     pub user: Address,
     pub requested_at: u64,
     pub message: String,
+}
+
+/// Pending ownership transfer request
+#[contracttype]
+#[derive(Clone)]
+pub struct PendingOwnershipTransfer {
+    /// Community ID being transferred
+    pub community_id: u64,
+    /// Address of the new owner
+    pub new_owner: Address,
+    /// Timestamp when transfer was initiated
+    pub initiated_at: u64,
+    /// Address of the current owner who initiated the transfer
+    pub initiator: Address,
 }
 
 #[contract]
@@ -633,11 +649,14 @@ impl BoardsCommunity {
     }
 
     /// Update community metadata (owner only)
+    /// Accepts is_private and is_listed as strings ("true"/"false") from form input
     pub fn update_community(
         env: Env,
         community_id: u64,
         display_name: String,
         description: String,
+        is_private: String,
+        is_listed: String,
         caller: Address,
     ) {
         caller.require_auth();
@@ -655,25 +674,118 @@ impl BoardsCommunity {
         community.display_name = display_name;
         community.description = description;
 
+        // Parse is_private string to bool
+        let is_private_bool = is_private.len() == 4 && {
+            let mut buf = [0u8; 4];
+            is_private.copy_into_slice(&mut buf);
+            &buf == b"true"
+        };
+        community.is_private = is_private_bool;
+
         env.storage()
             .persistent()
             .set(&CommunityKey::Community(community_id), &community);
+
+        // Parse and update is_listed
+        let is_listed_bool = if is_listed.len() == 0 {
+            true
+        } else if is_listed.len() == 5 {
+            let mut buf = [0u8; 5];
+            is_listed.copy_into_slice(&mut buf);
+            &buf != b"false"
+        } else {
+            true
+        };
+
+        env.storage()
+            .persistent()
+            .set(&CommunityKey::CommunityListed(community_id), &is_listed_bool);
     }
 
-    /// Transfer community ownership
-    pub fn transfer_ownership(env: Env, community_id: u64, new_owner: Address, caller: Address) {
+    /// Initiate ownership transfer (current owner only)
+    /// Creates a pending transfer request that the new owner must accept
+    pub fn initiate_transfer(
+        env: Env,
+        community_id: u64,
+        new_owner: Address,
+        caller: Address,
+    ) {
         caller.require_auth();
-        new_owner.require_auth();
 
-        let mut community: CommunityMeta = env
+        let community: CommunityMeta = env
             .storage()
             .persistent()
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
         if caller != community.owner {
-            panic!("Only community owner can transfer ownership");
+            panic!("Only community owner can initiate transfer");
         }
+
+        // Can't transfer to self
+        if new_owner == caller {
+            panic!("Cannot transfer to yourself");
+        }
+
+        let pending = PendingOwnershipTransfer {
+            community_id,
+            new_owner,
+            initiated_at: env.ledger().timestamp(),
+            initiator: caller,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&CommunityKey::PendingOwnershipTransfer(community_id), &pending);
+    }
+
+    /// Cancel pending ownership transfer (current owner only)
+    pub fn cancel_transfer(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let community: CommunityMeta = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::Community(community_id))
+            .expect("Community does not exist");
+
+        if caller != community.owner {
+            panic!("Only community owner can cancel transfer");
+        }
+
+        if !env
+            .storage()
+            .persistent()
+            .has(&CommunityKey::PendingOwnershipTransfer(community_id))
+        {
+            panic!("No pending transfer to cancel");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::PendingOwnershipTransfer(community_id));
+    }
+
+    /// Accept pending ownership transfer (new owner only)
+    /// Completes the transfer and makes the caller the new owner
+    pub fn accept_transfer(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let pending: PendingOwnershipTransfer = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::PendingOwnershipTransfer(community_id))
+            .expect("No pending transfer");
+
+        if caller != pending.new_owner {
+            panic!("Only designated new owner can accept transfer");
+        }
+
+        let mut community: CommunityMeta = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::Community(community_id))
+            .expect("Community does not exist");
 
         // Add new owner to members if not already
         let mut members: Vec<Address> = env
@@ -684,23 +796,88 @@ impl BoardsCommunity {
 
         let mut is_member = false;
         for member in members.iter() {
-            if member == new_owner {
+            if member == caller {
                 is_member = true;
                 break;
             }
         }
         if !is_member {
-            members.push_back(new_owner.clone());
+            members.push_back(caller.clone());
             community.member_count += 1;
             env.storage()
                 .persistent()
                 .set(&CommunityKey::CommunityMembers(community_id), &members);
         }
 
-        community.owner = new_owner;
+        // Transfer ownership
+        community.owner = caller;
         env.storage()
             .persistent()
             .set(&CommunityKey::Community(community_id), &community);
+
+        // Remove pending transfer
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::PendingOwnershipTransfer(community_id));
+    }
+
+    /// Get pending ownership transfer if any
+    pub fn get_pending_transfer(env: Env, community_id: u64) -> Option<PendingOwnershipTransfer> {
+        env.storage()
+            .persistent()
+            .get(&CommunityKey::PendingOwnershipTransfer(community_id))
+    }
+
+    /// Delete a community (owner only, requires board_count == 0)
+    pub fn delete_community(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let community: CommunityMeta = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::Community(community_id))
+            .expect("Community does not exist");
+
+        if caller != community.owner {
+            panic!("Only community owner can delete community");
+        }
+
+        if community.board_count > 0 {
+            panic!("Cannot delete community with boards. Remove all boards first.");
+        }
+
+        // Remove all associated storage
+        let name_lower = Self::to_lowercase(&env, &community.name);
+
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::Community(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityByName(name_lower));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityBoards(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityMembers(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityJoinRequests(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityRules(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityPermDefaults(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::CommunityListed(community_id));
+        env.storage()
+            .persistent()
+            .remove(&CommunityKey::PendingOwnershipTransfer(community_id));
+
+        // Note: We don't decrement CommunityCount as IDs are not reused
     }
 
     /// Render community page
@@ -736,7 +913,12 @@ impl BoardsCommunity {
                     if sub_path.starts_with(b"/boards") {
                         return Self::render_community_boards(&env, &community_name, viewer);
                     }
-                    // Other subpaths can be added here
+                    if sub_path.starts_with(b"/settings") {
+                        return Self::render_settings(&env, &community_name, viewer);
+                    }
+                    if sub_path.starts_with(b"/delete") {
+                        return Self::render_delete(&env, &community_name, viewer);
+                    }
                 }
 
                 return Self::render_community_home(&env, &community_name, viewer);
@@ -964,6 +1146,210 @@ impl BoardsCommunity {
         builder.build()
     }
 
+    fn render_settings(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
+        let community = match Self::get_community_by_name(env.clone(), name.clone()) {
+            Some(c) => c,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Community not found")
+                    .build();
+            }
+        };
+
+        // Check if viewer is owner
+        let is_owner = match &viewer {
+            Some(v) => *v == community.owner,
+            None => false,
+        };
+
+        if !is_owner {
+            return MarkdownBuilder::new(env)
+                .warning("Only the community owner can access settings.")
+                .build();
+        }
+
+        // Get current listed status
+        let is_listed: bool = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::CommunityListed(community.id))
+            .unwrap_or(true);
+
+        let mut builder = MarkdownBuilder::new(env);
+
+        // Title
+        builder = builder.h1("Community Settings");
+
+        // Basic Info Section
+        builder = builder.h2("Basic Information");
+        builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+        builder = builder.number(community.id as u32);
+        builder = builder.raw_str("\" />\n");
+
+        // Display name field with current value
+        builder = builder.raw_str("<label>Display Name:</label>\n");
+        builder = builder.raw_str("<input type=\"text\" name=\"display_name\" value=\"");
+        builder = builder.text_string(&community.display_name);
+        builder = builder.raw_str("\" />\n");
+
+        // Description field with current value
+        builder = builder.raw_str("<label>Description:</label>\n");
+        builder = builder.raw_str("<textarea name=\"description\" rows=\"3\">");
+        builder = builder.text_string(&community.description);
+        builder = builder.raw_str("</textarea>\n");
+
+        // Visibility Section
+        builder = builder.h2("Visibility");
+
+        // Private checkbox
+        builder = builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
+        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_private\" value=\"true\"");
+        if community.is_private {
+            builder = builder.raw_str(" checked");
+        }
+        builder = builder.raw_str(" /> Private (members only)</label>\n");
+
+        // Listed checkbox (inverted - checkbox means unlisted)
+        builder = builder.raw_str("<input type=\"hidden\" name=\"is_listed\" value=\"true\" />\n");
+        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_listed\" value=\"false\"");
+        if !is_listed {
+            builder = builder.raw_str(" checked");
+        }
+        builder = builder.raw_str(" /> Hide from public directory (unlisted)</label>\n");
+
+        // Caller and redirect
+        builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+        builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+        builder = builder.raw_str("\" />\n");
+        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/settings\" />\n");
+
+        builder = builder.newline();
+        builder = builder.raw_str("<a href=\"form:update_community\" class=\"soroban-action\">Save Changes</a>\n");
+
+        // Ownership Transfer Section
+        builder = builder.h2("Ownership Transfer");
+
+        // Check for pending transfer
+        if let Some(pending) = Self::get_pending_transfer(env.clone(), community.id) {
+            builder = builder.note("Pending transfer to:");
+            builder = builder.newline();
+            builder = builder.raw_str("<code>");
+            builder = builder.text_string(&pending.new_owner.to_string());
+            builder = builder.raw_str("</code>\n");
+            builder = builder.newline();
+
+            // Cancel form
+            builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+            builder = builder.number(community.id as u32);
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+            builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\" />\n");
+            builder = builder.raw_str("<a href=\"form:cancel_transfer\" class=\"soroban-action\">Cancel Transfer</a>\n");
+        } else {
+            builder = builder.paragraph("Transfer ownership to another user. They will need to accept the transfer.");
+
+            builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+            builder = builder.number(community.id as u32);
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<label>New Owner Address:</label>\n");
+            builder = builder.raw_str("<input type=\"text\" name=\"new_owner\" placeholder=\"G...\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+            builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\" />\n");
+            builder = builder.newline();
+            builder = builder.raw_str("<a href=\"form:initiate_transfer\" class=\"soroban-action\">Initiate Transfer</a>\n");
+        }
+
+        // Danger Zone
+        builder = builder.h2("Danger Zone");
+        builder = builder.warning("Deleting a community is permanent and cannot be undone.");
+        builder = builder.newline();
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/delete\" class=\"soroban-action\">Delete Community</a>\n");
+
+        // Back link
+        builder = builder.newline();
+        builder = builder.hr();
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("\">Back to Community</a>\n");
+
+        builder.build()
+    }
+
+    fn render_delete(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
+        let community = match Self::get_community_by_name(env.clone(), name.clone()) {
+            Some(c) => c,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Community not found")
+                    .build();
+            }
+        };
+
+        // Check if viewer is owner
+        let is_owner = match &viewer {
+            Some(v) => *v == community.owner,
+            None => false,
+        };
+
+        if !is_owner {
+            return MarkdownBuilder::new(env)
+                .warning("Only the community owner can delete the community.")
+                .build();
+        }
+
+        let mut builder = MarkdownBuilder::new(env);
+        builder = builder.h1("Delete Community");
+
+        if community.board_count > 0 {
+            builder = builder.warning("Cannot delete community with boards.");
+            builder = builder.paragraph("This community has ");
+            builder = builder.number(community.board_count as u32);
+            builder = builder.text(" board(s). Remove all boards from this community before deleting it.");
+            builder = builder.newline();
+            builder = builder.newline();
+            builder = builder.raw_str("<a href=\"render:/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\">Back to Settings</a>\n");
+        } else {
+            builder = builder.warning("This action is permanent and cannot be undone!");
+            builder = builder.newline();
+            builder = builder.paragraph("You are about to delete the community:");
+            builder = builder.raw_str("<strong>");
+            builder = builder.text_string(&community.display_name);
+            builder = builder.raw_str("</strong>\n");
+
+            builder = builder.newline();
+            builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+            builder = builder.number(community.id as u32);
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+            builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
+
+            builder = builder.newline();
+            builder = builder.raw_str("<a href=\"form:delete_community\" class=\"soroban-action\">Delete Community</a>\n");
+            builder = builder.text(" | ");
+            builder = builder.raw_str("<a href=\"render:/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\">Cancel</a>\n");
+        }
+
+        builder.build()
+    }
+
     fn render_create_form(env: &Env, viewer: Option<Address>) -> Bytes {
         if viewer.is_none() {
             return MarkdownBuilder::new(env)
@@ -974,33 +1360,44 @@ impl BoardsCommunity {
         let mut builder = MarkdownBuilder::new(env);
         builder = builder.h1("Create Community");
 
-        // Form to create community
-        builder = builder.raw_str("<form action=\"form:create_community\">\n");
+        // Form inputs - no <form> wrapper since DOMPurify strips form tags for security
+        // Instead, use a form: link which collects all inputs on the page
 
-        // Name field
+        // Name field - escape hyphen in pattern for unicode regex compatibility
         builder = builder.raw_str("<label for=\"name\">URL Name (lowercase, no spaces):</label>\n");
-        builder = builder.raw_str("<input type=\"text\" name=\"name\" placeholder=\"my-community\" required pattern=\"[a-z0-9-]+\" minlength=\"3\" maxlength=\"30\" />\n");
+        builder = builder.raw_str("<input type=\"text\" name=\"name\" placeholder=\"my-community\" pattern=\"[a-z0-9\\-]+\" minlength=\"3\" maxlength=\"30\" />\n");
 
         // Display name field
         builder = builder.raw_str("<label for=\"display_name\">Display Name:</label>\n");
-        builder = builder.raw_str("<input type=\"text\" name=\"display_name\" placeholder=\"My Community\" required />\n");
+        builder = builder.raw_str("<input type=\"text\" name=\"display_name\" placeholder=\"My Community\" />\n");
 
         // Description field
         builder = builder.raw_str("<label for=\"description\">Description:</label>\n");
         builder = builder.raw_str("<textarea name=\"description\" rows=\"3\" placeholder=\"Describe your community...\"></textarea>\n");
 
-        // Private checkbox
+        // Private checkbox - hidden default + checkbox override
+        builder = builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
         builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Private (members only)</label>\n");
 
-        // Listed checkbox
-        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_listed\" value=\"true\" checked /> Listed in directory</label>\n");
+        // Listed checkbox - hidden default + checkbox override
+        builder = builder.raw_str("<input type=\"hidden\" name=\"is_listed\" value=\"true\" />\n");
+        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_listed\" value=\"false\" /> Hide from public directory (unlisted)</label>\n");
 
-        // Hidden redirect
-        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/\" />\n");
+        // Caller address for authentication
+        builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+        builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+        builder = builder.raw_str("\" />\n");
 
-        // Submit button
-        builder = builder.raw_str("<button type=\"submit\" class=\"soroban-action\">Create Community</button>\n");
-        builder = builder.raw_str("</form>\n");
+        // Hidden redirect - go to communities list after creation
+        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
+
+        // Submit button using form: protocol link (collects all inputs on page)
+        builder = builder.newline();
+        builder = builder.raw_str("<a href=\"form:create_community\" class=\"soroban-action\">Create Community</a>\n");
+
+        // Cancel link
+        builder = builder.raw_str(" | ");
+        builder = builder.render_link("Cancel", "/communities");
 
         builder.build()
     }

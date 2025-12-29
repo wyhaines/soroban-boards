@@ -127,6 +127,21 @@ pub struct VotingConfig {
     pub karma_multiplier: u32,
 }
 
+/// Community metadata from community contract
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityMeta {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub owner: Address,
+    pub created_at: u64,
+    pub board_count: u64,
+    pub member_count: u64,
+    pub is_private: bool,
+}
+
 #[contract]
 pub struct BoardsAdmin;
 
@@ -1028,6 +1043,127 @@ impl BoardsAdmin {
 
         md = md.newline()
             .newline();
+
+        // Community Management Section
+        md = md.h2("Community");
+
+        // Get community contract address from registry
+        let community_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_community_contract"),
+            Vec::new(env),
+        );
+
+        if let Some(community_contract) = community_contract_opt {
+            // Get current community association
+            let community_id_opt: Option<u64> = env.invoke_contract(
+                &registry,
+                &Symbol::new(env, "get_board_community"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            );
+
+            if let Some(community_id) = community_id_opt {
+                // Board is in a community - get community info
+                let comm_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
+                let comm_opt: Option<CommunityMeta> = env.invoke_contract(
+                    &community_contract,
+                    &Symbol::new(env, "get_community"),
+                    comm_args,
+                );
+
+                if let Some(community) = comm_opt {
+                    md = md.text("**Current Community:** ")
+                        .raw_str("<a href=\"render:/c/")
+                        .text_string(&community.name)
+                        .raw_str("\">")
+                        .text_string(&community.display_name)
+                        .raw_str("</a>")
+                        .newline()
+                        .newline()
+                        .note("Leaving a community makes this a standalone board.")
+                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        .number(board_id as u32)
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+                        .text_string(&viewer.as_ref().unwrap().to_string())
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
+                        .number(board_id as u32)
+                        .raw_str("/settings\" />\n")
+                        .form_link_to("Leave Community", "registry", "remove_board_from_community")
+                        .newline();
+                } else {
+                    md = md.text("**Status:** In community (ID: ")
+                        .number(community_id as u32)
+                        .text(")")
+                        .newline();
+                }
+            } else {
+                // Board is standalone - show option to move to a community
+                md = md.text("**Status:** Standalone board (not in a community)")
+                    .newline()
+                    .newline();
+
+                // Get communities the user owns
+                let count: u64 = env.invoke_contract(
+                    &community_contract,
+                    &Symbol::new(env, "community_count"),
+                    Vec::new(env),
+                );
+
+                let mut user_communities: Vec<CommunityMeta> = Vec::new(env);
+                for i in 0..count {
+                    let comm_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+                    let comm_opt: Option<CommunityMeta> = env.invoke_contract(
+                        &community_contract,
+                        &Symbol::new(env, "get_community"),
+                        comm_args,
+                    );
+                    if let Some(community) = comm_opt {
+                        if community.owner == *viewer.as_ref().unwrap() {
+                            user_communities.push_back(community);
+                        }
+                    }
+                }
+
+                if user_communities.is_empty() {
+                    md = md.tip("Create a community to organize your boards together.")
+                        .raw_str("<a href=\"render:/new\">Create Community</a>\n");
+                } else {
+                    md = md.note("Move this board to one of your communities.")
+                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        .number(board_id as u32)
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+                        .text_string(&viewer.as_ref().unwrap().to_string())
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
+                        .number(board_id as u32)
+                        .raw_str("/settings\" />\n")
+                        .raw_str("<label>Select Community:</label>\n")
+                        .raw_str("<select name=\"community_id\">\n");
+
+                    for i in 0..user_communities.len() {
+                        let comm = user_communities.get(i).unwrap();
+                        md = md.raw_str("<option value=\"")
+                            .number(comm.id as u32)
+                            .raw_str("\">")
+                            .text_string(&comm.display_name)
+                            .raw_str("</option>\n");
+                    }
+
+                    md = md.raw_str("</select>\n")
+                        .newline()
+                        .form_link_to("Move to Community", "registry", "move_board_to_community")
+                        .newline();
+                }
+            }
+        } else {
+            md = md.text("Community features not available.")
+                .newline();
+        }
+
+        md = md.newline();
 
         md = md.h2("Quick Links")
             .raw_str("[View Members](render:/admin/b/")
