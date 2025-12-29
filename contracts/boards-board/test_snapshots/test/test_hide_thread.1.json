@@ -127,6 +127,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {

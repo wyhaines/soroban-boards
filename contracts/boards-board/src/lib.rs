@@ -32,6 +32,10 @@ pub enum BoardKey {
     Config,
     /// Edit window in seconds (stored separately for backwards compatibility)
     EditWindow,
+    /// Flair definitions
+    FlairDefs,
+    /// Next flair ID counter
+    NextFlairId,
 }
 
 /// Thread metadata
@@ -49,6 +53,7 @@ pub struct ThreadMeta {
     pub is_pinned: bool,
     pub is_hidden: bool,
     pub is_deleted: bool,
+    pub flair_id: Option<u32>,
 }
 
 /// Board configuration
@@ -111,6 +116,19 @@ pub struct VoteTally {
     pub downvotes: u32,
     pub score: i32,
     pub first_vote_at: u64,
+}
+
+/// Flair definition for categorizing threads
+#[contracttype]
+#[derive(Clone)]
+pub struct FlairDef {
+    pub id: u32,
+    pub name: String,       // max 32 chars
+    pub color: String,      // CSS text color (e.g., "#ffffff")
+    pub bg_color: String,   // CSS background color (e.g., "#ff4500")
+    pub required: bool,     // Must select flair when posting
+    pub mod_only: bool,     // Only moderators can assign
+    pub enabled: bool,      // Whether flair is active
 }
 
 #[contract]
@@ -215,6 +233,297 @@ impl BoardsBoard {
             .expect("Not initialized");
         registry.require_auth();
         env.storage().instance().set(&BoardKey::Voting, &voting);
+    }
+
+    // Flair management functions
+
+    /// Create a new flair (Admin+ only)
+    pub fn create_flair(
+        env: Env,
+        name: String,
+        color: String,
+        bg_color: String,
+        required: bool,
+        mod_only: bool,
+        caller: Address,
+    ) -> u32 {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can create flairs");
+            }
+        }
+
+        // Get next flair ID
+        let flair_id: u32 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::NextFlairId)
+            .unwrap_or(0);
+
+        let flair = FlairDef {
+            id: flair_id,
+            name,
+            color,
+            bg_color,
+            required,
+            mod_only,
+            enabled: true,
+        };
+
+        // Get existing flairs or create empty vec
+        let mut flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(&env));
+
+        flairs.push_back(flair);
+        env.storage().persistent().set(&BoardKey::FlairDefs, &flairs);
+        env.storage().instance().set(&BoardKey::NextFlairId, &(flair_id + 1));
+
+        flair_id
+    }
+
+    /// Update an existing flair (Admin+ only)
+    pub fn update_flair(env: Env, flair_id: u32, flair: FlairDef, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can update flairs");
+            }
+        }
+
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .expect("No flairs defined");
+
+        // Find and update the flair
+        let mut updated = false;
+        let mut new_flairs = Vec::new(&env);
+        for i in 0..flairs.len() {
+            let existing = flairs.get(i).unwrap();
+            if existing.id == flair_id {
+                new_flairs.push_back(flair.clone());
+                updated = true;
+            } else {
+                new_flairs.push_back(existing);
+            }
+        }
+
+        if !updated {
+            panic!("Flair not found");
+        }
+
+        env.storage().persistent().set(&BoardKey::FlairDefs, &new_flairs);
+    }
+
+    /// Disable a flair (Admin+ only)
+    pub fn disable_flair(env: Env, flair_id: u32, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can disable flairs");
+            }
+        }
+
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .expect("No flairs defined");
+
+        // Find and disable the flair
+        let mut found = false;
+        let mut new_flairs = Vec::new(&env);
+        for i in 0..flairs.len() {
+            let mut existing = flairs.get(i).unwrap();
+            if existing.id == flair_id {
+                existing.enabled = false;
+                found = true;
+            }
+            new_flairs.push_back(existing);
+        }
+
+        if !found {
+            panic!("Flair not found");
+        }
+
+        env.storage().persistent().set(&BoardKey::FlairDefs, &new_flairs);
+    }
+
+    /// List all flairs
+    pub fn list_flairs(env: Env) -> Vec<FlairDef> {
+        env.storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get a specific flair by ID
+    pub fn get_flair(env: Env, flair_id: u32) -> Option<FlairDef> {
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(&env));
+
+        for i in 0..flairs.len() {
+            let flair = flairs.get(i).unwrap();
+            if flair.id == flair_id {
+                return Some(flair);
+            }
+        }
+        None
+    }
+
+    /// Set thread flair (Moderator+ for mod_only flairs, thread creator for others)
+    pub fn set_thread_flair(env: Env, thread_id: u64, flair_id: Option<u32>, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Get thread
+        let mut thread: ThreadMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Thread(thread_id))
+            .expect("Thread not found");
+
+        // Check if flair exists and get its properties
+        if let Some(fid) = flair_id {
+            let flairs: Vec<FlairDef> = env
+                .storage()
+                .persistent()
+                .get(&BoardKey::FlairDefs)
+                .expect("No flairs defined");
+
+            let mut flair_found = false;
+            let mut is_mod_only = false;
+            for i in 0..flairs.len() {
+                let flair = flairs.get(i).unwrap();
+                if flair.id == fid {
+                    if !flair.enabled {
+                        panic!("Flair is disabled");
+                    }
+                    flair_found = true;
+                    is_mod_only = flair.mod_only;
+                    break;
+                }
+            }
+            if !flair_found {
+                panic!("Flair not found");
+            }
+
+            // For mod_only flairs, require moderator permissions
+            if is_mod_only {
+                if env.storage().instance().has(&BoardKey::Permissions) {
+                    let permissions: Address = env
+                        .storage()
+                        .instance()
+                        .get(&BoardKey::Permissions)
+                        .unwrap();
+                    let args: Vec<Val> = Vec::from_array(
+                        &env,
+                        [board_id.into_val(&env), caller.into_val(&env)],
+                    );
+                    let fn_name = Symbol::new(&env, "can_moderate");
+                    let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
+                    if !can_moderate {
+                        panic!("Only moderators can assign this flair");
+                    }
+                }
+            } else {
+                // For regular flairs, allow thread creator or moderators
+                if thread.creator != caller {
+                    if env.storage().instance().has(&BoardKey::Permissions) {
+                        let permissions: Address = env
+                            .storage()
+                            .instance()
+                            .get(&BoardKey::Permissions)
+                            .unwrap();
+                        let args: Vec<Val> = Vec::from_array(
+                            &env,
+                            [board_id.into_val(&env), caller.into_val(&env)],
+                        );
+                        let fn_name = Symbol::new(&env, "can_moderate");
+                        let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
+                        if !can_moderate {
+                            panic!("Only thread creator or moderators can set flair");
+                        }
+                    }
+                }
+            }
+        }
+
+        thread.flair_id = flair_id;
+        thread.updated_at = env.ledger().timestamp();
+        env.storage()
+            .persistent()
+            .set(&BoardKey::Thread(thread_id), &thread);
     }
 
     // Permission check helpers
@@ -536,6 +845,7 @@ impl BoardsBoard {
             is_pinned: false,
             is_hidden: false,
             is_deleted: false,
+            flair_id: None,
         };
 
         env.storage()
@@ -1089,6 +1399,7 @@ impl BoardsBoard {
         board_id: u64,
         thread: &ThreadMeta,
         voting_contract: &Option<Address>,
+        flairs: &Vec<FlairDef>,
     ) -> MarkdownBuilder<'a> {
         // Get vote tally if voting contract is available
         let score = if let Some(voting) = voting_contract {
@@ -1120,7 +1431,26 @@ impl BoardsBoard {
             .number(board_id as u32)
             .raw_str("/t/")
             .number(thread.id as u32)
-            .raw_str("\" class=\"thread-card\"><span class=\"thread-card-title\">")
+            .raw_str("\" class=\"thread-card\">");
+
+        // Display flair if thread has one
+        if let Some(flair_id) = thread.flair_id {
+            for i in 0..flairs.len() {
+                let flair = flairs.get(i).unwrap();
+                if flair.id == flair_id && flair.enabled {
+                    md = md.raw_str("<span class=\"flair\" style=\"color:")
+                        .text_string(&flair.color)
+                        .raw_str(";background:")
+                        .text_string(&flair.bg_color)
+                        .raw_str("\">")
+                        .text_string(&flair.name)
+                        .raw_str("</span> ");
+                    break;
+                }
+            }
+        }
+
+        md = md.raw_str("<span class=\"thread-card-title\">")
             .text_string(&thread.title)
             .raw_str("</span><span class=\"thread-card-meta\">");
         if thread.is_hidden {
@@ -1162,6 +1492,13 @@ impl BoardsBoard {
 
         // Get voting contract for displaying vote scores
         let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
+
+        // Get flairs for displaying on thread cards
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(env));
 
         // Check permissions for private boards
         if config.is_private {
@@ -1265,7 +1602,7 @@ impl BoardsBoard {
                     if thread.is_hidden && !viewer_can_moderate {
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract);
+                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract, &flairs);
                     shown += 1;
                 }
             }
@@ -1293,7 +1630,7 @@ impl BoardsBoard {
                         }
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract);
+                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract, &flairs);
                     shown += 1;
                 }
                 if idx > 0 {
@@ -1400,6 +1737,40 @@ impl BoardsBoard {
             return Self::render_footer_into(md).build();
         }
 
+        // Get flairs for the selector
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(env));
+
+        // Check if viewer is a moderator (for mod_only flairs)
+        let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [board_id.into_val(env), viewer.as_ref().unwrap().into_val(env)],
+            );
+            let fn_name = Symbol::new(env, "can_moderate");
+            env.invoke_contract(&permissions, &fn_name, args)
+        } else {
+            false
+        };
+
+        // Check if any flair is required
+        let mut flair_required = false;
+        for i in 0..flairs.len() {
+            let flair = flairs.get(i).unwrap();
+            if flair.required && flair.enabled && (!flair.mod_only || is_moderator) {
+                flair_required = true;
+                break;
+            }
+        }
+
         md = md
             .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
             .number(board_id as u32)
@@ -1408,8 +1779,48 @@ impl BoardsBoard {
             .number(board_id as u32)
             .raw_str("\" />\n")
             .input("title", "Thread title")
-            .newline()
-            .textarea("body", 10, "Write your post content here...")
+            .newline();
+
+        // Add flair selector if flairs exist
+        let mut has_visible_flairs = false;
+        for i in 0..flairs.len() {
+            let flair = flairs.get(i).unwrap();
+            if flair.enabled && (!flair.mod_only || is_moderator) {
+                has_visible_flairs = true;
+                break;
+            }
+        }
+
+        if has_visible_flairs {
+            md = md.raw_str("<div class=\"flair-selector\">\n")
+                .raw_str("<label>Flair");
+            if flair_required {
+                md = md.raw_str(" <span class=\"required\">*</span>");
+            }
+            md = md.raw_str(":</label>\n")
+                .raw_str("<select name=\"flair_id\">\n")
+                .raw_str("<option value=\"\">-- Select flair --</option>\n");
+
+            for i in 0..flairs.len() {
+                let flair = flairs.get(i).unwrap();
+                if flair.enabled && (!flair.mod_only || is_moderator) {
+                    md = md.raw_str("<option value=\"")
+                        .number(flair.id)
+                        .raw_str("\" style=\"color:")
+                        .text_string(&flair.color)
+                        .raw_str(";background:")
+                        .text_string(&flair.bg_color)
+                        .raw_str("\">")
+                        .text_string(&flair.name)
+                        .raw_str("</option>\n");
+                }
+            }
+
+            md = md.raw_str("</select>\n")
+                .raw_str("</div>\n");
+        }
+
+        md = md.textarea("body", 10, "Write your post content here...")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -1481,10 +1892,35 @@ impl BoardsBoard {
             .raw_str(")")
             .newline();
 
+        // Get flairs for display
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::FlairDefs)
+            .unwrap_or(Vec::new(env));
+
         // Show thread title if available
         if let Some(ref t) = thread {
-            md = md.raw_str("<h1>")
-                .text_string(&t.title)
+            md = md.raw_str("<h1>");
+
+            // Display flair before title if thread has one
+            if let Some(flair_id) = t.flair_id {
+                for i in 0..flairs.len() {
+                    let flair = flairs.get(i).unwrap();
+                    if flair.id == flair_id && flair.enabled {
+                        md = md.raw_str("<span class=\"flair\" style=\"color:")
+                            .text_string(&flair.color)
+                            .raw_str(";background:")
+                            .text_string(&flair.bg_color)
+                            .raw_str("\">")
+                            .text_string(&flair.name)
+                            .raw_str("</span> ");
+                        break;
+                    }
+                }
+            }
+
+            md = md.text_string(&t.title)
                 .raw_str("</h1>\n");
 
             // Show author (with return path so "Go Back" returns here)

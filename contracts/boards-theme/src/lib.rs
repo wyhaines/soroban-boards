@@ -373,6 +373,13 @@ impl BoardsTheme {
             .rule(".badge-hidden", "background: #ccc; color: #333;")
             .rule(".badge-readonly", "background: #d4edda; color: #155724;")
             .rule(".mod-actions", "margin: var(--space-sm) 0; padding: var(--space-sm); background: var(--bg-muted); border-radius: var(--radius-md); font-size: 0.875rem;")
+            // Flair styles
+            .rule(".flair", "display: inline-block; padding: 0.125rem 0.5rem; border-radius: 4px; font-size: 0.75rem; font-weight: 600; margin-right: var(--space-xs); vertical-align: middle;")
+            .rule(".flair-selector", "margin-bottom: var(--space-md);")
+            .rule(".flair-selector label", "display: block; margin-bottom: var(--space-xs); font-size: 0.875rem; color: var(--text-muted);")
+            .rule(".flair-selector select", "padding: var(--space-xs) var(--space-sm); border: 1px solid var(--border); border-radius: 4px; font-size: 0.875rem; background: var(--bg); cursor: pointer; min-width: 150px;")
+            .rule(".flair-selector select:focus", "outline: none; border-color: var(--primary);")
+            .rule(".flair-selector .required", "color: var(--danger);")
             // Vote buttons and scoring
             .rule(".vote-buttons", "display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md);")
             .rule(".vote-up, .vote-down", "display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 4px; background: var(--bg-muted); color: var(--text-muted); text-decoration: none; font-size: 1rem; transition: all 0.15s;")

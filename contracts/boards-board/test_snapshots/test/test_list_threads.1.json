@@ -87,6 +87,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -218,6 +224,12 @@
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
@@ -355,6 +367,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -489,6 +507,12 @@
                     },
                     {
                       "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
+                    },
+                    {
+                      "key": {
                         "symbol": "id"
                       },
                       "val": {
@@ -620,6 +644,12 @@
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "flair_id"
+                      },
+                      "val": "void"
                     },
                     {
                       "key": {
