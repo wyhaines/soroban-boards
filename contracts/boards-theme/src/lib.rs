@@ -422,6 +422,18 @@ impl BoardsTheme {
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
             .rule(".footer", "margin-top: var(--space-xl); padding-top: var(--space-md); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.875rem;")
+            // Community styles
+            .rule(".community-list", "display: flex; flex-direction: column; gap: var(--space-sm);")
+            .rule(".community-card", "background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md); transition: border-color 0.15s, box-shadow 0.15s;")
+            .rule(".community-card:hover", "border-color: var(--primary); box-shadow: 0 2px 8px rgba(120, 87, 225, 0.1);")
+            .rule(".community-card h3", "margin: 0 0 var(--space-xs) 0; font-size: 1.125rem;")
+            .rule(".community-card p", "margin: 0 0 var(--space-sm) 0; color: var(--text-muted); font-size: 0.9375rem;")
+            .rule(".community-stats", "display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.8125rem; color: var(--text-muted);")
+            .rule(".community-stats span", "display: inline-flex; align-items: center; gap: var(--space-xs);")
+            .rule(".community-header", "margin-bottom: var(--space-lg);")
+            .rule(".community-header h1", "margin-bottom: var(--space-xs);")
+            .rule(".community-header p", "color: var(--text-muted); margin: 0;")
+            .rule(".community-actions", "display: flex; gap: var(--space-sm); margin-top: var(--space-md);")
             // Dark mode
             .dark_mode_start()
             .rule_start(":root")
@@ -447,6 +459,8 @@ impl BoardsTheme {
             .rule(".vote-down:hover", "background: #3a1c1c; color: #ff8080;")
             .rule(".vote-up.vote-active", "background: #2e7d32; color: white;")
             .rule(".vote-down.vote-active", "background: #c62828; color: white;")
+            // Community cards dark mode
+            .rule(".community-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
             .media_end()
             // Mobile responsive styles
             .media_start("(max-width: 640px)")

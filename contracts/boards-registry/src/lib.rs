@@ -40,6 +40,8 @@ pub enum RegistryKey {
     CommunityContract,
     /// Board to community mapping (board_id -> community_id)
     BoardCommunity(u64),
+    /// Voting contract address
+    VotingContract,
 }
 
 /// Addresses of shared service contracts
@@ -1020,6 +1022,33 @@ impl BoardsRegistry {
         env.storage()
             .instance()
             .get(&RegistryKey::CommunityContract)
+    }
+
+    /// Set the voting contract address (admin only)
+    pub fn set_voting_contract(env: Env, voting: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&RegistryKey::VotingContract, &voting);
+
+        // Also register with alias "voting" for form:@voting:method
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "voting")),
+            &voting,
+        );
+    }
+
+    /// Get the voting contract address
+    pub fn get_voting_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&RegistryKey::VotingContract)
     }
 
     /// Create a board within a community

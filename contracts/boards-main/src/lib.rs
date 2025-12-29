@@ -40,6 +40,8 @@ pub enum MainKey {
     Content,
     /// Admin contract address
     Admin,
+    /// Community contract address
+    Community,
 }
 
 /// Board metadata (same structure as registry for compatibility)
@@ -86,7 +88,7 @@ pub struct BoardsMain;
 #[contractimpl]
 impl BoardsMain {
     /// Initialize the main contract with service contract addresses
-    pub fn init(env: Env, registry: Address, theme: Address, permissions: Address, content: Address, admin: Address) {
+    pub fn init(env: Env, registry: Address, theme: Address, permissions: Address, content: Address, admin: Address, community: Address) {
         if env.storage().instance().has(&MainKey::Registry) {
             panic!("Already initialized");
         }
@@ -96,6 +98,15 @@ impl BoardsMain {
         env.storage().instance().set(&MainKey::Permissions, &permissions);
         env.storage().instance().set(&MainKey::Content, &content);
         env.storage().instance().set(&MainKey::Admin, &admin);
+        env.storage().instance().set(&MainKey::Community, &community);
+    }
+
+    /// Get community contract address
+    pub fn get_community(env: Env) -> Address {
+        env.storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Not initialized")
     }
 
     /// Get registry address
@@ -122,6 +133,7 @@ impl BoardsMain {
     ///
     /// Routing:
     /// - `/`, `/create`, `/help` → Rendered here (home, create board, help)
+    /// - `/communities`, `/c/{name}/*` → Community contract
     /// - `/admin/*`, `/b/{id}/settings`, etc. → Admin contract
     /// - `/b/{id}/*` → Board contract (looked up via Registry)
     pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
@@ -134,6 +146,17 @@ impl BoardsMain {
             .or_handle(b"/help", |_| Self::render_help(&env, &viewer))
             // Crosspost form
             .or_handle(b"/crosspost*", |_| Self::render_crosspost(&env, &path, &viewer))
+            // Community routes - delegate to community contract
+            .or_handle(b"/communities", |_| Self::delegate_to_community(&env, &String::from_str(&env, "/"), &viewer))
+            .or_handle(b"/new", |_| Self::delegate_to_community(&env, &String::from_str(&env, "/new"), &viewer))
+            .or_handle(b"/c/{name}/*", |req| {
+                let name = req.get_var(b"name").unwrap_or(Bytes::new(&env));
+                Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
+            })
+            .or_handle(b"/c/{name}", |req| {
+                let name = req.get_var(b"name").unwrap_or(Bytes::new(&env));
+                Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
+            })
             // Admin routes - delegate to admin contract
             .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
@@ -190,6 +213,7 @@ impl BoardsMain {
         let mut md = MarkdownBuilder::new(env)
             .div_start("nav-bar")
             .render_link("Soroban Boards", "/")
+            .render_link("Communities", "/communities")
             .render_link("Help", "/help");
 
         // Add profile link if profile contract is registered
@@ -572,6 +596,43 @@ impl BoardsMain {
     // Delegation to Other Contracts
     // ========================================================================
 
+    /// Delegate rendering to the community contract
+    fn delegate_to_community(env: &Env, path: &String, viewer: &Option<Address>) -> Bytes {
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        let args: Vec<Val> = Vec::from_array(env, [
+            path.into_val(env),
+            viewer.into_val(env),
+        ]);
+        env.invoke_contract(&community, &Symbol::new(env, "render"), args)
+    }
+
+    /// Delegate rendering to the community contract with the full path
+    /// for community-specific routes like /c/{name}/*
+    fn delegate_to_community_by_name(env: &Env, _name: &Bytes, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let community: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community)
+            .expect("Community contract not initialized");
+
+        // Pass the original path to community contract which will parse it
+        let community_path = match path {
+            Some(p) => p.clone(),
+            None => String::from_str(env, "/"),
+        };
+
+        let args: Vec<Val> = Vec::from_array(env, [
+            community_path.into_val(env),
+            viewer.into_val(env),
+        ]);
+        env.invoke_contract(&community, &Symbol::new(env, "render"), args)
+    }
+
     /// Delegate rendering to the admin contract
     fn delegate_to_admin(env: &Env, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
         let admin: Address = env
@@ -821,10 +882,12 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let admin = Address::generate(&env);
+        let community = Address::generate(&env);
 
-        client.init(&registry, &theme, &permissions, &content, &admin);
+        client.init(&registry, &theme, &permissions, &content, &admin, &community);
 
         assert_eq!(client.get_registry(), registry);
         assert_eq!(client.get_theme(), theme);
+        assert_eq!(client.get_community(), community);
     }
 }

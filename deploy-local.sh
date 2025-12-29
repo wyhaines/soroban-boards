@@ -78,6 +78,8 @@ CONTENT_ID=$(deploy_contract "boards_content")
 THEME_ID=$(deploy_contract "boards_theme")
 ADMIN_CONTRACT_ID=$(deploy_contract "boards_admin")
 REGISTRY_ID=$(deploy_contract "boards_registry")
+COMMUNITY_ID=$(deploy_contract "boards_community")
+VOTING_ID=$(deploy_contract "boards_voting")
 MAIN_ID=$(deploy_contract "boards_main")
 
 # Save contract IDs to file (board contracts are auto-deployed)
@@ -100,6 +102,8 @@ PERMISSIONS_ID=$PERMISSIONS_ID
 CONTENT_ID=$CONTENT_ID
 THEME_ID=$THEME_ID
 ADMIN_CONTRACT_ID=$ADMIN_CONTRACT_ID
+COMMUNITY_ID=$COMMUNITY_ID
+VOTING_ID=$VOTING_ID
 
 # Note: Board contracts are auto-deployed when boards are created.
 # Use: stellar contract invoke --id \$REGISTRY_ID ... -- get_board_contract --board_id <id>
@@ -198,7 +202,33 @@ stellar contract invoke \
 
 echo -e "${GREEN}Admin initialized${NC}"
 
-# Initialize Main (needs registry, theme, permissions, content, and admin)
+# Initialize Community (needs registry, permissions, and theme addresses)
+echo ""
+echo -e "${GREEN}=== Initializing Community ===${NC}"
+stellar contract invoke \
+    --id $COMMUNITY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID \
+    --permissions $PERMISSIONS_ID \
+    --theme $THEME_ID
+
+echo -e "${GREEN}Community initialized${NC}"
+
+# Initialize Voting (needs registry address)
+echo ""
+echo -e "${GREEN}=== Initializing Voting ===${NC}"
+stellar contract invoke \
+    --id $VOTING_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID
+
+echo -e "${GREEN}Voting initialized${NC}"
+
+# Initialize Main (needs registry, theme, permissions, content, admin, and community)
 echo ""
 echo -e "${GREEN}=== Initializing Main ===${NC}"
 stellar contract invoke \
@@ -210,7 +240,8 @@ stellar contract invoke \
     --theme $THEME_ID \
     --permissions $PERMISSIONS_ID \
     --content $CONTENT_ID \
-    --admin $ADMIN_CONTRACT_ID
+    --admin $ADMIN_CONTRACT_ID \
+    --community $COMMUNITY_ID
 
 echo -e "${GREEN}Main initialized${NC}"
 
@@ -226,6 +257,30 @@ stellar contract invoke \
     --address $MAIN_ID
 
 echo -e "${GREEN}Main registered as @main${NC}"
+
+# Register community contract with registry
+echo ""
+echo -e "${GREEN}=== Registering Community with Registry ===${NC}"
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_community_contract \
+    --community $COMMUNITY_ID
+
+echo -e "${GREEN}Community registered${NC}"
+
+# Register voting contract with registry
+echo ""
+echo -e "${GREEN}=== Registering Voting with Registry ===${NC}"
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_voting_contract \
+    --voting $VOTING_ID
+
+echo -e "${GREEN}Voting registered${NC}"
 
 # Create first board via registry (board contract is auto-deployed)
 echo ""
@@ -295,6 +350,8 @@ echo "  Permissions:  $PERMISSIONS_ID"
 echo "  Content:      $CONTENT_ID"
 echo "  Theme:        $THEME_ID"
 echo "  Admin:        $ADMIN_CONTRACT_ID"
+echo "  Community:    $COMMUNITY_ID"
+echo "  Voting:       $VOTING_ID"
 echo "  Board 0:      $BOARD_CONTRACT (auto-deployed)"
 echo ""
 echo "To interact with the contracts:"
@@ -304,6 +361,9 @@ echo "Example commands:"
 echo ""
 echo "  # Render home page"
 echo "  ./render.sh /"
+echo ""
+echo "  # Render communities page"
+echo "  ./render.sh /communities"
 echo ""
 echo "  # Render board"
 echo "  ./render.sh /b/0"
