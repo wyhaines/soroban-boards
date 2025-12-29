@@ -373,6 +373,29 @@ impl BoardsTheme {
             .rule(".badge-hidden", "background: #ccc; color: #333;")
             .rule(".badge-readonly", "background: #d4edda; color: #155724;")
             .rule(".mod-actions", "margin: var(--space-sm) 0; padding: var(--space-sm); background: var(--bg-muted); border-radius: var(--radius-md); font-size: 0.875rem;")
+            // Vote buttons and scoring
+            .rule(".vote-buttons", "display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md);")
+            .rule(".vote-up, .vote-down", "display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 4px; background: var(--bg-muted); color: var(--text-muted); text-decoration: none; font-size: 1rem; transition: all 0.15s;")
+            .rule(".vote-up:hover", "background: #e8f5e9; color: #4caf50;")
+            .rule(".vote-down:hover", "background: #ffebee; color: #f44336;")
+            .rule(".vote-up.vote-active", "background: #4caf50; color: white;")
+            .rule(".vote-down.vote-active", "background: #f44336; color: white;")
+            .rule(".vote-disabled", "cursor: not-allowed; opacity: 0.5;")
+            .rule(".vote-score", "font-weight: 600; font-size: 1.125rem; min-width: 2rem; text-align: center;")
+            .rule(".vote-score-compact", "display: flex; align-items: center; justify-content: center; min-width: 2.5rem; padding: var(--space-xs); background: var(--primary); color: white; border-radius: 4px 0 0 4px; font-weight: 600; font-size: 0.875rem;")
+            .rule(".vote-score-inline", "font-weight: 600; font-size: 0.75rem; min-width: 1.5rem; text-align: center;")
+            // Thread card with vote score wrapper
+            .rule(".thread-card-wrapper", "display: flex; gap: 0;")
+            .rule(".thread-card-wrapper .thread-card", "flex: 1; border-radius: 0 6px 6px 0;")
+            // Reply votes (inline)
+            .rule(".reply-votes", "display: flex; align-items: center; gap: var(--space-xs); margin-top: var(--space-xs); font-size: 0.75rem;")
+            .rule(".reply-votes .vote-up, .reply-votes .vote-down", "width: 1.25rem; height: 1.25rem; font-size: 0.625rem;")
+            // Sort order selector
+            .rule(".sort-selector", "display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md); padding: var(--space-xs) 0;")
+            .rule(".sort-label", "color: var(--text-muted); font-size: 0.875rem;")
+            .rule(".sort-option", "padding: var(--space-xs) var(--space-sm); background: var(--bg-muted); border-radius: 4px; color: var(--text-muted); text-decoration: none; font-size: 0.875rem; transition: all 0.15s;")
+            .rule(".sort-option:hover", "background: var(--primary); color: white;")
+            .rule(".sort-active", "background: var(--primary); color: white;")
             // Section spacing
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
@@ -397,6 +420,11 @@ impl BoardsTheme {
             .rule(".badge-private", "background: #3a2d4a; color: #c9a5ff;")
             .rule(".badge-hidden", "background: #2a2a2a; color: #888;")
             .rule(".badge-readonly", "background: #1e3a28; color: #6fdd8b;")
+            // Vote buttons dark mode
+            .rule(".vote-up:hover", "background: #1e3a28; color: #6fdd8b;")
+            .rule(".vote-down:hover", "background: #3a1c1c; color: #ff8080;")
+            .rule(".vote-up.vote-active", "background: #2e7d32; color: white;")
+            .rule(".vote-down.vote-active", "background: #c62828; color: white;")
             .media_end()
             // Mobile responsive styles
             .media_start("(max-width: 640px)")

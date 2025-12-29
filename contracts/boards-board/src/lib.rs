@@ -20,6 +20,8 @@ pub enum BoardKey {
     Content,
     /// Theme contract address
     Theme,
+    /// Voting contract address
+    Voting,
     /// Thread count
     ThreadCount,
     /// Thread metadata by ID
@@ -89,6 +91,26 @@ pub enum Role {
     Moderator = 2,
     Admin = 3,
     Owner = 4,
+}
+
+/// Vote direction from voting contract
+#[contracttype]
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u32)]
+pub enum VoteDirection {
+    None = 0,
+    Up = 1,
+    Down = 2,
+}
+
+/// Vote tally from voting contract
+#[contracttype]
+#[derive(Clone)]
+pub struct VoteTally {
+    pub upvotes: u32,
+    pub downvotes: u32,
+    pub score: i32,
+    pub first_vote_at: u64,
 }
 
 #[contract]
@@ -182,6 +204,17 @@ impl BoardsBoard {
             .expect("Not initialized");
         registry.require_auth();
         env.storage().instance().set(&BoardKey::Permissions, &permissions);
+    }
+
+    /// Set voting contract address (for boards created before this was added)
+    pub fn set_voting(env: Env, voting: Address) {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Not initialized");
+        registry.require_auth();
+        env.storage().instance().set(&BoardKey::Voting, &voting);
     }
 
     // Permission check helpers
@@ -1055,8 +1088,35 @@ impl BoardsBoard {
         md: MarkdownBuilder<'a>,
         board_id: u64,
         thread: &ThreadMeta,
+        voting_contract: &Option<Address>,
     ) -> MarkdownBuilder<'a> {
-        let mut md = md.raw_str("<a href=\"render:/b/")
+        // Get vote tally if voting contract is available
+        let score = if let Some(voting) = voting_contract {
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                thread.id.into_val(env),
+            ]);
+            let tally: VoteTally = env.invoke_contract(
+                voting,
+                &Symbol::new(env, "get_thread_tally"),
+                args,
+            );
+            Some(tally.score)
+        } else {
+            None
+        };
+
+        // Thread card with optional vote score
+        let mut md = md.raw_str("<div class=\"thread-card-wrapper\">");
+
+        // Vote score display (if voting enabled)
+        if let Some(s) = score {
+            md = md.raw_str("<span class=\"vote-score-compact\">")
+                .number(s as u32)  // Display score (handle negatives in CSS)
+                .raw_str("</span>");
+        }
+
+        md = md.raw_str("<a href=\"render:/b/")
             .number(board_id as u32)
             .raw_str("/t/")
             .number(thread.id as u32)
@@ -1075,7 +1135,7 @@ impl BoardsBoard {
         md.number(thread.reply_count)
             .text(" replies · ")
             .raw(Self::format_timestamp(env, thread.created_at))
-            .raw_str("</span></a>\n")
+            .raw_str("</span></a></div>\n")
     }
 
     /// Render board view with thread list
@@ -1099,6 +1159,9 @@ impl BoardsBoard {
             Role::Guest
         };
         let viewer_can_moderate = (viewer_role as u32) >= (Role::Moderator as u32);
+
+        // Get voting contract for displaying vote scores
+        let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
 
         // Check permissions for private boards
         if config.is_private {
@@ -1146,8 +1209,29 @@ impl BoardsBoard {
                 .newline();
         }
 
-        md = md.raw_str("<h2>Threads</h2>\n")
-            .div_start("thread-list");
+        md = md.raw_str("<h2>Threads</h2>\n");
+
+        // Sort order selector (if voting contract is configured)
+        if voting_contract.is_some() {
+            md = md.div_start("sort-selector")
+                .raw_str("<span class=\"sort-label\">Sort:</span>")
+                // Hot is the default when voting is available
+                .raw_str("<a href=\"render:/b/")
+                .number(board_id as u32)
+                .raw_str("\" class=\"sort-option sort-active\">Hot</a>")
+                .raw_str("<a href=\"render:/b/")
+                .number(board_id as u32)
+                .raw_str("?sort=new\" class=\"sort-option\">New</a>")
+                .raw_str("<a href=\"render:/b/")
+                .number(board_id as u32)
+                .raw_str("?sort=top\" class=\"sort-option\">Top</a>")
+                .raw_str("<a href=\"render:/b/")
+                .number(board_id as u32)
+                .raw_str("?sort=controversial\" class=\"sort-option\">Controversial</a>")
+                .div_end();
+        }
+
+        md = md.div_start("thread-list");
 
         // Fetch threads
         let thread_count: u64 = env
@@ -1181,7 +1265,7 @@ impl BoardsBoard {
                     if thread.is_hidden && !viewer_can_moderate {
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread);
+                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract);
                     shown += 1;
                 }
             }
@@ -1209,7 +1293,7 @@ impl BoardsBoard {
                         }
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread);
+                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract);
                     shown += 1;
                 }
                 if idx > 0 {
@@ -1452,6 +1536,89 @@ impl BoardsBoard {
         md = md.div_end()
             .newline();
 
+        // Vote buttons (if voting contract is configured and user is logged in)
+        let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
+        if let Some(ref voting) = voting_contract {
+            // Get thread vote tally
+            let tally_args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+            ]);
+            let tally: VoteTally = env.invoke_contract(
+                voting,
+                &Symbol::new(env, "get_thread_tally"),
+                tally_args,
+            );
+
+            // Get viewer's current vote (if logged in)
+            let viewer_vote = if let Some(ref user) = viewer {
+                let vote_args: Vec<Val> = Vec::from_array(env, [
+                    board_id.into_val(env),
+                    thread_id.into_val(env),
+                    user.into_val(env),
+                ]);
+                env.invoke_contract::<VoteDirection>(
+                    voting,
+                    &Symbol::new(env, "get_user_thread_vote"),
+                    vote_args,
+                )
+            } else {
+                VoteDirection::None
+            };
+
+            md = md.div_start("vote-buttons");
+
+            // Upvote button
+            if viewer.is_some() {
+                let up_class = if viewer_vote == VoteDirection::Up { "vote-up vote-active" } else { "vote-up" };
+                md = md.raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
+                    .number(board_id as u32)
+                    .raw_str(",&quot;thread_id&quot;:")
+                    .number(thread_id as u32)
+                    .raw_str(",&quot;direction&quot;:");
+                // Toggle: if already up, set to none; otherwise set to up
+                if viewer_vote == VoteDirection::Up {
+                    md = md.raw_str("0");  // None
+                } else {
+                    md = md.raw_str("1");  // Up
+                }
+                md = md.raw_str("}\" class=\"")
+                    .raw_str(up_class)
+                    .raw_str("\">▲</a>");
+            } else {
+                md = md.raw_str("<span class=\"vote-up vote-disabled\">▲</span>");
+            }
+
+            // Score display
+            md = md.raw_str("<span class=\"vote-score\">")
+                .number(tally.score as u32)
+                .raw_str("</span>");
+
+            // Downvote button
+            if viewer.is_some() {
+                let down_class = if viewer_vote == VoteDirection::Down { "vote-down vote-active" } else { "vote-down" };
+                md = md.raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
+                    .number(board_id as u32)
+                    .raw_str(",&quot;thread_id&quot;:")
+                    .number(thread_id as u32)
+                    .raw_str(",&quot;direction&quot;:");
+                // Toggle: if already down, set to none; otherwise set to down
+                if viewer_vote == VoteDirection::Down {
+                    md = md.raw_str("0");  // None
+                } else {
+                    md = md.raw_str("2");  // Down
+                }
+                md = md.raw_str("}\" class=\"")
+                    .raw_str(down_class)
+                    .raw_str("\">▼</a>");
+            } else {
+                md = md.raw_str("<span class=\"vote-down vote-disabled\">▼</span>");
+            }
+
+            md = md.div_end()
+                .newline();
+        }
+
         // Thread actions (only show if viewer is logged in and posting is allowed)
         if viewer.is_some() && can_post {
             md = md.div_start("thread-actions")
@@ -1556,6 +1723,9 @@ impl BoardsBoard {
         // Get profile contract for author display
         let profile_contract = Self::get_profile_contract(env);
 
+        // Get voting contract for vote buttons
+        let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
+
         let config: BoardConfig = env
             .storage()
             .instance()
@@ -1596,7 +1766,7 @@ impl BoardsBoard {
 
         for i in 0..replies.len() {
             if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post, &profile_contract);
+                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post, &profile_contract, &voting_contract);
             }
         }
 
@@ -1625,6 +1795,9 @@ impl BoardsBoard {
 
         // Get profile contract for author display
         let profile_contract = Self::get_profile_contract(env);
+
+        // Get voting contract for vote buttons
+        let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
 
         let config: BoardConfig = env
             .storage()
@@ -1671,7 +1844,7 @@ impl BoardsBoard {
 
         for i in 0..children.len() {
             if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post, &profile_contract);
+                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post, &profile_contract, &voting_contract);
             }
         }
 
@@ -1703,6 +1876,7 @@ impl BoardsBoard {
         viewer: &Option<Address>,
         can_post: bool,
         profile_contract: &Option<Address>,
+        voting_contract: &Option<Address>,
     ) -> MarkdownBuilder<'a> {
         md = md.div_start("reply");
 
@@ -1740,6 +1914,91 @@ impl BoardsBoard {
             md = md.div_start("reply-content")
                 .raw(content_bytes)
                 .div_end();
+        }
+
+        // Vote buttons for reply (if voting contract is configured)
+        if let Some(ref voting) = voting_contract {
+            // Get reply vote tally
+            let tally_args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                reply.id.into_val(env),
+            ]);
+            let tally: VoteTally = env.invoke_contract(
+                voting,
+                &Symbol::new(env, "get_reply_tally"),
+                tally_args,
+            );
+
+            // Get viewer's current vote (if logged in)
+            let viewer_vote = if let Some(ref user) = viewer {
+                let vote_args: Vec<Val> = Vec::from_array(env, [
+                    board_id.into_val(env),
+                    thread_id.into_val(env),
+                    reply.id.into_val(env),
+                    user.into_val(env),
+                ]);
+                env.invoke_contract::<VoteDirection>(
+                    voting,
+                    &Symbol::new(env, "get_user_reply_vote"),
+                    vote_args,
+                )
+            } else {
+                VoteDirection::None
+            };
+
+            md = md.div_start("reply-votes");
+
+            // Upvote button
+            if viewer.is_some() {
+                let up_class = if viewer_vote == VoteDirection::Up { "vote-up vote-active" } else { "vote-up" };
+                md = md.raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
+                    .number(board_id as u32)
+                    .raw_str(",&quot;thread_id&quot;:")
+                    .number(thread_id as u32)
+                    .raw_str(",&quot;reply_id&quot;:")
+                    .number(reply.id as u32)
+                    .raw_str(",&quot;direction&quot;:");
+                if viewer_vote == VoteDirection::Up {
+                    md = md.raw_str("0");
+                } else {
+                    md = md.raw_str("1");
+                }
+                md = md.raw_str("}\" class=\"")
+                    .raw_str(up_class)
+                    .raw_str("\">▲</a>");
+            } else {
+                md = md.raw_str("<span class=\"vote-up vote-disabled\">▲</span>");
+            }
+
+            // Score
+            md = md.raw_str("<span class=\"vote-score-inline\">")
+                .number(tally.score as u32)
+                .raw_str("</span>");
+
+            // Downvote button
+            if viewer.is_some() {
+                let down_class = if viewer_vote == VoteDirection::Down { "vote-down vote-active" } else { "vote-down" };
+                md = md.raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
+                    .number(board_id as u32)
+                    .raw_str(",&quot;thread_id&quot;:")
+                    .number(thread_id as u32)
+                    .raw_str(",&quot;reply_id&quot;:")
+                    .number(reply.id as u32)
+                    .raw_str(",&quot;direction&quot;:");
+                if viewer_vote == VoteDirection::Down {
+                    md = md.raw_str("0");
+                } else {
+                    md = md.raw_str("2");
+                }
+                md = md.raw_str("}\" class=\"")
+                    .raw_str(down_class)
+                    .raw_str("\">▼</a>");
+            } else {
+                md = md.raw_str("<span class=\"vote-down vote-disabled\">▼</span>");
+            }
+
+            md = md.div_end();
         }
 
         // Reply actions
