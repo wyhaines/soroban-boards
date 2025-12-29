@@ -48,6 +48,18 @@ pub struct InviteRequest {
     pub created_at: u64,
 }
 
+/// Community ban information
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityBan {
+    pub user: Address,
+    pub community_id: u64,
+    pub issuer: Address,
+    pub reason: String,
+    pub created_at: u64,
+    pub expires_at: Option<u64>,
+}
+
 /// Storage keys for the permissions contract
 #[contracttype]
 #[derive(Clone)]
@@ -76,6 +88,25 @@ pub enum PermKey {
     InviteRequest(u64, Address),
     /// List of users with pending invite requests for a board
     InviteRequests(u64),
+    /// Board role override - can only RESTRICT, not expand community role
+    /// (board_id, user) -> Role
+    BoardRoleOverride(u64, Address),
+
+    // Community-level permission keys
+    /// Community owner address (community_id) -> Address
+    CommunityOwner(u64),
+    /// User role for a community (community_id, user) -> Role
+    CommunityRole(u64, Address),
+    /// Community ban record (community_id, user) -> CommunityBan
+    CommunityBan(u64, Address),
+    /// List of admins for a community
+    CommunityAdmins(u64),
+    /// List of moderators for a community
+    CommunityModerators(u64),
+    /// List of members for a community
+    CommunityMembers(u64),
+    /// List of banned users for a community
+    CommunityBannedUsers(u64),
 }
 
 /// Permission check result with all relevant permissions
@@ -779,6 +810,509 @@ impl BoardsPermissions {
     pub fn can_admin(env: Env, board_id: u64, user: Address) -> bool {
         let perms = Self::get_permissions(env, board_id, user);
         perms.can_admin
+    }
+
+    // ==================== Community Permission Functions ====================
+
+    /// Set community owner (called when community is created)
+    pub fn set_community_owner(env: Env, community_id: u64, owner: Address) {
+        // TODO: Verify caller is registry or community contract
+        env.storage()
+            .persistent()
+            .set(&PermKey::CommunityOwner(community_id), &owner);
+        env.storage()
+            .persistent()
+            .set(&PermKey::CommunityRole(community_id, owner.clone()), &Role::Owner);
+    }
+
+    /// Get community owner
+    pub fn get_community_owner(env: Env, community_id: u64) -> Option<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityOwner(community_id))
+    }
+
+    /// Set a user's role for a community
+    pub fn set_community_role(
+        env: Env,
+        community_id: u64,
+        user: Address,
+        role: Role,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Verify caller has authority to set this role
+        let caller_role = Self::get_community_role(env.clone(), community_id, caller.clone());
+
+        // Only owner can set admin, only admin+ can set moderator, etc.
+        match role {
+            Role::Owner => {
+                if caller_role != Role::Owner {
+                    panic!("Only owner can transfer community ownership");
+                }
+            }
+            Role::Admin => {
+                if caller_role != Role::Owner {
+                    panic!("Only owner can set community admin");
+                }
+            }
+            Role::Moderator => {
+                if caller_role != Role::Owner && caller_role != Role::Admin {
+                    panic!("Only owner or admin can set community moderator");
+                }
+            }
+            Role::Member => {
+                if caller_role != Role::Owner
+                    && caller_role != Role::Admin
+                    && caller_role != Role::Moderator
+                {
+                    panic!("Only moderator+ can set community member");
+                }
+            }
+            Role::Guest => {
+                // Anyone with moderator+ can demote to guest
+                if caller_role != Role::Owner
+                    && caller_role != Role::Admin
+                    && caller_role != Role::Moderator
+                {
+                    panic!("Only moderator+ can remove community member");
+                }
+            }
+        }
+
+        // Get old role to update membership lists
+        let old_role = Self::get_community_role(env.clone(), community_id, user.clone());
+
+        // Remove from old role list
+        Self::remove_from_community_role_list(&env, community_id, &user, old_role);
+
+        // Add to new role list
+        Self::add_to_community_role_list(&env, community_id, &user, role.clone());
+
+        env.storage()
+            .persistent()
+            .set(&PermKey::CommunityRole(community_id, user), &role);
+    }
+
+    /// Add user to appropriate community role list
+    fn add_to_community_role_list(env: &Env, community_id: u64, user: &Address, role: Role) {
+        let key = match role {
+            Role::Admin => PermKey::CommunityAdmins(community_id),
+            Role::Moderator => PermKey::CommunityModerators(community_id),
+            Role::Member => PermKey::CommunityMembers(community_id),
+            _ => return, // Owner and Guest don't have lists
+        };
+
+        let mut list: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .unwrap_or(Vec::new(env));
+
+        // Check if already in list
+        let mut found = false;
+        for i in 0..list.len() {
+            if list.get(i).unwrap() == *user {
+                found = true;
+                break;
+            }
+        }
+
+        if !found {
+            list.push_back(user.clone());
+            env.storage().persistent().set(&key, &list);
+        }
+    }
+
+    /// Remove user from community role list
+    fn remove_from_community_role_list(env: &Env, community_id: u64, user: &Address, role: Role) {
+        let key = match role {
+            Role::Admin => PermKey::CommunityAdmins(community_id),
+            Role::Moderator => PermKey::CommunityModerators(community_id),
+            Role::Member => PermKey::CommunityMembers(community_id),
+            _ => return, // Owner and Guest don't have lists
+        };
+
+        if let Some(list) = env.storage().persistent().get::<_, Vec<Address>>(&key) {
+            let mut new_list = Vec::new(env);
+            for i in 0..list.len() {
+                let addr = list.get(i).unwrap();
+                if addr != *user {
+                    new_list.push_back(addr);
+                }
+            }
+            env.storage().persistent().set(&key, &new_list);
+        }
+    }
+
+    /// Get a user's role for a community
+    pub fn get_community_role(env: Env, community_id: u64, user: Address) -> Role {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityRole(community_id, user))
+            .unwrap_or(Role::Guest)
+    }
+
+    /// Check if user has at least the specified role in a community
+    pub fn has_community_role(env: Env, community_id: u64, user: Address, min_role: Role) -> bool {
+        let role = Self::get_community_role(env, community_id, user);
+        role as u32 >= min_role as u32
+    }
+
+    /// Ban a user from a community (affects all boards in the community)
+    pub fn community_ban_user(
+        env: Env,
+        community_id: u64,
+        user: Address,
+        reason: String,
+        duration_hours: Option<u64>,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Check caller has authority
+        let caller_role = Self::get_community_role(env.clone(), community_id, caller.clone());
+        if caller_role != Role::Owner
+            && caller_role != Role::Admin
+            && caller_role != Role::Moderator
+        {
+            panic!("Only community moderator+ can ban users");
+        }
+
+        // Can't ban higher roles
+        let user_role = Self::get_community_role(env.clone(), community_id, user.clone());
+        if user_role as u32 >= caller_role as u32 {
+            panic!("Cannot ban user with equal or higher community role");
+        }
+
+        let expires_at = duration_hours.map(|h| env.ledger().timestamp() + h * 3600);
+
+        let ban = CommunityBan {
+            user: user.clone(),
+            community_id,
+            issuer: caller,
+            reason,
+            created_at: env.ledger().timestamp(),
+            expires_at,
+        };
+
+        env.storage()
+            .persistent()
+            .set(&PermKey::CommunityBan(community_id, user.clone()), &ban);
+
+        // Add to banned users list
+        let mut banned: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::CommunityBannedUsers(community_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Check if already in list
+        let mut found = false;
+        for i in 0..banned.len() {
+            if banned.get(i).unwrap() == user {
+                found = true;
+                break;
+            }
+        }
+        if !found {
+            banned.push_back(user);
+            env.storage()
+                .persistent()
+                .set(&PermKey::CommunityBannedUsers(community_id), &banned);
+        }
+    }
+
+    /// Unban a user from a community
+    pub fn community_unban_user(env: Env, community_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        // Check caller has authority
+        let caller_role = Self::get_community_role(env.clone(), community_id, caller);
+        if caller_role != Role::Owner
+            && caller_role != Role::Admin
+            && caller_role != Role::Moderator
+        {
+            panic!("Only community moderator+ can unban users");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&PermKey::CommunityBan(community_id, user.clone()));
+
+        // Remove from banned users list
+        if let Some(banned) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<Address>>(&PermKey::CommunityBannedUsers(community_id))
+        {
+            let mut new_banned = Vec::new(&env);
+            for i in 0..banned.len() {
+                let addr = banned.get(i).unwrap();
+                if addr != user {
+                    new_banned.push_back(addr);
+                }
+            }
+            env.storage()
+                .persistent()
+                .set(&PermKey::CommunityBannedUsers(community_id), &new_banned);
+        }
+    }
+
+    /// Check if a user is banned from a community
+    pub fn is_community_banned(env: Env, community_id: u64, user: Address) -> bool {
+        // Check global ban first
+        if let Some(ban) = env
+            .storage()
+            .persistent()
+            .get::<_, Ban>(&PermKey::GlobalBan(user.clone()))
+        {
+            if let Some(expires_at) = ban.expires_at {
+                if env.ledger().timestamp() < expires_at {
+                    return true;
+                }
+            } else {
+                return true; // Permanent ban
+            }
+        }
+
+        // Check community-specific ban
+        if let Some(ban) = env
+            .storage()
+            .persistent()
+            .get::<_, CommunityBan>(&PermKey::CommunityBan(community_id, user))
+        {
+            if let Some(expires_at) = ban.expires_at {
+                if env.ledger().timestamp() < expires_at {
+                    return true;
+                }
+            } else {
+                return true; // Permanent ban
+            }
+        }
+
+        false
+    }
+
+    /// Get community ban info for a user
+    pub fn get_community_ban(env: Env, community_id: u64, user: Address) -> Option<CommunityBan> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityBan(community_id, user))
+    }
+
+    /// Get list of admins for a community
+    pub fn list_community_admins(env: Env, community_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityAdmins(community_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get list of moderators for a community
+    pub fn list_community_moderators(env: Env, community_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityModerators(community_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get list of members for a community
+    pub fn list_community_members(env: Env, community_id: u64) -> Vec<Address> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::CommunityMembers(community_id))
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Get list of banned users for a community
+    pub fn list_community_banned(env: Env, community_id: u64) -> Vec<Address> {
+        let banned: Vec<Address> = env
+            .storage()
+            .persistent()
+            .get(&PermKey::CommunityBannedUsers(community_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Filter out expired bans
+        let mut active_banned = Vec::new(&env);
+        let now = env.ledger().timestamp();
+
+        for i in 0..banned.len() {
+            let user = banned.get(i).unwrap();
+            if let Some(ban) = env
+                .storage()
+                .persistent()
+                .get::<_, CommunityBan>(&PermKey::CommunityBan(community_id, user.clone()))
+            {
+                let is_active = match ban.expires_at {
+                    Some(expires) => now < expires,
+                    None => true, // Permanent ban
+                };
+                if is_active {
+                    active_banned.push_back(user);
+                }
+            }
+        }
+
+        active_banned
+    }
+
+    // ==================== Board Role Override Functions ====================
+
+    /// Set a board-specific role override for a user
+    /// This can only RESTRICT permissions, not expand beyond community role
+    /// Used when a community mod should have reduced permissions on a specific board
+    pub fn set_board_role_override(
+        env: Env,
+        board_id: u64,
+        user: Address,
+        role: Role,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Caller must be board admin+ or community admin+
+        let caller_board_role = Self::get_role(env.clone(), board_id, caller.clone());
+        if caller_board_role != Role::Owner && caller_board_role != Role::Admin {
+            panic!("Only board admin+ can set role overrides");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&PermKey::BoardRoleOverride(board_id, user), &role);
+    }
+
+    /// Get board role override for a user (returns None if no override)
+    pub fn get_board_role_override(env: Env, board_id: u64, user: Address) -> Option<Role> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::BoardRoleOverride(board_id, user))
+    }
+
+    /// Remove board role override for a user
+    pub fn remove_board_role_override(
+        env: Env,
+        board_id: u64,
+        user: Address,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let caller_board_role = Self::get_role(env.clone(), board_id, caller);
+        if caller_board_role != Role::Owner && caller_board_role != Role::Admin {
+            panic!("Only board admin+ can remove role overrides");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&PermKey::BoardRoleOverride(board_id, user));
+    }
+
+    // ==================== Effective Permissions (Community + Board) ====================
+
+    /// Get effective permissions for a user on a board within a community
+    ///
+    /// Role inheritance rules:
+    /// 1. Community ban overrides everything (banned from all boards in community)
+    /// 2. Community role provides baseline permissions
+    /// 3. Board can RESTRICT but not EXPAND community role
+    /// 4. effective_role = min(community_role, board_override) if override exists
+    pub fn get_effective_permissions(
+        env: Env,
+        board_id: u64,
+        community_id: Option<u64>,
+        user: Address,
+    ) -> PermissionSet {
+        // Check global ban first
+        if let Some(ban) = env
+            .storage()
+            .persistent()
+            .get::<_, Ban>(&PermKey::GlobalBan(user.clone()))
+        {
+            let is_banned = match ban.expires_at {
+                Some(expires) => env.ledger().timestamp() < expires,
+                None => true,
+            };
+            if is_banned {
+                return PermissionSet {
+                    role: Role::Guest,
+                    can_view: false,
+                    can_post: false,
+                    can_moderate: false,
+                    can_admin: false,
+                    is_banned: true,
+                };
+            }
+        }
+
+        // If no community, just return board permissions
+        let community_id = match community_id {
+            Some(id) => id,
+            None => return Self::get_permissions(env, board_id, user),
+        };
+
+        // Check community ban
+        if Self::is_community_banned(env.clone(), community_id, user.clone()) {
+            return PermissionSet {
+                role: Role::Guest,
+                can_view: false,
+                can_post: false,
+                can_moderate: false,
+                can_admin: false,
+                is_banned: true,
+            };
+        }
+
+        // Check board-specific ban
+        if Self::is_banned(env.clone(), board_id, user.clone()) {
+            return PermissionSet {
+                role: Role::Guest,
+                can_view: false,
+                can_post: false,
+                can_moderate: false,
+                can_admin: false,
+                is_banned: true,
+            };
+        }
+
+        // Get community role as baseline
+        let community_role = Self::get_community_role(env.clone(), community_id, user.clone());
+
+        // Get board-specific role
+        let board_role = Self::get_role(env.clone(), board_id, user.clone());
+
+        // Get board role override (restriction)
+        let board_override = Self::get_board_role_override(env.clone(), board_id, user);
+
+        // Calculate effective role:
+        // 1. Start with the higher of community_role and board_role (community roles cascade)
+        // 2. If there's a board override, take the minimum (restrictions apply)
+        let base_role = if community_role as u32 > board_role as u32 {
+            community_role
+        } else {
+            board_role
+        };
+
+        let effective_role = match board_override {
+            Some(override_role) => {
+                if (override_role as u32) < (base_role as u32) {
+                    override_role
+                } else {
+                    base_role
+                }
+            }
+            None => base_role,
+        };
+
+        PermissionSet {
+            role: effective_role.clone(),
+            can_view: true,
+            can_post: effective_role as u32 >= Role::Member as u32,
+            can_moderate: effective_role as u32 >= Role::Moderator as u32,
+            can_admin: effective_role as u32 >= Role::Admin as u32,
+            is_banned: false,
+        }
     }
 
     /// Upgrade the contract WASM
@@ -1604,5 +2138,454 @@ mod test {
         let request = client.get_invite_request(&0, &user).unwrap();
         assert_eq!(request.user, user);
         assert_eq!(request.board_id, 0);
+    }
+
+    // ==================== Community Permission Tests ====================
+
+    #[test]
+    fn test_set_community_owner() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+
+        // Set community owner
+        client.set_community_owner(&0, &owner);
+
+        // Owner should have Owner role
+        assert_eq!(client.get_community_owner(&0), Some(owner.clone()));
+        assert_eq!(client.get_community_role(&0, &owner), Role::Owner);
+    }
+
+    #[test]
+    fn test_community_role_hierarchy() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let member = Address::generate(&env);
+        let guest = Address::generate(&env);
+
+        // Set community owner
+        client.set_community_owner(&0, &owner);
+
+        // Owner sets admin
+        client.set_community_role(&0, &admin, &Role::Admin, &owner);
+        assert_eq!(client.get_community_role(&0, &admin), Role::Admin);
+
+        // Owner sets moderator
+        client.set_community_role(&0, &moderator, &Role::Moderator, &owner);
+        assert_eq!(client.get_community_role(&0, &moderator), Role::Moderator);
+
+        // Admin sets member
+        client.set_community_role(&0, &member, &Role::Member, &admin);
+        assert_eq!(client.get_community_role(&0, &member), Role::Member);
+
+        // Guest should have Guest role by default
+        assert_eq!(client.get_community_role(&0, &guest), Role::Guest);
+    }
+
+    #[test]
+    fn test_community_role_lists() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let admin1 = Address::generate(&env);
+        let admin2 = Address::generate(&env);
+        let mod1 = Address::generate(&env);
+        let member1 = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+
+        // Add users to roles
+        client.set_community_role(&0, &admin1, &Role::Admin, &owner);
+        client.set_community_role(&0, &admin2, &Role::Admin, &owner);
+        client.set_community_role(&0, &mod1, &Role::Moderator, &owner);
+        client.set_community_role(&0, &member1, &Role::Member, &owner);
+
+        // Check lists
+        assert_eq!(client.list_community_admins(&0).len(), 2);
+        assert_eq!(client.list_community_moderators(&0).len(), 1);
+        assert_eq!(client.list_community_members(&0).len(), 1);
+    }
+
+    #[test]
+    fn test_community_ban_user() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+
+        // Ban user from community
+        let reason = String::from_str(&env, "Spam");
+        client.community_ban_user(&0, &user, &reason, &Some(24), &owner);
+
+        // Check ban
+        assert!(client.is_community_banned(&0, &user));
+        let banned = client.list_community_banned(&0);
+        assert_eq!(banned.len(), 1);
+
+        // Get ban details
+        let ban = client.get_community_ban(&0, &user).unwrap();
+        assert_eq!(ban.user, user);
+        assert_eq!(ban.issuer, owner);
+        assert_eq!(ban.reason, reason);
+    }
+
+    #[test]
+    fn test_community_unban_user() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+
+        // Ban and then unban
+        let reason = String::from_str(&env, "Spam");
+        client.community_ban_user(&0, &user, &reason, &None, &owner);
+        assert!(client.is_community_banned(&0, &user));
+
+        client.community_unban_user(&0, &user, &owner);
+        assert!(!client.is_community_banned(&0, &user));
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot ban user with equal or higher community role")]
+    fn test_community_cannot_ban_higher_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let moderator = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+        client.set_community_role(&0, &admin, &Role::Admin, &owner);
+        client.set_community_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Moderator cannot ban admin - should panic
+        let reason = String::from_str(&env, "Test");
+        client.community_ban_user(&0, &admin, &reason, &None, &moderator);
+    }
+
+    #[test]
+    fn test_board_role_override() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_board_owner(&0, &owner);
+
+        // Set a role override
+        client.set_board_role_override(&0, &user, &Role::Member, &owner);
+
+        // Check override exists
+        assert_eq!(client.get_board_role_override(&0, &user), Some(Role::Member));
+
+        // Remove override
+        client.remove_board_role_override(&0, &user, &owner);
+        assert_eq!(client.get_board_role_override(&0, &user), None);
+    }
+
+    #[test]
+    fn test_effective_permissions_community_role_cascades() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let community_owner = Address::generate(&env);
+        let community_mod = Address::generate(&env);
+        let board_owner = Address::generate(&env);
+
+        // Set up community
+        client.set_community_owner(&0, &community_owner);
+        client.set_community_role(&0, &community_mod, &Role::Moderator, &community_owner);
+
+        // Set up board
+        client.set_board_owner(&0, &board_owner);
+
+        // Community mod should have Moderator permissions on the board
+        let perms = client.get_effective_permissions(&0, &Some(0), &community_mod);
+        assert_eq!(perms.role, Role::Moderator);
+        assert!(perms.can_view);
+        assert!(perms.can_post);
+        assert!(perms.can_moderate);
+        assert!(!perms.can_admin);
+    }
+
+    #[test]
+    fn test_effective_permissions_board_can_restrict() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let community_owner = Address::generate(&env);
+        let community_mod = Address::generate(&env);
+        let board_owner = Address::generate(&env);
+
+        // Set up community
+        client.set_community_owner(&0, &community_owner);
+        client.set_community_role(&0, &community_mod, &Role::Moderator, &community_owner);
+
+        // Set up board
+        client.set_board_owner(&0, &board_owner);
+
+        // Restrict the community mod on this specific board
+        client.set_board_role_override(&0, &community_mod, &Role::Member, &board_owner);
+
+        // Community mod should only have Member permissions due to override
+        let perms = client.get_effective_permissions(&0, &Some(0), &community_mod);
+        assert_eq!(perms.role, Role::Member);
+        assert!(perms.can_view);
+        assert!(perms.can_post);
+        assert!(!perms.can_moderate); // Restricted!
+        assert!(!perms.can_admin);
+    }
+
+    #[test]
+    fn test_effective_permissions_community_ban_blocks_all_boards() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let community_owner = Address::generate(&env);
+        let board_owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        // Set up community
+        client.set_community_owner(&0, &community_owner);
+
+        // Set up board and add user as member
+        client.set_board_owner(&0, &board_owner);
+        client.set_role(&0, &user, &Role::Member, &board_owner);
+
+        // User should have Member permissions
+        let perms = client.get_effective_permissions(&0, &Some(0), &user);
+        assert_eq!(perms.role, Role::Member);
+        assert!(!perms.is_banned);
+
+        // Ban user from community
+        let reason = String::from_str(&env, "Spam");
+        client.community_ban_user(&0, &user, &reason, &None, &community_owner);
+
+        // User should now be banned from board even though they have Member role
+        let perms = client.get_effective_permissions(&0, &Some(0), &user);
+        assert!(perms.is_banned);
+        assert!(!perms.can_view);
+        assert!(!perms.can_post);
+    }
+
+    #[test]
+    fn test_effective_permissions_no_community() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let board_owner = Address::generate(&env);
+        let member = Address::generate(&env);
+
+        // Set up standalone board (no community)
+        client.set_board_owner(&0, &board_owner);
+        client.set_role(&0, &member, &Role::Member, &board_owner);
+
+        // Should work the same as regular get_permissions
+        let perms = client.get_effective_permissions(&0, &None, &member);
+        assert_eq!(perms.role, Role::Member);
+        assert!(perms.can_view);
+        assert!(perms.can_post);
+        assert!(!perms.can_moderate);
+    }
+
+    #[test]
+    fn test_has_community_role() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let guest = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+        client.set_community_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Owner has all roles
+        assert!(client.has_community_role(&0, &owner, &Role::Owner));
+        assert!(client.has_community_role(&0, &owner, &Role::Moderator));
+        assert!(client.has_community_role(&0, &owner, &Role::Guest));
+
+        // Moderator has moderator and below
+        assert!(!client.has_community_role(&0, &moderator, &Role::Owner));
+        assert!(client.has_community_role(&0, &moderator, &Role::Moderator));
+        assert!(client.has_community_role(&0, &moderator, &Role::Member));
+        assert!(client.has_community_role(&0, &moderator, &Role::Guest));
+
+        // Guest only has guest
+        assert!(!client.has_community_role(&0, &guest, &Role::Member));
+        assert!(client.has_community_role(&0, &guest, &Role::Guest));
+    }
+
+    #[test]
+    #[should_panic(expected = "Only owner can set community admin")]
+    fn test_community_unauthorized_set_admin() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let moderator = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+        client.set_community_role(&0, &moderator, &Role::Moderator, &owner);
+
+        // Moderator cannot set admin - should panic
+        client.set_community_role(&0, &user, &Role::Admin, &moderator);
+    }
+
+    #[test]
+    fn test_community_role_promotion_updates_lists() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        client.set_community_owner(&0, &owner);
+
+        // Add user as moderator
+        client.set_community_role(&0, &user, &Role::Moderator, &owner);
+        assert_eq!(client.list_community_moderators(&0).len(), 1);
+        assert_eq!(client.list_community_admins(&0).len(), 0);
+
+        // Promote to admin
+        client.set_community_role(&0, &user, &Role::Admin, &owner);
+        assert_eq!(client.list_community_moderators(&0).len(), 0);
+        assert_eq!(client.list_community_admins(&0).len(), 1);
+    }
+
+    #[test]
+    fn test_multiple_communities() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let owner1 = Address::generate(&env);
+        let owner2 = Address::generate(&env);
+        let user = Address::generate(&env);
+
+        // Set up two communities
+        client.set_community_owner(&0, &owner1);
+        client.set_community_owner(&1, &owner2);
+
+        // Owner1 is owner of community 0 only
+        assert_eq!(client.get_community_role(&0, &owner1), Role::Owner);
+        assert_eq!(client.get_community_role(&1, &owner1), Role::Guest);
+
+        // Owner2 is owner of community 1 only
+        assert_eq!(client.get_community_role(&0, &owner2), Role::Guest);
+        assert_eq!(client.get_community_role(&1, &owner2), Role::Owner);
+
+        // User is guest in both by default
+        assert_eq!(client.get_community_role(&0, &user), Role::Guest);
+        assert_eq!(client.get_community_role(&1, &user), Role::Guest);
+
+        // Make user a member of community 0 only
+        client.set_community_role(&0, &user, &Role::Member, &owner1);
+        assert_eq!(client.get_community_role(&0, &user), Role::Member);
+        assert_eq!(client.get_community_role(&1, &user), Role::Guest);
     }
 }

@@ -36,6 +36,10 @@ pub enum RegistryKey {
     BoardNameToId(String),
     /// Stores aliases for a board (previous names that still resolve)
     BoardAliases(u64),
+    /// Community contract address
+    CommunityContract,
+    /// Board to community mapping (board_id -> community_id)
+    BoardCommunity(u64),
 }
 
 /// Addresses of shared service contracts
@@ -987,6 +991,211 @@ impl BoardsRegistry {
             &Symbol::new(&env, "set_theme"),
             theme_args,
         );
+    }
+
+    // === Community Functions ===
+
+    /// Set the community contract address (admin only)
+    pub fn set_community_contract(env: Env, community: Address) {
+        let admin: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admin)
+            .expect("Not initialized");
+        admin.require_auth();
+
+        env.storage()
+            .instance()
+            .set(&RegistryKey::CommunityContract, &community);
+
+        // Also register with alias "community" for form:@community:method
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "community")),
+            &community,
+        );
+    }
+
+    /// Get the community contract address
+    pub fn get_community_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&RegistryKey::CommunityContract)
+    }
+
+    /// Create a board within a community
+    /// This creates the board and associates it with the community
+    pub fn create_board_in_community(
+        env: Env,
+        community_id: u64,
+        name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        // Get community contract
+        let community_contract: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::CommunityContract)
+            .expect("Community contract not set");
+
+        // Verify the community exists by invoking the community contract
+        // The community contract will panic if the community doesn't exist when we add the board
+
+        // Create the board using existing create_board
+        let board_id = Self::create_board(
+            env.clone(),
+            name,
+            description,
+            is_private,
+            is_listed,
+            caller,
+        );
+
+        // Store the board-community association
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardCommunity(board_id), &community_id);
+
+        // Notify the community contract about the new board
+        let add_args: Vec<Val> = Vec::from_array(
+            &env,
+            [community_id.into_val(&env), board_id.into_val(&env)],
+        );
+        env.invoke_contract::<()>(
+            &community_contract,
+            &Symbol::new(&env, "add_board"),
+            add_args,
+        );
+
+        board_id
+    }
+
+    /// Get the community ID for a board (if any)
+    pub fn get_board_community(env: Env, board_id: u64) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::BoardCommunity(board_id))
+    }
+
+    /// Move a board to a community (board owner only)
+    pub fn move_board_to_community(
+        env: Env,
+        board_id: u64,
+        community_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Verify board exists
+        let board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Board(board_id))
+            .expect("Board does not exist");
+
+        // Verify caller is board creator (owner)
+        if caller != board.creator {
+            panic!("Only board owner can move board to community");
+        }
+
+        // Get community contract
+        let community_contract: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::CommunityContract)
+            .expect("Community contract not set");
+
+        // If board was already in a community, remove it
+        if let Some(old_community_id) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&RegistryKey::BoardCommunity(board_id))
+        {
+            let remove_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    old_community_id.into_val(&env),
+                    board_id.into_val(&env),
+                    caller.clone().into_val(&env),
+                ],
+            );
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &community_contract,
+                &Symbol::new(&env, "remove_board"),
+                remove_args,
+            );
+        }
+
+        // Store the new board-community association
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::BoardCommunity(board_id), &community_id);
+
+        // Notify the community contract about the new board
+        let add_args: Vec<Val> = Vec::from_array(
+            &env,
+            [community_id.into_val(&env), board_id.into_val(&env)],
+        );
+        env.invoke_contract::<()>(
+            &community_contract,
+            &Symbol::new(&env, "add_board"),
+            add_args,
+        );
+    }
+
+    /// Remove a board from its community (returns it to standalone)
+    pub fn remove_board_from_community(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists
+        let board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Board(board_id))
+            .expect("Board does not exist");
+
+        // Verify caller is board creator (owner)
+        if caller != board.creator {
+            panic!("Only board owner can remove board from community");
+        }
+
+        // Get current community
+        let community_id: u64 = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::BoardCommunity(board_id))
+            .expect("Board is not in a community");
+
+        // Get community contract
+        let community_contract: Address = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::CommunityContract)
+            .expect("Community contract not set");
+
+        // Notify community contract to remove the board
+        let remove_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                community_id.into_val(&env),
+                board_id.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &community_contract,
+            &Symbol::new(&env, "remove_board"),
+            remove_args,
+        );
+
+        // Remove the association
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardCommunity(board_id));
     }
 
 }
