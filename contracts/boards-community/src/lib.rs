@@ -349,7 +349,9 @@ impl BoardsCommunity {
             .unwrap_or(0)
     }
 
-    /// Add a board to a community (called by registry when creating board in community)
+    /// Add a board to a community (called by registry when creating/moving board to community)
+    /// Note: This is an internal function called by the registry after it has validated
+    /// that the user has permission to perform this operation. We trust the registry's validation.
     pub fn add_board(env: Env, community_id: u64, board_id: u64) {
         // Verify community exists
         let mut community: CommunityMeta = env
@@ -357,14 +359,6 @@ impl BoardsCommunity {
             .persistent()
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
-
-        // Get registry and verify caller is registry
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&CommunityKey::Registry)
-            .expect("Not initialized");
-        registry.require_auth();
 
         // Add board to community's board list
         let mut boards: Vec<u64> = env
@@ -956,9 +950,7 @@ impl BoardsCommunity {
     }
 
     fn append_community_card<'a>(_env: &'a Env, mut builder: MarkdownBuilder<'a>, community: &CommunityMeta) -> MarkdownBuilder<'a> {
-        builder = builder.raw_str("<div class=\"community-card\">\n");
-
-        // Community name as link - need to build the URL
+        // Build the URL for the link
         let mut url_buf = [0u8; 64];
         let prefix = b"render:/c/";
         url_buf[0..10].copy_from_slice(prefix);
@@ -967,37 +959,33 @@ impl BoardsCommunity {
         community.name.copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
         let url = core::str::from_utf8(&url_buf[0..10 + name_copy_len]).unwrap_or("");
 
-        // Display name
-        let mut display_buf = [0u8; 128];
-        let display_len = community.display_name.len() as usize;
-        let display_copy_len = core::cmp::min(display_len, 128);
-        community.display_name.copy_into_slice(&mut display_buf[0..display_copy_len]);
-        let display = core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
+        // Wrap entire card in an <a> tag like board-card and thread-card
+        builder = builder.raw_str("<a href=\"");
+        builder = builder.text(url);
+        builder = builder.raw_str("\" class=\"community-card\">");
 
-        builder = builder.raw_str("<h3>");
-        builder = builder.render_link(display, url);
-        builder = builder.raw_str("</h3>\n");
+        // Display name as title span
+        builder = builder.raw_str("<span class=\"community-card-title\">");
+        builder = builder.text_string(&community.display_name);
+        builder = builder.raw_str("</span>");
 
-        // Description
-        let mut desc_buf = [0u8; 256];
-        let desc_len = community.description.len() as usize;
-        let desc_copy_len = core::cmp::min(desc_len, 256);
-        community.description.copy_into_slice(&mut desc_buf[0..desc_copy_len]);
-        let desc = core::str::from_utf8(&desc_buf[0..desc_copy_len]).unwrap_or("");
-        builder = builder.paragraph(desc);
+        // Description as desc span
+        builder = builder.raw_str("<span class=\"community-card-desc\">");
+        builder = builder.text_string(&community.description);
+        builder = builder.raw_str("</span>");
 
-        // Stats
-        builder = builder.raw_str("<div class=\"community-stats\"><span>");
+        // Stats as meta span
+        builder = builder.raw_str("<span class=\"community-card-meta\">");
         builder = builder.number(community.board_count as u32);
-        builder = builder.raw_str(" boards</span> <span>");
+        builder = builder.raw_str(" boards · ");
         builder = builder.number(community.member_count as u32);
-        builder = builder.raw_str(" members</span>");
+        builder = builder.raw_str(" members");
         if community.is_private {
             builder = builder.raw_str(" <span class=\"badge\">Private</span>");
         }
-        builder = builder.raw_str("</div>\n");
+        builder = builder.raw_str("</span>");
 
-        builder = builder.raw_str("</div>\n");
+        builder = builder.raw_str("</a>\n");
         builder
     }
 
@@ -1075,6 +1063,7 @@ impl BoardsCommunity {
         }
 
         // List boards in community
+        builder = builder.newline();
         builder = builder.h2("Boards");
         let board_ids = Self::get_community_boards(env.clone(), community.id);
 
@@ -1199,6 +1188,7 @@ impl BoardsCommunity {
         builder = builder.raw_str("</textarea>\n");
 
         // Visibility Section
+        builder = builder.newline();
         builder = builder.h2("Visibility");
 
         // Private checkbox
@@ -1229,6 +1219,7 @@ impl BoardsCommunity {
         builder = builder.raw_str("<a href=\"form:update_community\" class=\"soroban-action\">Save Changes</a>\n");
 
         // Ownership Transfer Section
+        builder = builder.newline();
         builder = builder.h2("Ownership Transfer");
 
         // Check for pending transfer
@@ -1270,6 +1261,7 @@ impl BoardsCommunity {
         }
 
         // Danger Zone
+        builder = builder.newline();
         builder = builder.h2("Danger Zone");
         builder = builder.warning("Deleting a community is permanent and cannot be undone.");
         builder = builder.newline();

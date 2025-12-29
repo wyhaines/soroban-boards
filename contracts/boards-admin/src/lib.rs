@@ -1130,16 +1130,12 @@ impl BoardsAdmin {
                     md = md.tip("Create a community to organize your boards together.")
                         .raw_str("<a href=\"render:/new\">Create Community</a>\n");
                 } else {
+                    // Note: Form inputs ordered to match function signature:
+                    // move_board_to_community(board_id, community_id, caller)
                     md = md.note("Move this board to one of your communities.")
                         .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                         .number(board_id as u32)
                         .raw_str("\" />\n")
-                        .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-                        .text_string(&viewer.as_ref().unwrap().to_string())
-                        .raw_str("\" />\n")
-                        .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-                        .number(board_id as u32)
-                        .raw_str("/settings\" />\n")
                         .raw_str("<label>Select Community:</label>\n")
                         .raw_str("<select name=\"community_id\">\n");
 
@@ -1153,6 +1149,12 @@ impl BoardsAdmin {
                     }
 
                     md = md.raw_str("</select>\n")
+                        .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+                        .text_string(&viewer.as_ref().unwrap().to_string())
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
+                        .number(board_id as u32)
+                        .raw_str("/settings\" />\n")
                         .newline()
                         .form_link_to("Move to Community", "registry", "move_board_to_community")
                         .newline();

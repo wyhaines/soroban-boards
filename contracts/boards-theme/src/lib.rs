@@ -422,14 +422,14 @@ impl BoardsTheme {
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
             .rule(".footer", "margin-top: var(--space-xl); padding-top: var(--space-md); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.875rem;")
-            // Community styles
+            // Community styles - use a.community-card for higher specificity over viewer's a.soroban-action
             .rule(".community-list", "display: flex; flex-direction: column; gap: var(--space-sm);")
-            .rule(".community-card", "background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md); transition: border-color 0.15s, box-shadow 0.15s;")
-            .rule(".community-card:hover", "border-color: var(--primary); box-shadow: 0 2px 8px rgba(120, 87, 225, 0.1);")
-            .rule(".community-card h3", "margin: 0 0 var(--space-xs) 0; font-size: 1.125rem;")
-            .rule(".community-card p", "margin: 0 0 var(--space-sm) 0; color: var(--text-muted); font-size: 0.9375rem;")
-            .rule(".community-stats", "display: flex; flex-wrap: wrap; gap: var(--space-sm); font-size: 0.8125rem; color: var(--text-muted);")
-            .rule(".community-stats span", "display: inline-flex; align-items: center; gap: var(--space-xs);")
+            .rule("a.community-card", "display: flex !important; flex-direction: column; align-items: flex-start !important; background: var(--bg) !important; color: var(--text) !important; border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md) !important; transition: border-color 0.15s, box-shadow 0.15s; text-decoration: none !important;")
+            .rule("a.community-card:hover", "border-color: var(--primary); box-shadow: 0 2px 8px rgba(120, 87, 225, 0.1); text-decoration: none !important; background: var(--bg) !important;")
+            .rule(".community-card-title", "display: block; font-weight: 600; color: var(--text); margin-bottom: var(--space-xs); text-align: left;")
+            .rule(".community-card-desc", "display: block; color: var(--text-muted); font-size: 0.9375rem; margin-bottom: var(--space-xs); text-align: left;")
+            .rule(".community-card-meta", "display: block; font-size: 0.8125rem; color: var(--text-muted); text-align: left;")
+            .rule(".community-card-meta .badge", "margin-left: var(--space-xs);")
             .rule(".community-header", "margin-bottom: var(--space-lg);")
             .rule(".community-header h1", "margin-bottom: var(--space-xs);")
             .rule(".community-header p", "color: var(--text-muted); margin: 0;")
@@ -460,7 +460,7 @@ impl BoardsTheme {
             .rule(".vote-up.vote-active", "background: #2e7d32; color: white;")
             .rule(".vote-down.vote-active", "background: #c62828; color: white;")
             // Community cards dark mode
-            .rule(".community-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
+            .rule("a.community-card:hover", "box-shadow: 0 2px 8px rgba(120, 87, 225, 0.2);")
             .media_end()
             // Mobile responsive styles
             .media_start("(max-width: 640px)")
