@@ -203,7 +203,7 @@ impl BoardsAdmin {
     /// Main render entry point for admin pages
     pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
         Router::new(&env, path)
-            // Board admin routes
+            // Board admin routes (without /admin prefix - for direct access)
             .handle(b"/b/{id}/members", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_members(&env, board_id, &viewer)
@@ -236,6 +236,49 @@ impl BoardsAdmin {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_voting(&env, board_id, &viewer)
             })
+            // Board admin routes (with /admin prefix - canonical URLs)
+            .or_handle(b"/admin/b/{id}/members", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_members(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/banned", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_banned(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/flags", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_flag_queue(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/invites", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_invites(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/settings", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_settings(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/flairs", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_flairs(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/flairs/{flair_id}/edit", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                let flair_id = req.get_var_u32(b"flair_id").unwrap_or(0);
+                Self::render_flair_edit(&env, board_id, flair_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/flairs/{flair_id}/edit", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                let flair_id = req.get_var_u32(b"flair_id").unwrap_or(0);
+                Self::render_flair_edit(&env, board_id, flair_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/rules", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_rules(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/voting", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_voting(&env, board_id, &viewer)
+            })
             // Registry admin routes
             .or_handle(b"/registry", |_| {
                 Self::render_registry_admin(&env, &viewer)
@@ -255,6 +298,22 @@ impl BoardsAdmin {
             .raw_str("[Back to Board](render:/b/")
             .number(board_id as u32)
             .raw_str(")")
+            .newline()
+            .hr()
+    }
+
+    /// Render the navigation bar for sub-pages (includes Back to Settings link)
+    fn render_nav_subpage(env: &Env, board_id: u64) -> MarkdownBuilder<'_> {
+        MarkdownBuilder::new(env)
+            .render_link("Soroban Boards", "/")
+            .text(" | ")
+            .raw_str("[Back to Board](render:/b/")
+            .number(board_id as u32)
+            .raw_str(")")
+            .text(" | ")
+            .raw_str("[Back to Settings](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/settings)")
             .newline()
             .hr()
     }
@@ -296,7 +355,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Board Members");
 
         // Check if viewer has permission to view members (moderator+)
@@ -422,7 +481,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Banned Users");
 
         // Check if viewer has permission (moderator+)
@@ -509,7 +568,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Content)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Flag Queue");
 
         // Check if viewer has permission (moderator+)
@@ -612,7 +671,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Invite Requests");
 
         // Check if viewer has permission (moderator+)
@@ -1015,7 +1074,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Flair Management");
 
         // Check if viewer has admin permission
@@ -1065,15 +1124,23 @@ impl BoardsAdmin {
                         .text_string(&flair.color)
                         .raw_str(";\">")
                         .text_string(&flair.name)
-                        .raw_str("</div>")
+                        .raw_str("</div>\n\n")
+                        .raw_str("- **ID:** ").number(flair.id).newline()
+                        .raw_str("- **Enabled:** ").text(if flair.enabled { "Yes" } else { "No" }).newline()
+                        .raw_str("- **Required:** ").text(if flair.required { "Yes" } else { "No" }).newline()
+                        .raw_str("- **Mod Only:** ").text(if flair.mod_only { "Yes" } else { "No" }).newline()
                         .newline()
-                        .text("**ID:** ").number(flair.id).newline()
-                        .text("**Enabled:** ").text(if flair.enabled { "Yes" } else { "No" }).newline()
-                        .text("**Required:** ").text(if flair.required { "Yes" } else { "No" }).newline()
-                        .text("**Mod Only:** ").text(if flair.mod_only { "Yes" } else { "No" }).newline();
+                        // Edit button - links to separate edit page
+                        .raw_str("[Edit](render:/admin/b/")
+                        .number(board_id as u32)
+                        .raw_str("/flairs/")
+                        .number(flair.id)
+                        .raw_str("/edit)");
 
+                    // Disable button (only for enabled flairs)
                     if flair.enabled {
-                        md = md.raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        md = md.text(" | ")
+                            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                             .number(board_id as u32)
                             .raw_str("\" />\n")
                             .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
@@ -1081,6 +1148,8 @@ impl BoardsAdmin {
                             .raw_str("\" />\n")
                             .form_link_to("Disable", "admin", "disable_flair");
                     }
+
+                    md = md.newline();
                 }
             }
 
@@ -1096,9 +1165,169 @@ impl BoardsAdmin {
                 .newline()
                 .input("bg_color", "Background color (e.g., #ff4500)")
                 .newline()
+                // Hidden inputs provide default "false" when checkbox is unchecked
+                .raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n")
                 .raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n")
+                .raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n")
                 .raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n")
                 .form_link_to("Create Flair", "admin", "create_flair");
+        } else {
+            md = md.warning("Board contract not found.");
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render flair edit page
+    fn render_flair_edit(env: &Env, board_id: u64, flair_id: u32, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav_subpage(env, board_id)
+            .h1("Edit Flair");
+
+        // Check if viewer has admin permission
+        let can_admin = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_admin
+        } else {
+            false
+        };
+
+        if !can_admin {
+            md = md.warning("You must be an admin to edit flairs.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get board contract
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if let Some(board_addr) = board_contract {
+            // Get the flair
+            let flair_opt: Option<FlairDef> = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "get_flair"),
+                Vec::from_array(env, [flair_id.into_val(env)]),
+            );
+
+            if let Some(flair) = flair_opt {
+                // Show current flair preview
+                md = md
+                    .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; margin-bottom: 16px; background: ")
+                    .text_string(&flair.bg_color)
+                    .raw_str("; color: ")
+                    .text_string(&flair.color)
+                    .raw_str(";\">")
+                    .text_string(&flair.name)
+                    .raw_str("</div>\n\n")
+                    .text("Editing flair ID: ").number(flair_id).newline()
+                    .newline()
+                    // Hidden fields
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                    .number(board_id as u32)
+                    .raw_str("\" />\n")
+                    .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
+                    .number(flair_id)
+                    .raw_str("\" />\n")
+                    .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
+                    .number(board_id as u32)
+                    .raw_str("/flairs\" />\n");
+
+                // Pre-fill form with current values
+                // Name field - we need to use raw HTML to set the value
+                let name_len = flair.name.len() as usize;
+                let mut name_buf = [0u8; 64];
+                let name_copy_len = if name_len > 64 { 64 } else { name_len };
+                flair.name.copy_into_slice(&mut name_buf[..name_copy_len]);
+
+                md = md.raw_str("<div class=\"form-group\">\n")
+                    .raw_str("<label for=\"name\">Name</label>\n")
+                    .raw_str("<input type=\"text\" name=\"name\" id=\"name\" value=\"");
+                for j in 0..name_copy_len {
+                    md = md.raw_str(core::str::from_utf8(&name_buf[j..j+1]).unwrap_or(""));
+                }
+                md = md.raw_str("\" />\n")
+                    .raw_str("</div>\n\n");
+
+                // Color field
+                let color_len = flair.color.len() as usize;
+                let mut color_buf = [0u8; 32];
+                let color_copy_len = if color_len > 32 { 32 } else { color_len };
+                flair.color.copy_into_slice(&mut color_buf[..color_copy_len]);
+
+                md = md.raw_str("<div class=\"form-group\">\n")
+                    .raw_str("<label for=\"color\">Text color</label>\n")
+                    .raw_str("<input type=\"text\" name=\"color\" id=\"color\" value=\"");
+                for j in 0..color_copy_len {
+                    md = md.raw_str(core::str::from_utf8(&color_buf[j..j+1]).unwrap_or(""));
+                }
+                md = md.raw_str("\" />\n")
+                    .raw_str("</div>\n\n");
+
+                // Background color field
+                let bg_len = flair.bg_color.len() as usize;
+                let mut bg_buf = [0u8; 32];
+                let bg_copy_len = if bg_len > 32 { 32 } else { bg_len };
+                flair.bg_color.copy_into_slice(&mut bg_buf[..bg_copy_len]);
+
+                md = md.raw_str("<div class=\"form-group\">\n")
+                    .raw_str("<label for=\"bg_color\">Background color</label>\n")
+                    .raw_str("<input type=\"text\" name=\"bg_color\" id=\"bg_color\" value=\"");
+                for j in 0..bg_copy_len {
+                    md = md.raw_str(core::str::from_utf8(&bg_buf[j..j+1]).unwrap_or(""));
+                }
+                md = md.raw_str("\" />\n")
+                    .raw_str("</div>\n\n");
+
+                // Checkboxes with current values
+                md = md.raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n");
+                if flair.required {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" checked /> Required for new posts</label>\n");
+                } else {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n");
+                }
+
+                md = md.raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n");
+                if flair.mod_only {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" checked /> Moderator only</label>\n");
+                } else {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n");
+                }
+
+                md = md.raw_str("<input type=\"hidden\" name=\"enabled\" value=\"false\" />\n");
+                if flair.enabled {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked /> Enabled</label>\n");
+                } else {
+                    md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" /> Enabled</label>\n");
+                }
+
+                md = md.newline()
+                    .form_link_to("Update Flair", "admin", "update_flair")
+                    .newline()
+                    .newline()
+                    .raw_str("[Cancel](render:/admin/b/")
+                    .number(board_id as u32)
+                    .raw_str("/flairs)");
+            } else {
+                md = md.warning("Flair not found.");
+            }
         } else {
             md = md.warning("Board contract not found.");
         }
@@ -1119,7 +1348,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Board Rules Editor");
 
         // Check if viewer has admin permission
@@ -1191,7 +1420,8 @@ impl BoardsAdmin {
             if let Some(rules) = current_rules {
                 if rules.len() > 0 {
                     // Note: Can't pre-fill textarea in this setup, user needs to re-enter
-                    md = md.note("Copy existing rules above and paste into the text area if you want to edit.");
+                    md = md.newline()
+                        .note("Copy existing rules above and paste into the text area if you want to edit.");
                 }
             }
 
@@ -1217,7 +1447,7 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav(env, board_id)
+        let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Voting Configuration");
 
         // Check if viewer has admin permission
@@ -1259,10 +1489,11 @@ impl BoardsAdmin {
             md = md.h2("Current Configuration");
 
             if let Some(cfg) = config {
-                md = md.text("**Voting enabled:** ").text(if cfg.enabled { "Yes" } else { "No" }).newline()
-                    .text("**Allow downvotes:** ").text(if cfg.allow_downvotes { "Yes" } else { "No" }).newline()
-                    .text("**Karma tracking:** ").text(if cfg.karma_enabled { "Yes" } else { "No" }).newline()
-                    .text("**Karma multiplier:** ").number(cfg.karma_multiplier).newline();
+                md = md
+                    .raw_str("- **Voting enabled:** ").text(if cfg.enabled { "Yes" } else { "No" }).newline()
+                    .raw_str("- **Allow downvotes:** ").text(if cfg.allow_downvotes { "Yes" } else { "No" }).newline()
+                    .raw_str("- **Karma tracking:** ").text(if cfg.karma_enabled { "Yes" } else { "No" }).newline()
+                    .raw_str("- **Karma multiplier:** ").number(cfg.karma_multiplier).newline();
             } else {
                 md = md.paragraph("Using default configuration (voting enabled, downvotes allowed).");
             }
@@ -2708,9 +2939,25 @@ impl BoardsAdmin {
             )
             .expect("Board contract not found");
 
-        // Parse checkbox values (presence of string means "true")
-        let is_required = required.is_some();
-        let is_mod_only = mod_only.is_some();
+        // Parse checkbox values (check for "true" string value)
+        let is_required = required
+            .map(|s| {
+                let len = s.len() as usize;
+                if len != 4 { return false; }
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                &buf == b"true"
+            })
+            .unwrap_or(false);
+        let is_mod_only = mod_only
+            .map(|s| {
+                let len = s.len() as usize;
+                if len != 4 { return false; }
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                &buf == b"true"
+            })
+            .unwrap_or(false);
 
         // Create the flair
         let args: Vec<Val> = Vec::from_array(&env, [
@@ -2778,6 +3025,107 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "disable_flair"),
+            args,
+        );
+    }
+
+    /// Update an existing flair (admin+)
+    pub fn update_flair(
+        env: Env,
+        board_id: u64,
+        flair_id: u64,
+        name: String,
+        color: String,
+        bg_color: String,
+        required: Option<String>,
+        mod_only: Option<String>,
+        enabled: Option<String>,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let flair_id_u32 = flair_id as u32;
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Get board contract
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Parse checkbox values (check for "true" string value)
+        let is_required = required
+            .map(|s| {
+                let len = s.len() as usize;
+                if len != 4 { return false; }
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                &buf == b"true"
+            })
+            .unwrap_or(false);
+        let is_mod_only = mod_only
+            .map(|s| {
+                let len = s.len() as usize;
+                if len != 4 { return false; }
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                &buf == b"true"
+            })
+            .unwrap_or(false);
+        let is_enabled = enabled
+            .map(|s| {
+                let len = s.len() as usize;
+                if len != 4 { return false; }
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                &buf == b"true"
+            })
+            .unwrap_or(true); // Default to enabled
+
+        // Build FlairDef
+        let flair = FlairDef {
+            id: flair_id_u32,
+            name,
+            color,
+            bg_color,
+            required: is_required,
+            mod_only: is_mod_only,
+            enabled: is_enabled,
+        };
+
+        // Update the flair
+        let args: Vec<Val> = Vec::from_array(&env, [
+            flair_id_u32.into_val(&env),
+            flair.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "update_flair"),
             args,
         );
     }
