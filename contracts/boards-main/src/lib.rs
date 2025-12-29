@@ -102,11 +102,31 @@ impl BoardsMain {
     }
 
     /// Get community contract address
-    pub fn get_community(env: Env) -> Address {
+    pub fn get_community(env: Env) -> Option<Address> {
         env.storage()
             .instance()
             .get(&MainKey::Community)
-            .expect("Not initialized")
+    }
+
+    /// Set community contract address (for upgrades - requires registry admin auth)
+    pub fn set_community(env: Env, community: Address, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is the registry admin
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        let admin_args: Vec<Val> = Vec::new(&env);
+        let admin: Address = env.invoke_contract(&registry, &Symbol::new(&env, "get_admin"), admin_args);
+
+        if caller != admin {
+            panic!("Only registry admin can set community");
+        }
+
+        env.storage().instance().set(&MainKey::Community, &community);
     }
 
     /// Get registry address
@@ -245,6 +265,18 @@ impl BoardsMain {
                 args,
             );
             md = md.raw(profile_link);
+        } else if viewer.is_some() {
+            // No profile contract registered - show a placeholder link
+            // Build return path for when profile contract is eventually registered
+            let self_addr = env.current_contract_address();
+            let self_id_str = Self::address_to_contract_id_string(env, &self_addr);
+            let mut return_path = self_id_str;
+            return_path.append(&Bytes::from_slice(env, b":/"));
+
+            md = md
+                .raw_str("<a href=\"render:@profile:/register/from/")
+                .raw(return_path)
+                .raw_str("\">Create Profile</a>");
         }
 
         md.div_end()
@@ -361,8 +393,16 @@ impl BoardsMain {
         }
 
         md = md.newline()
-            .render_link("+ Create New Board", "/create")
-            .newline();
+            .render_link("+ Create New Board", "/create");
+
+        // Show registry admin link if viewer is logged in
+        if viewer.is_some() {
+            md = md
+                .text(" | ")
+                .render_link("Registry Admin", "/admin/registry");
+        }
+
+        md = md.newline();
 
         Self::render_footer_into(md).build()
     }
@@ -888,6 +928,6 @@ mod test {
 
         assert_eq!(client.get_registry(), registry);
         assert_eq!(client.get_theme(), theme);
-        assert_eq!(client.get_community(), community);
+        assert_eq!(client.get_community(), Some(community));
     }
 }

@@ -41,6 +41,8 @@ UPGRADE_CONTENT=false
 UPGRADE_THEME=false
 UPGRADE_ADMIN=false
 UPGRADE_MAIN=false
+UPGRADE_COMMUNITY=false
+UPGRADE_VOTING=false
 UPGRADE_BOARDS=false
 
 if [ $# -gt 0 ]; then
@@ -53,11 +55,13 @@ if [ $# -gt 0 ]; then
             theme)       UPGRADE_THEME=true ;;
             admin)       UPGRADE_ADMIN=true ;;
             main)        UPGRADE_MAIN=true ;;
+            community)   UPGRADE_COMMUNITY=true ;;
+            voting)      UPGRADE_VOTING=true ;;
             boards)      UPGRADE_BOARDS=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, admin, main, boards, all"
+                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, boards, all"
                 exit 1
                 ;;
         esac
@@ -71,6 +75,8 @@ if [ "$UPGRADE_ALL" = true ]; then
     UPGRADE_THEME=true
     UPGRADE_ADMIN=true
     UPGRADE_MAIN=true
+    UPGRADE_COMMUNITY=true
+    UPGRADE_VOTING=true
     UPGRADE_BOARDS=true
 fi
 
@@ -109,18 +115,52 @@ install_wasm() {
     echo "$wasm_hash"
 }
 
+# Function to deploy a new contract
+deploy_contract() {
+    local name=$1
+    local wasm_file="$WASM_DIR/${name}.wasm"
+
+    if [ ! -f "$wasm_file" ]; then
+        echo -e "${RED}Error: $wasm_file not found${NC}" >&2
+        exit 1
+    fi
+
+    echo -e "${YELLOW}Deploying $name...${NC}" >&2
+
+    local output=$(stellar contract deploy \
+        --wasm "$wasm_file" \
+        --source $DEPLOYER \
+        --network $NETWORK 2>&1)
+
+    # Extract the contract ID (line starting with C, 56 chars)
+    local contract_id=$(echo "$output" | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+
+    if [ -z "$contract_id" ]; then
+        echo -e "${RED}Error: Failed to deploy $name${NC}" >&2
+        echo "$output" >&2
+        exit 1
+    fi
+
+    echo -e "${GREEN}$name deployed: $contract_id${NC}" >&2
+    echo "$contract_id"
+}
+
 # Function to upgrade the registry contract directly
 upgrade_registry() {
     local wasm_hash=$1
 
     echo -e "${YELLOW}Upgrading Registry ($REGISTRY_ID)...${NC}"
 
+    # Get deployer address for caller parameter
+    local deployer_addr=$(stellar keys address $DEPLOYER)
+
     stellar contract invoke \
         --id "$REGISTRY_ID" \
         --source $DEPLOYER \
         --network $NETWORK \
         -- upgrade \
-        --new_wasm_hash "$wasm_hash" 2>&1 | grep -v "^ℹ" || true
+        --new_wasm_hash "$wasm_hash" \
+        --caller "$deployer_addr" 2>&1 | grep -v "^ℹ" || true
 
     echo -e "${GREEN}Registry upgraded successfully${NC}"
 }
@@ -134,13 +174,17 @@ upgrade_contract_via_registry() {
 
     echo -e "${YELLOW}Upgrading $name ($contract_id) via registry...${NC}"
 
+    # Get deployer address for caller parameter
+    local deployer_addr=$(stellar keys address $DEPLOYER)
+
     stellar contract invoke \
         --id "$REGISTRY_ID" \
         --source $DEPLOYER \
         --network $NETWORK \
         -- upgrade_contract \
         --contract_id "$contract_id" \
-        --new_wasm_hash "$wasm_hash" 2>&1 | grep -v "^ℹ" || true
+        --new_wasm_hash "$wasm_hash" \
+        --caller "$deployer_addr" 2>&1 | grep -v "^ℹ" || true
 
     echo -e "${GREEN}$name upgraded successfully${NC}"
 }
@@ -199,6 +243,102 @@ if [ "$UPGRADE_MAIN" = true ]; then
     echo ""
 fi
 
+# Upgrade or Deploy Community contract
+if [ "$UPGRADE_COMMUNITY" = true ]; then
+    echo -e "${GREEN}=== Community Contract ===${NC}"
+
+    # Check if COMMUNITY_ID exists in env
+    if [ -z "$COMMUNITY_ID" ]; then
+        echo -e "${YELLOW}Community contract not found - deploying new...${NC}"
+        COMMUNITY_ID=$(deploy_contract "boards_community")
+
+        # Initialize Community
+        echo -e "${YELLOW}Initializing Community...${NC}"
+        stellar contract invoke \
+            --id "$COMMUNITY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- init \
+            --registry "$REGISTRY_ID" \
+            --permissions "$PERMISSIONS_ID" \
+            --theme "$THEME_ID" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Community initialized${NC}"
+
+        # Register with registry
+        echo -e "${YELLOW}Registering Community with Registry...${NC}"
+        stellar contract invoke \
+            --id "$REGISTRY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_community_contract \
+            --community "$COMMUNITY_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Community registered${NC}"
+
+        # Update Main contract with community address
+        echo -e "${YELLOW}Setting Community in Main contract...${NC}"
+        stellar contract invoke \
+            --id "$MAIN_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_community \
+            --community "$COMMUNITY_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Main updated with Community${NC}"
+
+        # Update env file
+        echo "COMMUNITY_ID=$COMMUNITY_ID" >> "$ENV_FILE"
+    else
+        echo -e "Upgrading existing Community ($COMMUNITY_ID)"
+        COMMUNITY_HASH=$(install_wasm "boards_community")
+        echo -e "WASM hash: ${BLUE}$COMMUNITY_HASH${NC}"
+        upgrade_contract_via_registry "Community" "$COMMUNITY_ID" "$COMMUNITY_HASH"
+    fi
+    echo ""
+fi
+
+# Upgrade or Deploy Voting contract
+if [ "$UPGRADE_VOTING" = true ]; then
+    echo -e "${GREEN}=== Voting Contract ===${NC}"
+
+    # Check if VOTING_ID exists in env
+    if [ -z "$VOTING_ID" ]; then
+        echo -e "${YELLOW}Voting contract not found - deploying new...${NC}"
+        VOTING_ID=$(deploy_contract "boards_voting")
+
+        # Initialize Voting
+        echo -e "${YELLOW}Initializing Voting...${NC}"
+        stellar contract invoke \
+            --id "$VOTING_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- init \
+            --registry "$REGISTRY_ID" \
+            --permissions "$PERMISSIONS_ID" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Voting initialized${NC}"
+
+        # Register with registry
+        echo -e "${YELLOW}Registering Voting with Registry...${NC}"
+        stellar contract invoke \
+            --id "$REGISTRY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_voting_contract \
+            --voting "$VOTING_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Voting registered${NC}"
+
+        # Update env file
+        echo "VOTING_ID=$VOTING_ID" >> "$ENV_FILE"
+    else
+        echo -e "Upgrading existing Voting ($VOTING_ID)"
+        VOTING_HASH=$(install_wasm "boards_voting")
+        echo -e "WASM hash: ${BLUE}$VOTING_HASH${NC}"
+        upgrade_contract_via_registry "Voting" "$VOTING_ID" "$VOTING_HASH"
+    fi
+    echo ""
+fi
+
 # Upgrade Board contracts (need to iterate through all boards)
 if [ "$UPGRADE_BOARDS" = true ]; then
     echo -e "${GREEN}=== Upgrading Board Contracts ===${NC}"
@@ -214,7 +354,8 @@ if [ "$UPGRADE_BOARDS" = true ]; then
         --source $DEPLOYER \
         --network $NETWORK \
         -- set_board_wasm_hash \
-        --wasm_hash "$BOARD_HASH" 2>&1 | grep -v "^ℹ" || true
+        --wasm_hash "$BOARD_HASH" \
+        --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
     echo -e "${GREEN}Registry board WASM hash updated${NC}"
 
     # Get board count
@@ -254,12 +395,18 @@ fi
 
 echo -e "${GREEN}=== Upgrade Complete! ===${NC}"
 echo ""
-echo "Contract addresses remain unchanged:"
+echo "Contract addresses:"
 echo "  Main (entry): $MAIN_ID"
 echo "  Registry:     $REGISTRY_ID"
 echo "  Permissions:  $PERMISSIONS_ID"
 echo "  Content:      $CONTENT_ID"
 echo "  Theme:        $THEME_ID"
 echo "  Admin:        $ADMIN_CONTRACT_ID"
+if [ -n "$COMMUNITY_ID" ]; then
+    echo "  Community:    $COMMUNITY_ID"
+fi
+if [ -n "$VOTING_ID" ]; then
+    echo "  Voting:       $VOTING_ID"
+fi
 echo ""
 echo "All existing data has been preserved."

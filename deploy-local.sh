@@ -23,16 +23,21 @@ fund_account() {
 }
 
 # Get deployer address
-ADMIN=$(stellar keys address $DEPLOYER 2>/dev/null || true)
-if [ -z "$ADMIN" ]; then
+DEPLOYER_ADDR=$(stellar keys address $DEPLOYER 2>/dev/null || true)
+if [ -z "$DEPLOYER_ADDR" ]; then
     echo -e "${YELLOW}Creating deployer identity...${NC}"
     stellar keys generate $DEPLOYER --network $NETWORK 2>/dev/null || true
-    ADMIN=$(stellar keys address $DEPLOYER)
+    DEPLOYER_ADDR=$(stellar keys address $DEPLOYER)
 fi
-echo -e "Admin: ${YELLOW}$ADMIN${NC}"
+
+# Additional admin (your wallet address) - can be set via environment variable
+EXTRA_ADMIN="${EXTRA_ADMIN:-GCPM76A3NUGYF6F3H4KM5K72JLXHBWONIJYQEHJU6DZOIWR7YBDJ7KKP}"
+
+echo -e "Deployer Admin: ${YELLOW}$DEPLOYER_ADDR${NC}"
+echo -e "Extra Admin:    ${YELLOW}$EXTRA_ADMIN${NC}"
 
 # Fund the deployer account
-fund_account $ADMIN
+fund_account $DEPLOYER_ADDR
 
 # Function to deploy a contract
 deploy_contract() {
@@ -92,7 +97,8 @@ cat > .deployed-contracts.env << EOF
 
 NETWORK=$NETWORK
 RPC_URL=$RPC_URL
-ADMIN=$ADMIN
+DEPLOYER_ADDR=$DEPLOYER_ADDR
+EXTRA_ADMIN=$EXTRA_ADMIN
 
 # Main entry point contract (use this as VITE_CONTRACT_ID)
 MAIN_ID=$MAIN_ID
@@ -119,13 +125,13 @@ stellar contract invoke \
     --source $DEPLOYER \
     --network $NETWORK \
     -- init \
-    --admin $ADMIN \
+    --admins "[\"$DEPLOYER_ADDR\", \"$EXTRA_ADMIN\"]" \
     --permissions $PERMISSIONS_ID \
     --content $CONTENT_ID \
     --theme $THEME_ID \
     --admin_contract $ADMIN_CONTRACT_ID
 
-echo -e "${GREEN}Registry initialized${NC}"
+echo -e "${GREEN}Registry initialized with admins: $DEPLOYER_ADDR, $EXTRA_ADMIN${NC}"
 
 # Install board WASM hash for auto-deployment of board contracts
 echo ""
@@ -144,7 +150,8 @@ stellar contract invoke \
     --source $DEPLOYER \
     --network $NETWORK \
     -- set_board_wasm_hash \
-    --wasm_hash $BOARD_WASM_HASH
+    --wasm_hash $BOARD_WASM_HASH \
+    --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Board WASM hash installed${NC}"
 
@@ -216,7 +223,7 @@ stellar contract invoke \
 
 echo -e "${GREEN}Community initialized${NC}"
 
-# Initialize Voting (needs registry address)
+# Initialize Voting (needs registry and permissions addresses)
 echo ""
 echo -e "${GREEN}=== Initializing Voting ===${NC}"
 stellar contract invoke \
@@ -224,7 +231,8 @@ stellar contract invoke \
     --source $DEPLOYER \
     --network $NETWORK \
     -- init \
-    --registry $REGISTRY_ID
+    --registry $REGISTRY_ID \
+    --permissions $PERMISSIONS_ID
 
 echo -e "${GREEN}Voting initialized${NC}"
 
@@ -254,7 +262,8 @@ stellar contract invoke \
     --network $NETWORK \
     -- set_contract \
     --alias main \
-    --address $MAIN_ID
+    --address $MAIN_ID \
+    --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Main registered as @main${NC}"
 
@@ -266,7 +275,8 @@ stellar contract invoke \
     --source $DEPLOYER \
     --network $NETWORK \
     -- set_community_contract \
-    --community $COMMUNITY_ID
+    --community $COMMUNITY_ID \
+    --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Community registered${NC}"
 
@@ -278,7 +288,8 @@ stellar contract invoke \
     --source $DEPLOYER \
     --network $NETWORK \
     -- set_voting_contract \
-    --voting $VOTING_ID
+    --voting $VOTING_ID \
+    --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Voting registered${NC}"
 
@@ -294,7 +305,7 @@ BOARD_OUTPUT=$(stellar contract invoke \
     --description "General discussion board" \
     --is_private '""' \
     --is_listed '"true"' \
-    --caller $ADMIN 2>&1)
+    --caller $DEPLOYER_ADDR 2>&1)
 # Extract board number (single digit at end)
 BOARD_NUM=$(echo "$BOARD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
@@ -321,7 +332,7 @@ THREAD_OUTPUT=$(stellar contract invoke \
     --network $NETWORK \
     -- create_thread \
     --title "Welcome to Soroban Boards!" \
-    --creator $ADMIN 2>&1)
+    --creator $DEPLOYER_ADDR 2>&1)
 # Extract thread ID (number)
 THREAD_ID=$(echo "$THREAD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
@@ -336,7 +347,7 @@ stellar contract invoke \
     --board_id 0 \
     --thread_id 0 \
     --content 57656c636f6d6520746f20536f726f62616e20426f617264732120546869732069732061206465636e7472616c697a656420666f72756d2072756e6e696e67206f6e20746865205374656c6c617220626c6f636b636861696e2e \
-    --author $ADMIN
+    --author $DEPLOYER_ADDR
 
 echo -e "${GREEN}Thread body set${NC}"
 

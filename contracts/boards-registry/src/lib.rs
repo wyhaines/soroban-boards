@@ -6,10 +6,8 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, In
 #[contracttype]
 #[derive(Clone)]
 pub enum RegistryKey {
-    /// Contract admin address
-    Admin,
-    /// Pending admin transfer (address, expiry ledger)
-    AdminTransfer,
+    /// Contract admin addresses (multiple admins supported)
+    Admins,
     /// Total number of boards
     BoardCount,
     /// Board metadata by ID
@@ -100,20 +98,25 @@ impl BoardsRegistry {
     /// Initialize the registry with admin and service contract addresses
     pub fn init(
         env: Env,
-        admin: Address,
+        admins: Vec<Address>,
         permissions: Address,
         content: Address,
         theme: Address,
         admin_contract: Address,
     ) {
         // Only allow initialization once
-        if env.storage().instance().has(&RegistryKey::Admin) {
+        if env.storage().instance().has(&RegistryKey::Admins) {
             panic!("Already initialized");
         }
 
-        admin.require_auth();
+        if admins.is_empty() {
+            panic!("At least one admin required");
+        }
 
-        env.storage().instance().set(&RegistryKey::Admin, &admin);
+        // Require auth from the first admin
+        admins.get(0).unwrap().require_auth();
+
+        env.storage().instance().set(&RegistryKey::Admins, &admins);
         env.storage().instance().set(&RegistryKey::BoardCount, &0u64);
         env.storage().instance().set(&RegistryKey::Paused, &false);
 
@@ -148,13 +151,8 @@ impl BoardsRegistry {
     }
 
     /// Set the WASM hash for deploying board contracts (admin only)
-    pub fn set_board_wasm_hash(env: Env, wasm_hash: BytesN<32>) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn set_board_wasm_hash(env: Env, wasm_hash: BytesN<32>, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         env.storage()
             .instance()
@@ -754,36 +752,118 @@ impl BoardsRegistry {
     ///
     /// This allows adding new service contracts (e.g., "profile") without
     /// code changes. The alias can then be used with `form:@alias:method`.
-    pub fn set_contract(env: Env, alias: Symbol, address: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn set_contract(env: Env, alias: Symbol, address: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         env.storage()
             .instance()
             .set(&RegistryKey::Contract(alias), &address);
     }
 
-    /// Get admin address
-    pub fn get_admin(env: Env) -> Address {
+    /// Get all admin addresses
+    pub fn get_admins(env: Env) -> Vec<Address> {
         env.storage()
             .instance()
-            .get(&RegistryKey::Admin)
+            .get(&RegistryKey::Admins)
             .expect("Not initialized")
     }
 
-    /// Pause/unpause the registry
-    pub fn set_paused(env: Env, paused: bool) {
-        let admin: Address = env
+    /// Check if an address is an admin
+    pub fn is_admin(env: Env, address: Address) -> bool {
+        let admins: Vec<Address> = env
             .storage()
             .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+            .get(&RegistryKey::Admins)
+            .unwrap_or(Vec::new(&env));
 
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == address {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Add a new admin (requires existing admin auth)
+    pub fn add_admin(env: Env, new_admin: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
+
+        let mut admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admins)
+            .expect("Not initialized");
+
+        // Check if already an admin
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == new_admin {
+                panic!("Already an admin");
+            }
+        }
+
+        admins.push_back(new_admin);
+        env.storage().instance().set(&RegistryKey::Admins, &admins);
+    }
+
+    /// Remove an admin (requires existing admin auth)
+    /// Cannot remove the last admin
+    pub fn remove_admin(env: Env, admin_to_remove: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admins)
+            .expect("Not initialized");
+
+        if admins.len() <= 1 {
+            panic!("Cannot remove the last admin");
+        }
+
+        let mut new_admins = Vec::new(&env);
+        let mut found = false;
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            if admin == admin_to_remove {
+                found = true;
+            } else {
+                new_admins.push_back(admin);
+            }
+        }
+
+        if !found {
+            panic!("Address is not an admin");
+        }
+
+        env.storage().instance().set(&RegistryKey::Admins, &new_admins);
+    }
+
+    /// Helper: require caller is an admin and has authorized
+    fn require_admin_auth(env: &Env, caller: &Address) {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admins)
+            .expect("Not initialized");
+
+        let mut is_admin = false;
+        for i in 0..admins.len() {
+            if &admins.get(i).unwrap() == caller {
+                is_admin = true;
+                break;
+            }
+        }
+
+        if !is_admin {
+            panic!("Not an admin");
+        }
+
+        caller.require_auth();
+    }
+
+    /// Pause/unpause the registry
+    pub fn set_paused(env: Env, paused: bool, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
         env.storage().instance().set(&RegistryKey::Paused, &paused);
     }
 
@@ -796,14 +876,8 @@ impl BoardsRegistry {
     }
 
     /// Upgrade the contract WASM
-    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
-
+    pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
 
@@ -812,13 +886,8 @@ impl BoardsRegistry {
     /// Call this after upgrading an existing registry to populate the new
     /// generic contract storage from the legacy ContractAddresses struct.
     /// Safe to call multiple times - will overwrite existing values.
-    pub fn migrate_contracts(env: Env) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn migrate_contracts(env: Env, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         // Read from legacy Contracts struct
         if let Some(contracts) = env
@@ -846,52 +915,9 @@ impl BoardsRegistry {
         }
     }
 
-    /// Transfer admin to a new address (two-step process)
-    pub fn transfer_admin(env: Env, new_admin: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
-
-        // Set pending admin with expiry (e.g., 1 week = 604800 ledgers at 1s/ledger)
-        let expiry = env.ledger().sequence() + 604800;
-        env.storage()
-            .instance()
-            .set(&RegistryKey::AdminTransfer, &(new_admin, expiry));
-    }
-
-    /// Accept admin transfer
-    pub fn accept_admin(env: Env) {
-        let (new_admin, expiry): (Address, u32) = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::AdminTransfer)
-            .expect("No pending transfer");
-
-        if env.ledger().sequence() > expiry {
-            panic!("Transfer expired");
-        }
-
-        new_admin.require_auth();
-
-        env.storage()
-            .instance()
-            .set(&RegistryKey::Admin, &new_admin);
-        env.storage()
-            .instance()
-            .remove(&RegistryKey::AdminTransfer);
-    }
-
     /// Set board contract address for a board ID (admin only)
-    pub fn set_board_contract(env: Env, board_id: u64, board_contract: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn set_board_contract(env: Env, board_id: u64, board_contract: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         // Verify board exists
         if !env
@@ -930,13 +956,8 @@ impl BoardsRegistry {
 
     /// Upgrade another contract (admin only, proxies to contract's upgrade function)
     /// This allows the registry admin to upgrade any contract that trusts the registry.
-    pub fn upgrade_contract(env: Env, contract_id: Address, new_wasm_hash: BytesN<32>) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn upgrade_contract(env: Env, contract_id: Address, new_wasm_hash: BytesN<32>, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         // Call the target contract's upgrade function
         // The target contract will verify that we (the registry) are calling it
@@ -950,13 +971,8 @@ impl BoardsRegistry {
 
     /// Configure a board contract with permissions, content, and theme addresses (admin only)
     /// Used to update existing board contracts after adding these fields
-    pub fn configure_board(env: Env, board_id: u64) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn configure_board(env: Env, board_id: u64, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         let contracts: ContractAddresses = env
             .storage()
@@ -998,13 +1014,8 @@ impl BoardsRegistry {
     // === Community Functions ===
 
     /// Set the community contract address (admin only)
-    pub fn set_community_contract(env: Env, community: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn set_community_contract(env: Env, community: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         env.storage()
             .instance()
@@ -1025,13 +1036,8 @@ impl BoardsRegistry {
     }
 
     /// Set the voting contract address (admin only)
-    pub fn set_voting_contract(env: Env, voting: Address) {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::Admin)
-            .expect("Not initialized");
-        admin.require_auth();
+    pub fn set_voting_contract(env: Env, voting: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
 
         env.storage()
             .instance()
@@ -1244,16 +1250,17 @@ mod test {
         let client = BoardsRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let admins = Vec::from_array(&env, [admin.clone()]);
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
         // Initialize
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Verify admin
-        assert_eq!(client.get_admin(), admin);
+        assert!(client.is_admin(&admin));
 
         // Create a board
         let creator = Address::generate(&env);
@@ -1289,7 +1296,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let is_private = String::from_str(&env, "false");
@@ -1325,7 +1333,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Verify initially not paused
         assert!(!client.is_paused());
@@ -1354,7 +1363,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Pause the registry
         client.set_paused(&true);
@@ -1382,7 +1392,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Try to get a board that doesn't exist
         let board = client.get_board(&999);
@@ -1403,7 +1414,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let contracts = client.get_contracts();
         assert_eq!(contracts.permissions, permissions);
@@ -1426,7 +1438,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "Private Board");
@@ -1455,7 +1468,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         assert_eq!(client.board_count(), 0);
 
@@ -1488,7 +1502,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // List boards when none exist
         let boards = client.list_boards(&0, &10);
@@ -1509,7 +1524,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Test each alias
         assert_eq!(
@@ -1554,7 +1570,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Register a new contract (e.g., profile service)
         let profile_contract = Address::generate(&env);
@@ -1595,7 +1612,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let desc = String::from_str(&env, "Description");
@@ -1643,7 +1661,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let desc = String::from_str(&env, "Description");
@@ -1685,7 +1704,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "TestBoard");
@@ -1719,7 +1739,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "OriginalName");
@@ -1749,7 +1770,8 @@ mod test {
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        client.init(&admin, &permissions, &content, &theme, &admin_contract);
+        let admins = Vec::from_array(&env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         let creator = Address::generate(&env);
         let name = String::from_str(&env, "SameName");

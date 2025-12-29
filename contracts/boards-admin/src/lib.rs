@@ -236,6 +236,13 @@ impl BoardsAdmin {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_voting(&env, board_id, &viewer)
             })
+            // Registry admin routes
+            .or_handle(b"/registry", |_| {
+                Self::render_registry_admin(&env, &viewer)
+            })
+            .or_handle(b"/admin/registry", |_| {
+                Self::render_registry_admin(&env, &viewer)
+            })
             // Default - show not found
             .or_default(|_| Self::render_not_found(&env))
     }
@@ -254,7 +261,9 @@ impl BoardsAdmin {
 
     /// Append footer to builder
     fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.hr()
+        md.newline()
+            .newline()
+            .hr()
             .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
     }
 
@@ -1276,6 +1285,98 @@ impl BoardsAdmin {
         } else {
             md = md.note("Voting contract is not configured for this board. Voting features are disabled.");
         }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render registry admin page
+    fn render_registry_admin(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let mut md = MarkdownBuilder::new(env)
+            .render_link("Soroban Boards", "/")
+            .newline()
+            .hr()
+            .h1("Registry Administration");
+
+        if viewer.is_none() {
+            md = md.warning("Please connect your wallet to access registry admin.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let viewer_addr = viewer.as_ref().unwrap();
+
+        // Get all admins
+        let admins: Vec<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_admins"),
+            Vec::new(env),
+        );
+
+        // Check if viewer is an admin
+        let viewer_is_admin: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "is_admin"),
+            Vec::from_array(env, [viewer_addr.into_val(env)]),
+        );
+
+        md = md
+            .h2("Current Admins")
+            .raw_str("<ul>\n");
+
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            md = md
+                .raw_str("<li><code>")
+                .text_string(&admin.to_string())
+                .raw_str("</code></li>\n");
+        }
+
+        md = md.raw_str("</ul>\n").newline();
+
+        // If viewer is admin, show add/remove admin forms
+        if viewer_is_admin {
+            md = md
+                .h2("Add Admin")
+                .raw_str("<form>\n")
+                .raw_str("<input type=\"text\" name=\"new_admin\" placeholder=\"Address (G...)\" style=\"width:100%;max-width:400px;\" />\n")
+                .raw_str("<p><a class=\"soroban-action\" href=\"form:@registry:add_admin\">Add Admin</a></p>\n")
+                .raw_str("</form>\n")
+                .newline();
+
+            if admins.len() > 1 {
+                md = md
+                    .h2("Remove Admin")
+                    .raw_str("<form>\n")
+                    .raw_str("<input type=\"text\" name=\"admin_to_remove\" placeholder=\"Address (G...)\" style=\"width:100%;max-width:400px;\" />\n")
+                    .raw_str("<p><a class=\"soroban-action\" href=\"form:@registry:remove_admin\">Remove Admin</a></p>\n")
+                    .raw_str("</form>\n")
+                    .newline();
+            }
+        }
+
+        // Show viewer's address for reference
+        md = md
+            .newline()
+            .h2("Your Address")
+            .raw_str("<p><code>")
+            .text_string(&viewer_addr.to_string())
+            .raw_str("</code>");
+
+        if viewer_is_admin {
+            md = md.raw_str(" <span style=\"color:green;\">(Admin)</span>");
+        }
+
+        md = md.raw_str("</p>");
+
+        // Add link back to home
+        md = md
+            .newline()
+            .render_link("← Back to Home", "/");
 
         Self::render_footer_into(md).build()
     }

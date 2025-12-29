@@ -1465,6 +1465,15 @@ impl BoardsBoard {
                 args,
             );
             md = md.raw(profile_link);
+        } else if viewer.is_some() {
+            // No profile contract registered - show a placeholder link
+            let mut return_path = Bytes::from_slice(env, b"@main:/b/");
+            return_path.append(&Self::u64_to_bytes(env, board_id));
+
+            md = md
+                .raw_str("<a href=\"render:@profile:/register/from/")
+                .raw(return_path)
+                .raw_str("\">Create Profile</a>");
         }
 
         md.div_end()
