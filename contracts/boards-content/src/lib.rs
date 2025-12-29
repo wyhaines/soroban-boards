@@ -56,6 +56,13 @@ pub enum ContentKey {
     ReplyChonk(u64, u64, u64),
     /// List of flagged content for a board (board_id) -> Vec<FlaggedItem>
     FlaggedContent(u64),
+    /// Crosspost reference (target_board_id, target_thread_id) -> CrosspostRef
+    /// Stored on the crossposted thread, points back to original
+    CrosspostRef(u64, u64),
+    /// Crosspost count for a thread (original_board_id, original_thread_id) -> u32
+    CrosspostCount(u64, u64),
+    /// List of locations where thread was crossposted (original_board_id, original_thread_id) -> Vec<CrosspostLocation>
+    CrosspostList(u64, u64),
 }
 
 /// Reply metadata
@@ -104,6 +111,27 @@ pub struct FlaggedItem {
     pub item_type: FlaggedType,
     pub flag_count: u32,
     pub first_flagged_at: u64,
+}
+
+/// Reference to the original thread (stored on crossposted thread)
+#[contracttype]
+#[derive(Clone)]
+pub struct CrosspostRef {
+    pub original_board_id: u64,
+    pub original_thread_id: u64,
+    pub original_title: String,
+    pub original_author: Address,
+    pub crossposted_by: Address,
+    pub crossposted_at: u64,
+}
+
+/// Location where a thread has been crossposted (stored on original thread)
+#[contracttype]
+#[derive(Clone)]
+pub struct CrosspostLocation {
+    pub board_id: u64,
+    pub thread_id: u64,
+    pub created_at: u64,
 }
 
 #[contract]
@@ -1276,6 +1304,176 @@ impl BoardsContent {
     pub fn get_chunk_count(env: Env, collection: Symbol) -> u32 {
         let chonk = Chonk::open(&env, collection);
         chonk.count()
+    }
+
+    // ==================== Crossposting Functions ====================
+
+    /// Create a crosspost of a thread to another board
+    /// Returns the new thread ID in the target board
+    ///
+    /// The crossposted thread is a reference to the original, with optional comment
+    pub fn create_crosspost(
+        env: Env,
+        target_board_id: u64,
+        original_board_id: u64,
+        original_thread_id: u64,
+        comment: String,
+        caller: Address,
+    ) -> Result<u64, ContentError> {
+        caller.require_auth();
+
+        // Get registry
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ContentKey::Registry)
+            .ok_or(ContentError::NotInitialized)?;
+
+        // Check target board is not readonly
+        Self::check_board_not_readonly(&env, &registry, target_board_id)?;
+
+        // Get original board contract to fetch thread metadata
+        let orig_args: Vec<Val> = Vec::from_array(&env, [original_board_id.into_val(&env)]);
+        let original_board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                orig_args,
+            )
+            .expect("Original board contract not found");
+
+        // Get original thread metadata
+        let thread_args: Vec<Val> = Vec::from_array(&env, [original_thread_id.into_val(&env)]);
+        let original_thread: Option<(String, Address)> = env
+            .try_invoke_contract::<Option<(String, Address)>, soroban_sdk::Error>(
+                &original_board_contract,
+                &Symbol::new(&env, "get_thread_title_and_author"),
+                thread_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let (original_title, original_author) = original_thread.expect("Original thread not found");
+
+        // Get target board contract
+        let target_args: Vec<Val> = Vec::from_array(&env, [target_board_id.into_val(&env)]);
+        let target_board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                target_args,
+            )
+            .expect("Target board contract not found");
+
+        // Create title with crosspost indicator
+        let mut title_buf = [0u8; 256];
+        let title_len = original_title.len() as usize;
+        if title_len > 0 && title_len <= 200 {
+            original_title.copy_into_slice(&mut title_buf[..title_len]);
+        }
+        let crosspost_title = String::from_str(&env, "[Crosspost] ");
+        // Just use original title with prefix for simplicity
+        let _ = crosspost_title; // Prefix would go here in more complex impl
+
+        // Create thread in target board
+        let create_args: Vec<Val> = Vec::from_array(
+            &env,
+            [original_title.clone().into_val(&env), caller.clone().into_val(&env)],
+        );
+        let new_thread_id: u64 = env.invoke_contract(
+            &target_board_contract,
+            &Symbol::new(&env, "create_thread"),
+            create_args,
+        );
+
+        // Store the crosspost reference on the new thread
+        let crosspost_ref = CrosspostRef {
+            original_board_id,
+            original_thread_id,
+            original_title,
+            original_author,
+            crossposted_by: caller.clone(),
+            crossposted_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&ContentKey::CrosspostRef(target_board_id, new_thread_id), &crosspost_ref);
+
+        // Store comment as thread body if provided
+        if comment.len() > 0 {
+            let comment_len = comment.len() as usize;
+            let comment_bytes = if comment_len <= 16384 {
+                let mut temp = [0u8; 16384];
+                comment.copy_into_slice(&mut temp[..comment_len]);
+                Bytes::from_slice(&env, &temp[..comment_len])
+            } else {
+                let mut temp = [0u8; 16384];
+                comment.copy_into_slice(&mut temp[..16384]);
+                Bytes::from_slice(&env, &temp)
+            };
+            let key = Self::get_or_create_thread_body_chonk(&env, target_board_id, new_thread_id);
+            let chonk = Chonk::open(&env, key);
+            chonk.write_chunked(comment_bytes, 4096);
+        }
+
+        // Update crosspost count and list on original thread
+        let count: u32 = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::CrosspostCount(original_board_id, original_thread_id))
+            .unwrap_or(0);
+        env.storage()
+            .persistent()
+            .set(&ContentKey::CrosspostCount(original_board_id, original_thread_id), &(count + 1));
+
+        let mut crosspost_list: Vec<CrosspostLocation> = env
+            .storage()
+            .persistent()
+            .get(&ContentKey::CrosspostList(original_board_id, original_thread_id))
+            .unwrap_or(Vec::new(&env));
+        crosspost_list.push_back(CrosspostLocation {
+            board_id: target_board_id,
+            thread_id: new_thread_id,
+            created_at: env.ledger().timestamp(),
+        });
+        env.storage()
+            .persistent()
+            .set(&ContentKey::CrosspostList(original_board_id, original_thread_id), &crosspost_list);
+
+        // Increment thread count in registry
+        let incr_args: Vec<Val> = Vec::from_array(&env, [target_board_id.into_val(&env)]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(&env, "increment_thread_count"),
+            incr_args,
+        );
+
+        Ok(new_thread_id)
+    }
+
+    /// Get crosspost reference for a thread (returns None if not a crosspost)
+    pub fn get_crosspost_ref(env: Env, board_id: u64, thread_id: u64) -> Option<CrosspostRef> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::CrosspostRef(board_id, thread_id))
+    }
+
+    /// Get the number of times a thread has been crossposted
+    pub fn get_crosspost_count(env: Env, board_id: u64, thread_id: u64) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::CrosspostCount(board_id, thread_id))
+            .unwrap_or(0)
+    }
+
+    /// List all locations where a thread has been crossposted
+    pub fn list_crossposts(env: Env, board_id: u64, thread_id: u64) -> Vec<CrosspostLocation> {
+        env.storage()
+            .persistent()
+            .get(&ContentKey::CrosspostList(board_id, thread_id))
+            .unwrap_or(Vec::new(&env))
     }
 
     /// Upgrade the contract WASM

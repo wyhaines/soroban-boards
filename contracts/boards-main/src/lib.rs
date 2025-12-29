@@ -132,6 +132,8 @@ impl BoardsMain {
             .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
             // Help page
             .or_handle(b"/help", |_| Self::render_help(&env, &viewer))
+            // Crosspost form
+            .or_handle(b"/crosspost*", |_| Self::render_crosspost(&env, &path, &viewer))
             // Admin routes - delegate to admin contract
             .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
@@ -402,6 +404,168 @@ impl BoardsMain {
             .list_item("Create threads and reply to discussions")
             .list_item("Flag inappropriate content");
         Self::render_footer_into(md).build()
+    }
+
+    /// Render crosspost form
+    /// Path format: /crosspost?from_board={id}&from_thread={id}
+    fn render_crosspost(env: &Env, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_nav(env, viewer)
+            .newline()
+            .h1("Crosspost Thread");
+
+        if viewer.is_none() {
+            md = md.warning("Please connect your wallet to crosspost.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Parse query params from path
+        let (from_board, from_thread) = if let Some(ref p) = path {
+            Self::parse_crosspost_params(env, p)
+        } else {
+            (0u64, 0u64)
+        };
+
+        if from_board == 0 || from_thread == 0 {
+            md = md.warning("Invalid crosspost parameters.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get registry and content contract
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        // Get original board contract to get thread title
+        let board_args: Vec<Val> = Vec::from_array(env, [from_board.into_val(env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            board_args,
+        );
+
+        let Some(board_contract) = board_contract_opt else {
+            md = md.warning("Original board not found.");
+            return Self::render_footer_into(md).build();
+        };
+
+        // Get thread title
+        let thread_args: Vec<Val> = Vec::from_array(env, [from_thread.into_val(env)]);
+        let thread_info: Option<(String, Address)> = env
+            .try_invoke_contract::<Option<(String, Address)>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_thread_title_and_author"),
+                thread_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let Some((thread_title, _author)) = thread_info else {
+            md = md.warning("Original thread not found.");
+            return Self::render_footer_into(md).build();
+        };
+
+        // Get board list for target selection
+        let boards_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 100u64.into_val(env)]);
+        let boards: Vec<BoardMeta> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "list_boards"),
+            boards_args,
+        );
+
+        md = md
+            .paragraph("Share this thread to another board.")
+            .newline()
+            .raw_str("<div class=\"crosspost-preview\">")
+            .raw_str("<strong>Thread:</strong> ")
+            .text_string(&thread_title)
+            .raw_str("<br><strong>From:</strong> Board #")
+            .number(from_board as u32)
+            .raw_str("</div>\n")
+            .newline()
+            // Target board selection
+            .raw_str("<div class=\"form-group\">")
+            .raw_str("<label>Target Board:</label>\n")
+            .raw_str("<select name=\"target_board_id\">\n");
+
+        // Add board options (excluding the source board)
+        for i in 0..boards.len() {
+            let board = boards.get(i).unwrap();
+            if board.id != from_board {
+                md = md.raw_str("<option value=\"")
+                    .number(board.id as u32)
+                    .raw_str("\">")
+                    .text_string(&board.name)
+                    .raw_str("</option>\n");
+            }
+        }
+
+        md = md.raw_str("</select>\n")
+            .raw_str("</div>\n")
+            .newline()
+            // Optional comment
+            .textarea("comment", 3, "Add a comment (optional)")
+            .newline()
+            // Hidden fields
+            .raw_str("<input type=\"hidden\" name=\"original_board_id\" value=\"")
+            .number(from_board as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"original_thread_id\" value=\"")
+            .number(from_thread as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer.as_ref().unwrap().to_string())
+            .raw_str("\" />\n")
+            // Redirect after crosspost
+            .redirect("/")
+            .newline()
+            // Submit button
+            .form_link_to("Crosspost", "content", "create_crosspost")
+            .newline()
+            .newline()
+            .raw_str("[Cancel](render:/b/")
+            .number(from_board as u32)
+            .raw_str("/t/")
+            .number(from_thread as u32)
+            .raw_str(")");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Parse crosspost query parameters from path
+    fn parse_crosspost_params(_env: &Env, path: &String) -> (u64, u64) {
+        let mut from_board: u64 = 0;
+        let mut from_thread: u64 = 0;
+
+        // Simple parsing for ?from_board=X&from_thread=Y
+        let path_len = path.len() as usize;
+        if path_len > 0 && path_len <= 256 {
+            let mut buf = [0u8; 256];
+            path.copy_into_slice(&mut buf[..path_len]);
+            let path_str = core::str::from_utf8(&buf[..path_len]).unwrap_or("");
+
+            // Find from_board=
+            if let Some(start) = path_str.find("from_board=") {
+                let start = start + 11;
+                let end = path_str[start..].find('&').map(|i| start + i).unwrap_or(path_len);
+                if let Ok(val) = path_str[start..end].parse::<u64>() {
+                    from_board = val;
+                }
+            }
+
+            // Find from_thread=
+            if let Some(start) = path_str.find("from_thread=") {
+                let start = start + 12;
+                let end = path_str[start..].find('&').map(|i| start + i).unwrap_or(path_len);
+                if let Ok(val) = path_str[start..end].parse::<u64>() {
+                    from_thread = val;
+                }
+            }
+        }
+
+        (from_board, from_thread)
     }
 
     // ========================================================================

@@ -131,6 +131,18 @@ pub struct FlairDef {
     pub enabled: bool,      // Whether flair is active
 }
 
+/// Crosspost reference from content contract
+#[contracttype]
+#[derive(Clone)]
+pub struct CrosspostRef {
+    pub original_board_id: u64,
+    pub original_thread_id: u64,
+    pub original_title: String,
+    pub original_author: Address,
+    pub crossposted_by: Address,
+    pub crossposted_at: u64,
+}
+
 #[contract]
 pub struct BoardsBoard;
 
@@ -863,6 +875,12 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .get(&BoardKey::Thread(thread_id))
+    }
+
+    /// Get thread title and author (for crossposting)
+    pub fn get_thread_title_and_author(env: Env, thread_id: u64) -> Option<(String, Address)> {
+        let thread: Option<ThreadMeta> = env.storage().persistent().get(&BoardKey::Thread(thread_id));
+        thread.map(|t| (t.title, t.creator))
     }
 
     /// List threads with pagination
@@ -1952,6 +1970,36 @@ impl BoardsBoard {
             md = md.newline();
         }
 
+        // Check if this is a crosspost and show header
+        let crosspost_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let crosspost_ref: Option<CrosspostRef> = env
+            .try_invoke_contract::<Option<CrosspostRef>, soroban_sdk::Error>(
+                &content,
+                &Symbol::new(env, "get_crosspost_ref"),
+                crosspost_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        if let Some(ref xpost) = crosspost_ref {
+            md = md.div_start("crosspost-header")
+                .raw_str("<span class=\"crosspost-badge\">⤴ Crosspost</span> ")
+                .raw_str("Originally posted in ")
+                .raw_str("[Board #")
+                .number(xpost.original_board_id as u32)
+                .raw_str("](render:/b/")
+                .number(xpost.original_board_id as u32)
+                .raw_str("/t/")
+                .number(xpost.original_thread_id as u32)
+                .raw_str(") by ");
+            // Show original author
+            let return_path = Self::build_thread_return_path(env, board_id, thread_id);
+            md = Self::render_author(env, md, &xpost.original_author, &profile_contract, Some(return_path.clone()));
+            md = md.div_end()
+                .newline();
+        }
+
         // Thread body in a container
         md = md.div_start("thread-body");
 
@@ -2076,6 +2124,38 @@ impl BoardsBoard {
                         .raw_str("/t/")
                         .number(thread_id as u32)
                         .raw_str("/edit)");
+                }
+            }
+
+            // Crosspost button (only if not already a crosspost)
+            if crosspost_ref.is_none() {
+                md = md.text(" ")
+                    .raw_str("[Crosspost](render:/crosspost?from_board=")
+                    .number(board_id as u32)
+                    .raw_str("&from_thread=")
+                    .number(thread_id as u32)
+                    .raw_str(")");
+
+                // Show crosspost count if any
+                let xpost_count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+                let xpost_count: u32 = env
+                    .try_invoke_contract::<u32, soroban_sdk::Error>(
+                        &content,
+                        &Symbol::new(env, "get_crosspost_count"),
+                        xpost_count_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0);
+
+                if xpost_count > 0 {
+                    md = md.raw_str(" <span class=\"crosspost-count\">")
+                        .number(xpost_count)
+                        .raw_str(" crosspost");
+                    if xpost_count > 1 {
+                        md = md.raw_str("s");
+                    }
+                    md = md.raw_str("</span>");
                 }
             }
 

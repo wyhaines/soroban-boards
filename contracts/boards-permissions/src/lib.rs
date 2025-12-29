@@ -60,6 +60,18 @@ pub struct CommunityBan {
     pub expires_at: Option<u64>,
 }
 
+/// User flair (badge) for a specific board
+/// Displayed next to user's name in posts/replies
+#[contracttype]
+#[derive(Clone)]
+pub struct UserFlair {
+    pub text: String,       // max 24 chars
+    pub color: String,      // CSS text color
+    pub bg_color: String,   // CSS background color
+    pub granted_by: Address,
+    pub granted_at: u64,
+}
+
 /// Storage keys for the permissions contract
 #[contracttype]
 #[derive(Clone)]
@@ -107,6 +119,8 @@ pub enum PermKey {
     CommunityMembers(u64),
     /// List of banned users for a community
     CommunityBannedUsers(u64),
+    /// User flair for a board (board_id, user) -> UserFlair
+    UserFlair(u64, Address),
 }
 
 /// Permission check result with all relevant permissions
@@ -1313,6 +1327,68 @@ impl BoardsPermissions {
             can_admin: effective_role as u32 >= Role::Admin as u32,
             is_banned: false,
         }
+    }
+
+    // ==================== User Flair Functions ====================
+
+    /// Set a user's flair (badge) for a board
+    /// Only Moderator+ can set user flairs
+    pub fn set_user_flair(
+        env: Env,
+        board_id: u64,
+        user: Address,
+        text: String,
+        color: String,
+        bg_color: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        // Check caller has Moderator+ permissions
+        let caller_role = Self::get_role(env.clone(), board_id, caller.clone());
+        if (caller_role as u32) < (Role::Moderator as u32) {
+            panic!("Only moderator+ can set user flairs");
+        }
+
+        // Validate text length (max 24 chars)
+        if text.len() > 24 {
+            panic!("Flair text too long (max 24 chars)");
+        }
+
+        let flair = UserFlair {
+            text,
+            color,
+            bg_color,
+            granted_by: caller,
+            granted_at: env.ledger().timestamp(),
+        };
+
+        env.storage()
+            .persistent()
+            .set(&PermKey::UserFlair(board_id, user), &flair);
+    }
+
+    /// Get a user's flair for a board
+    pub fn get_user_flair(env: Env, board_id: u64, user: Address) -> Option<UserFlair> {
+        env.storage()
+            .persistent()
+            .get(&PermKey::UserFlair(board_id, user))
+    }
+
+    /// Remove a user's flair from a board
+    /// Only Moderator+ can remove user flairs
+    pub fn remove_user_flair(env: Env, board_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        // Check caller has Moderator+ permissions
+        let caller_role = Self::get_role(env.clone(), board_id, caller);
+        if (caller_role as u32) < (Role::Moderator as u32) {
+            panic!("Only moderator+ can remove user flairs");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&PermKey::UserFlair(board_id, user));
     }
 
     /// Upgrade the contract WASM

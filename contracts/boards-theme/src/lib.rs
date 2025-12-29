@@ -380,6 +380,13 @@ impl BoardsTheme {
             .rule(".flair-selector select", "padding: var(--space-xs) var(--space-sm); border: 1px solid var(--border); border-radius: 4px; font-size: 0.875rem; background: var(--bg); cursor: pointer; min-width: 150px;")
             .rule(".flair-selector select:focus", "outline: none; border-color: var(--primary);")
             .rule(".flair-selector .required", "color: var(--danger);")
+            // User flair (badges)
+            .rule(".user-flair", "display: inline-block; padding: 0.125rem 0.375rem; border-radius: 3px; font-size: 0.625rem; font-weight: 600; margin-left: var(--space-xs); vertical-align: middle;")
+            // Crosspost styles
+            .rule(".crosspost-header", "background: var(--bg-muted); padding: var(--space-sm) var(--space-md); border-radius: 6px; margin-bottom: var(--space-md); font-size: 0.875rem; border-left: 3px solid var(--primary);")
+            .rule(".crosspost-badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--primary); color: white; border-radius: 3px; font-size: 0.75rem; font-weight: 600; margin-right: var(--space-xs);")
+            .rule(".crosspost-count", "color: var(--text-muted); font-size: 0.875rem; margin-left: var(--space-xs);")
+            .rule(".crosspost-preview", "background: var(--bg-muted); padding: var(--space-md); border-radius: 6px; margin-bottom: var(--space-md);")
             // Vote buttons and scoring
             .rule(".vote-buttons", "display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md);")
             .rule(".vote-up, .vote-down", "display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 4px; background: var(--bg-muted); color: var(--text-muted); text-decoration: none; font-size: 1rem; transition: all 0.15s;")
