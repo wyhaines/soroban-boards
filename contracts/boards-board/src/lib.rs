@@ -145,6 +145,15 @@ pub struct CrosspostRef {
     pub crossposted_at: u64,
 }
 
+/// Community info for navigation (minimal struct for cross-contract calls)
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityInfo {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+}
+
 #[contract]
 pub struct BoardsBoard;
 
@@ -1479,6 +1488,41 @@ impl BoardsBoard {
         md.div_end()
     }
 
+    /// Render back navigation with optional community link
+    /// Shows "← Community Name" if board is in a community, plus "← Home"
+    fn render_back_nav<'a>(env: &'a Env, mut md: MarkdownBuilder<'a>, board_id: u64) -> MarkdownBuilder<'a> {
+        md = md.div_start("back-nav");
+
+        // Check if board is in a community
+        if let Some(community) = Self::get_board_community(env, board_id) {
+            // Build community display name
+            let mut display_buf = [0u8; 64];
+            let display_len = community.display_name.len() as usize;
+            let display_copy_len = core::cmp::min(display_len, 60);
+            community.display_name.copy_into_slice(&mut display_buf[0..display_copy_len]);
+            let display = core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
+
+            // Build community name for URL
+            let mut name_buf = [0u8; 32];
+            let name_len = community.name.len() as usize;
+            let name_copy_len = core::cmp::min(name_len, 32);
+            community.name.copy_into_slice(&mut name_buf[0..name_copy_len]);
+            let name = core::str::from_utf8(&name_buf[0..name_copy_len]).unwrap_or("");
+
+            // Community link
+            md = md.raw_str("<a href=\"render:/c/")
+                .raw_str(name)
+                .raw_str("\" class=\"back-link back-community\">← ")
+                .raw_str(display)
+                .raw_str("</a>");
+        }
+
+        // Home link (always shown)
+        md = md.raw_str("<a href=\"render:/\" class=\"back-link back-home\">← Home</a>");
+
+        md.div_end()
+    }
+
     /// Append footer to builder
     fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
         md.div_start("footer")
@@ -1607,9 +1651,9 @@ impl BoardsBoard {
             }
         }
 
-        let mut md = Self::render_nav(env, board_id, viewer)
-            .render_link("< Back", "/")
-            .div_start("page-header")
+        let mut md = Self::render_nav(env, board_id, viewer);
+        md = Self::render_back_nav(env, md, board_id);
+        md = md.div_start("page-header")
             .raw_str("<h1>")
             .text_string(&config.name)
             .raw_str("</h1>")
@@ -1763,9 +1807,9 @@ impl BoardsBoard {
         viewer: &Option<Address>,
         perms_addr: &Address,
     ) -> Bytes {
-        let mut md = Self::render_nav(env, board_id, viewer)
-            .render_link("< Back", "/")
-            .div_start("page-header")
+        let mut md = Self::render_nav(env, board_id, viewer);
+        md = Self::render_back_nav(env, md, board_id);
+        md = md.div_start("page-header")
             .raw_str("<h1>")
             .text_string(&config.name)
             .raw_str("</h1>")
@@ -3100,6 +3144,41 @@ impl BoardsBoard {
         // Look up profile contract from registry using get_contract
         let args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
         env.invoke_contract(&registry, &Symbol::new(env, "get_contract"), args)
+    }
+
+    /// Get the community this board belongs to (if any)
+    fn get_board_community(env: &Env, board_id: u64) -> Option<CommunityInfo> {
+        let registry: Address = env.storage().instance().get(&BoardKey::Registry)?;
+
+        // Query registry for board's community ID
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let community_id_opt: Option<u64> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_community"),
+            args,
+        );
+
+        let community_id = community_id_opt?;
+
+        // Get community contract address from registry
+        let comm_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "community").into_val(env)]);
+        let community_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract"),
+            comm_args,
+        );
+
+        let community_addr = community_contract?;
+
+        // Fetch community metadata
+        let meta_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
+        let community_meta: Option<CommunityInfo> = env.invoke_contract(
+            &community_addr,
+            &Symbol::new(env, "get_community_info"),
+            meta_args,
+        );
+
+        community_meta
     }
 
     /// Render author info (username link or truncated address)

@@ -90,6 +90,15 @@ pub struct BoardMeta {
     pub is_private: bool,
 }
 
+/// Minimal community info for navigation (used by board contract)
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityInfo {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+}
+
 /// Role levels (mirrors permissions contract)
 #[contracttype]
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -272,6 +281,19 @@ impl BoardsCommunity {
         env.storage()
             .persistent()
             .get(&CommunityKey::Community(community_id))
+    }
+
+    /// Get minimal community info for navigation (used by board contract)
+    pub fn get_community_info(env: Env, community_id: u64) -> Option<CommunityInfo> {
+        let community: CommunityMeta = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::Community(community_id))?;
+        Some(CommunityInfo {
+            id: community.id,
+            name: community.name,
+            display_name: community.display_name,
+        })
     }
 
     /// Get community by name (case-insensitive)
@@ -1090,6 +1112,13 @@ impl BoardsCommunity {
         let desc = core::str::from_utf8(&desc_buf[0..desc_copy_len]).unwrap_or("");
 
         let mut builder = MarkdownBuilder::new(env);
+
+        // Back navigation
+        builder = builder.raw_str("<div class=\"back-nav\">");
+        builder = builder.raw_str("<a href=\"render:/communities\" class=\"back-link\">← Communities</a>");
+        builder = builder.raw_str("</div>\n");
+
+        builder = builder.newline();
         builder = builder.h1(display);
         builder = builder.paragraph(desc);
 
@@ -1201,10 +1230,19 @@ impl BoardsCommunity {
 
         let mut builder = MarkdownBuilder::new(env);
 
+        // Back navigation to community
+        builder = builder.raw_str("<div class=\"back-nav\">");
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("\" class=\"back-link\">← Back to Community</a>");
+        builder = builder.raw_str("</div>\n");
+
         // Title
+        builder = builder.newline();
         builder = builder.h1("Community Settings");
 
         // Basic Info Section
+        builder = builder.newline();
         builder = builder.h2("Basic Information");
         builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
         builder = builder.number(community.id as u32);
@@ -1337,6 +1375,15 @@ impl BoardsCommunity {
         }
 
         let mut builder = MarkdownBuilder::new(env);
+
+        // Back navigation to settings
+        builder = builder.raw_str("<div class=\"back-nav\">");
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/settings\" class=\"back-link\">← Back to Settings</a>");
+        builder = builder.raw_str("</div>\n");
+
+        builder = builder.newline();
         builder = builder.h1("Delete Community");
 
         if community.board_count > 0 {

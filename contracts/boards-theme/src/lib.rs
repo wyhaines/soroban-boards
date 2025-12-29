@@ -298,8 +298,15 @@ impl BoardsTheme {
             .rule("pre", "overflow-x: auto; padding: var(--space-md); background: var(--bg-muted); border-radius: 4px;")
             // Navigation bar
             .rule(".nav-bar", "display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; padding: var(--space-sm) 0; margin-bottom: var(--space-md);")
-            .rule(".nav-bar a", "padding: var(--space-xs) var(--space-sm); background: var(--bg-muted); border-radius: 4px; font-size: 0.875rem;")
-            .rule(".nav-bar a:hover", "background: var(--border); text-decoration: none;")
+            .rule(".nav-bar a", "padding: var(--space-xs) var(--space-sm); background: var(--bg-muted); border-radius: 4px; font-size: 0.875rem; color: var(--text) !important; text-decoration: none !important;")
+            .rule(".nav-bar a:hover", "background: var(--border); text-decoration: none !important; color: var(--primary) !important;")
+            // Back navigation (community + home links) - use high specificity to override viewer styles
+            .rule(".back-nav", "display: flex; flex-wrap: wrap; gap: var(--space-sm); align-items: center; margin-bottom: var(--space-md); font-size: 0.875rem;")
+            .rule(".back-nav a.back-link", "background: none !important; padding: 0 !important; color: var(--text-muted) !important; text-decoration: none !important; transition: color 0.15s;")
+            .rule(".back-nav a.back-link:hover", "background: none !important; color: var(--primary) !important; text-decoration: none !important;")
+            .rule(".back-nav a.back-community", "color: var(--primary) !important; font-weight: 500;")
+            .rule(".back-nav a.back-community:hover", "color: var(--primary-hover) !important;")
+            .rule(".back-nav a.back-community::after", "content: '·'; margin-left: var(--space-sm); color: var(--text-muted); font-weight: normal;")
             // Page header
             .rule(".page-header", "margin-bottom: var(--space-lg);")
             .rule(".page-header h1", "margin-bottom: var(--space-xs);")
