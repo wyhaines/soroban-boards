@@ -104,6 +104,29 @@ pub struct InviteRequest {
     pub created_at: u64,
 }
 
+/// Flair definition from board contract
+#[contracttype]
+#[derive(Clone)]
+pub struct FlairDef {
+    pub id: u32,
+    pub name: String,
+    pub color: String,
+    pub bg_color: String,
+    pub required: bool,
+    pub mod_only: bool,
+    pub enabled: bool,
+}
+
+/// Voting configuration from voting contract
+#[contracttype]
+#[derive(Clone)]
+pub struct VotingConfig {
+    pub enabled: bool,
+    pub allow_downvotes: bool,
+    pub karma_enabled: bool,
+    pub karma_multiplier: u32,
+}
+
 #[contract]
 pub struct BoardsAdmin;
 
@@ -200,6 +223,18 @@ impl BoardsAdmin {
             .or_handle(b"/b/{id}/settings", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_settings(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/flairs", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_flairs(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/rules", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_rules(&env, board_id, &viewer)
+            })
+            .or_handle(b"/b/{id}/voting", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_voting(&env, board_id, &viewer)
             })
             // Default - show not found
             .or_default(|_| Self::render_not_found(&env))
@@ -941,7 +976,306 @@ impl BoardsAdmin {
             .text(" | ")
             .raw_str("[View Flag Queue](render:/admin/b/")
             .number(board_id as u32)
-            .raw_str("/flags)");
+            .raw_str("/flags)")
+            .newline()
+            .raw_str("[Manage Flairs](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/flairs)")
+            .text(" | ")
+            .raw_str("[Edit Rules](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/rules)")
+            .text(" | ")
+            .raw_str("[Voting Config](render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/voting)");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render flair management page
+    fn render_flairs(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env, board_id)
+            .h1("Flair Management");
+
+        // Check if viewer has admin permission
+        let can_admin = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_admin
+        } else {
+            false
+        };
+
+        if !can_admin {
+            md = md.warning("You must be an admin to manage flairs.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get board contract
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if let Some(board_addr) = board_contract {
+            // Get existing flairs
+            let flairs: Vec<FlairDef> = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "list_flairs"),
+                Vec::new(env),
+            );
+
+            md = md.h2("Current Flairs");
+
+            if flairs.is_empty() {
+                md = md.paragraph("No flairs defined yet. Create one below.");
+            } else {
+                for i in 0..flairs.len() {
+                    let flair = flairs.get(i).unwrap();
+                    md = md.hr()
+                        .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; background: ")
+                        .text_string(&flair.bg_color)
+                        .raw_str("; color: ")
+                        .text_string(&flair.color)
+                        .raw_str(";\">")
+                        .text_string(&flair.name)
+                        .raw_str("</div>")
+                        .newline()
+                        .text("**ID:** ").number(flair.id).newline()
+                        .text("**Enabled:** ").text(if flair.enabled { "Yes" } else { "No" }).newline()
+                        .text("**Required:** ").text(if flair.required { "Yes" } else { "No" }).newline()
+                        .text("**Mod Only:** ").text(if flair.mod_only { "Yes" } else { "No" }).newline();
+
+                    if flair.enabled {
+                        md = md.raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                            .number(board_id as u32)
+                            .raw_str("\" />\n")
+                            .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
+                            .number(flair.id)
+                            .raw_str("\" />\n")
+                            .form_link_to("Disable", "admin", "disable_flair");
+                    }
+                }
+            }
+
+            // Create new flair form
+            md = md.hr()
+                .h2("Create New Flair")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .input("name", "Flair name (max 32 chars)")
+                .newline()
+                .input("color", "Text color (e.g., #ffffff)")
+                .newline()
+                .input("bg_color", "Background color (e.g., #ff4500)")
+                .newline()
+                .raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n")
+                .raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n")
+                .form_link_to("Create Flair", "admin", "create_flair");
+        } else {
+            md = md.warning("Board contract not found.");
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render rules editor page
+    fn render_rules(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env, board_id)
+            .h1("Board Rules Editor");
+
+        // Check if viewer has admin permission
+        let can_admin = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_admin
+        } else {
+            false
+        };
+
+        if !can_admin {
+            md = md.warning("You must be an admin to edit board rules.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get board contract
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board_contract"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
+
+        if let Some(board_addr) = board_contract {
+            // Get current rules
+            let current_rules: Option<String> = env.invoke_contract(
+                &board_addr,
+                &Symbol::new(env, "get_rules"),
+                Vec::new(env),
+            );
+
+            md = md.h2("Current Rules");
+
+            if let Some(ref rules) = current_rules {
+                if rules.len() > 0 {
+                    md = md.div_start("rules-content")
+                        .text_string(rules)
+                        .div_end()
+                        .newline()
+                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        .number(board_id as u32)
+                        .raw_str("\" />\n")
+                        .form_link_to("Clear Rules", "admin", "clear_rules")
+                        .newline();
+                } else {
+                    md = md.paragraph("No rules set.");
+                }
+            } else {
+                md = md.paragraph("No rules set.");
+            }
+
+            // Edit rules form
+            md = md.hr()
+                .h2("Edit Rules")
+                .note("Rules are displayed on the board page and when creating new threads. Use plain text or Markdown.")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
+                .number(board_id as u32)
+                .raw_str("/rules\" />\n")
+                .textarea("rules", 10, "Enter board rules here...");
+
+            // Pre-fill with current rules if available
+            if let Some(rules) = current_rules {
+                if rules.len() > 0 {
+                    // Note: Can't pre-fill textarea in this setup, user needs to re-enter
+                    md = md.note("Copy existing rules above and paste into the text area if you want to edit.");
+                }
+            }
+
+            md = md.newline()
+                .form_link_to("Save Rules", "admin", "set_rules");
+        } else {
+            md = md.warning("Board contract not found.");
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render voting configuration page
+    fn render_voting(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        let mut md = Self::render_nav(env, board_id)
+            .h1("Voting Configuration");
+
+        // Check if viewer has admin permission
+        let can_admin = if let Some(user) = viewer {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let perms: PermissionSet = env.invoke_contract(
+                &permissions,
+                &Symbol::new(env, "get_permissions"),
+                args,
+            );
+            perms.can_admin
+        } else {
+            false
+        };
+
+        if !can_admin {
+            md = md.warning("You must be an admin to configure voting.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get voting contract from registry
+        let voting_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_voting_contract"),
+            Vec::new(env),
+        );
+
+        if let Some(voting_addr) = voting_contract {
+            // Get current config
+            let config: Option<VotingConfig> = env
+                .try_invoke_contract::<VotingConfig, soroban_sdk::Error>(
+                    &voting_addr,
+                    &Symbol::new(env, "get_voting_config"),
+                    Vec::from_array(env, [board_id.into_val(env)]),
+                )
+                .ok()
+                .and_then(|r| r.ok());
+
+            md = md.h2("Current Configuration");
+
+            if let Some(cfg) = config {
+                md = md.text("**Voting enabled:** ").text(if cfg.enabled { "Yes" } else { "No" }).newline()
+                    .text("**Allow downvotes:** ").text(if cfg.allow_downvotes { "Yes" } else { "No" }).newline()
+                    .text("**Karma tracking:** ").text(if cfg.karma_enabled { "Yes" } else { "No" }).newline()
+                    .text("**Karma multiplier:** ").number(cfg.karma_multiplier).newline();
+            } else {
+                md = md.paragraph("Using default configuration (voting enabled, downvotes allowed).");
+            }
+
+            // Update form
+            md = md.hr()
+                .h2("Update Configuration")
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
+                .number(board_id as u32)
+                .raw_str("/voting\" />\n")
+                .raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked /> Enable voting</label>\n")
+                .raw_str("<label><input type=\"checkbox\" name=\"allow_downvotes\" value=\"true\" checked /> Allow downvotes</label>\n")
+                .raw_str("<label><input type=\"checkbox\" name=\"karma_enabled\" value=\"true\" /> Enable karma tracking</label>\n")
+                .input("karma_multiplier", "Karma multiplier (default: 1)")
+                .newline()
+                .form_link_to("Update Configuration", "admin", "set_voting_config");
+        } else {
+            md = md.note("Voting contract is not configured for this board. Voting features are disabled.");
+        }
 
         Self::render_footer_into(md).build()
     }
@@ -2221,6 +2555,234 @@ impl BoardsAdmin {
         env.invoke_contract::<()>(
             &content,
             &Symbol::new(&env, "delete_reply"),
+            args,
+        );
+    }
+
+    // ========================================================================
+    // Flair Operations
+    // ========================================================================
+
+    /// Create a new flair (admin+)
+    pub fn create_flair(
+        env: Env,
+        board_id: u64,
+        name: String,
+        color: String,
+        bg_color: String,
+        required: Option<String>,
+        mod_only: Option<String>,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Get board contract
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Parse checkbox values (presence of string means "true")
+        let is_required = required.is_some();
+        let is_mod_only = mod_only.is_some();
+
+        // Create the flair
+        let args: Vec<Val> = Vec::from_array(&env, [
+            name.into_val(&env),
+            color.into_val(&env),
+            bg_color.into_val(&env),
+            is_required.into_val(&env),
+            is_mod_only.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<u32>(
+            &board_contract,
+            &Symbol::new(&env, "create_flair"),
+            args,
+        );
+    }
+
+    /// Disable a flair (admin+)
+    pub fn disable_flair(
+        env: Env,
+        board_id: u64,
+        flair_id: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let flair_id_u32 = parse_string_to_u32(&env, &flair_id);
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Get board contract
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Disable the flair
+        let args: Vec<Val> = Vec::from_array(&env, [
+            flair_id_u32.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "disable_flair"),
+            args,
+        );
+    }
+
+    // ========================================================================
+    // Rules Operations
+    // ========================================================================
+
+    /// Set board rules (admin+)
+    pub fn set_rules(
+        env: Env,
+        board_id: u64,
+        rules: String,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Get board contract
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Set the rules
+        let args: Vec<Val> = Vec::from_array(&env, [
+            rules.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "set_rules"),
+            args,
+        );
+    }
+
+    /// Clear board rules (admin+)
+    pub fn clear_rules(
+        env: Env,
+        board_id: u64,
+        caller: Address,
+    ) {
+        caller.require_auth();
+
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Permissions)
+            .expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller has admin permissions
+        let caller_perms: PermissionSet = env.invoke_contract(
+            &permissions,
+            &Symbol::new(&env, "get_permissions"),
+            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+        );
+
+        if !caller_perms.can_admin {
+            panic!("Caller must be admin or owner");
+        }
+
+        // Get board contract
+        let board_contract: Address = env
+            .invoke_contract::<Option<Address>>(
+                &registry,
+                &Symbol::new(&env, "get_board_contract"),
+                Vec::from_array(&env, [board_id.into_val(&env)]),
+            )
+            .expect("Board contract not found");
+
+        // Clear the rules
+        let args: Vec<Val> = Vec::from_array(&env, [
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &board_contract,
+            &Symbol::new(&env, "clear_rules"),
             args,
         );
     }

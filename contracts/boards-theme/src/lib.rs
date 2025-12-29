@@ -387,6 +387,14 @@ impl BoardsTheme {
             .rule(".crosspost-badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--primary); color: white; border-radius: 3px; font-size: 0.75rem; font-weight: 600; margin-right: var(--space-xs);")
             .rule(".crosspost-count", "color: var(--text-muted); font-size: 0.875rem; margin-left: var(--space-xs);")
             .rule(".crosspost-preview", "background: var(--bg-muted); padding: var(--space-md); border-radius: 6px; margin-bottom: var(--space-md);")
+            // Board rules styles
+            .rule(".board-rules", "margin-bottom: var(--space-md); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;")
+            .rule(".board-rules summary", "padding: var(--space-sm) var(--space-md); background: var(--bg-muted); cursor: pointer;")
+            .rule(".board-rules summary:hover", "background: var(--bg-hover);")
+            .rule(".rules-content", "padding: var(--space-md); white-space: pre-wrap; font-size: 0.875rem; line-height: 1.5;")
+            .rule(".rules-reminder", "margin-bottom: var(--space-md); border: 2px solid var(--warning); border-radius: 6px; overflow: hidden; background: rgba(255, 193, 7, 0.05);")
+            .rule(".rules-reminder summary", "padding: var(--space-sm) var(--space-md); background: rgba(255, 193, 7, 0.1); cursor: pointer; color: var(--warning);")
+            .rule(".rules-reminder summary:hover", "background: rgba(255, 193, 7, 0.15);")
             // Vote buttons and scoring
             .rule(".vote-buttons", "display: flex; align-items: center; gap: var(--space-sm); margin-bottom: var(--space-md);")
             .rule(".vote-up, .vote-down", "display: inline-flex; align-items: center; justify-content: center; width: 2rem; height: 2rem; border-radius: 4px; background: var(--bg-muted); color: var(--text-muted); text-decoration: none; font-size: 1rem; transition: all 0.15s;")

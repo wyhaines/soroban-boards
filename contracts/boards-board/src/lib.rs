@@ -36,6 +36,8 @@ pub enum BoardKey {
     FlairDefs,
     /// Next flair ID counter
     NextFlairId,
+    /// Board rules (markdown text)
+    Rules,
 }
 
 /// Thread metadata
@@ -789,6 +791,74 @@ impl BoardsBoard {
             .expect("Not initialized");
         config.is_readonly = is_readonly;
         env.storage().instance().set(&BoardKey::Config, &config);
+    }
+
+    /// Set board rules (markdown text, Admin+ only)
+    /// Rules are displayed on the board page and when creating new posts
+    pub fn set_rules(env: Env, rules: String, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can set board rules");
+            }
+        }
+
+        env.storage().persistent().set(&BoardKey::Rules, &rules);
+    }
+
+    /// Get board rules (returns None if no rules are set)
+    pub fn get_rules(env: Env) -> Option<String> {
+        env.storage().persistent().get(&BoardKey::Rules)
+    }
+
+    /// Clear board rules (Admin+ only)
+    pub fn clear_rules(env: Env, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can clear board rules");
+            }
+        }
+
+        env.storage().persistent().remove(&BoardKey::Rules);
     }
 
     /// Check if content is within the edit window
@@ -1548,6 +1618,19 @@ impl BoardsBoard {
             md = md.note("This board is read-only.");
         }
 
+        // Show board rules if set
+        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::Rules) {
+            if rules.len() > 0 {
+                md = md.div_start("board-rules")
+                    .raw_str("<details><summary><strong>Board Rules</strong></summary>")
+                    .div_start("rules-content")
+                    .text_string(&rules)
+                    .div_end()
+                    .raw_str("</details>")
+                    .div_end();
+            }
+        }
+
         // Show create thread button if logged in
         if viewer.is_some() && !config.is_readonly {
             md = md.raw_str("<a href=\"render:/b/")
@@ -1741,6 +1824,19 @@ impl BoardsBoard {
             .newline()
             .newline()  // Blank line before h1 for markdown parsing
             .h1("New Thread");
+
+        // Show rules reminder if rules are set
+        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::Rules) {
+            if rules.len() > 0 {
+                md = md.div_start("rules-reminder")
+                    .raw_str("<details open><summary><strong>Before posting, please read the board rules:</strong></summary>")
+                    .div_start("rules-content")
+                    .text_string(&rules)
+                    .div_end()
+                    .raw_str("</details>")
+                    .div_end();
+            }
+        }
 
         // Check if board is read-only
         if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {

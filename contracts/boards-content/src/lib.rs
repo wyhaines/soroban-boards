@@ -90,6 +90,8 @@ pub struct Flag {
     pub reason: String,
     pub created_at: u64,
     pub resolved: bool,
+    /// Optional rule number that was violated (references board rules)
+    pub rule_violated: Option<u32>,
 }
 
 /// Type of flagged content
@@ -904,6 +906,7 @@ impl BoardsContent {
             reason,
             created_at: env.ledger().timestamp(),
             resolved: false,
+            rule_violated: None,
         };
 
         // Get existing flags
@@ -964,6 +967,7 @@ impl BoardsContent {
             reason,
             created_at: env.ledger().timestamp(),
             resolved: false,
+            rule_violated: None,
         };
 
         // Get existing flags

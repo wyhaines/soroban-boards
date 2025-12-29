@@ -437,6 +437,12 @@
                           "val": {
                             "bool": false
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "rule_violated"
+                          },
+                          "val": "void"
                         }
                       ]
                     },
@@ -473,6 +479,12 @@
                           "val": {
                             "bool": false
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "rule_violated"
+                          },
+                          "val": "void"
                         }
                       ]
                     },
@@ -509,6 +521,12 @@
                           "val": {
                             "bool": false
                           }
+                        },
+                        {
+                          "key": {
+                            "symbol": "rule_violated"
+                          },
+                          "val": "void"
                         }
                       ]
                     }
