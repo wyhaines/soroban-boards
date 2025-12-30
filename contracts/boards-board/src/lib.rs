@@ -1684,8 +1684,11 @@ impl BoardsBoard {
             }
         }
 
-        // Show create thread button if logged in
-        if viewer.is_some() && !config.is_readonly {
+        // Show create thread button if user has Member+ role and board is not read-only
+        let can_create = viewer.is_some()
+            && !config.is_readonly
+            && (viewer_role as u32) >= (Role::Member as u32);
+        if can_create {
             md = md.raw_str("<a href=\"render:/b/")
                 .number(board_id as u32)
                 .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
@@ -1904,29 +1907,30 @@ impl BoardsBoard {
             return Self::render_footer_into(md).build();
         }
 
+        // Get viewer role and check permission to create threads
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let (viewer_role, is_moderator) = if let Some(ref perms_addr) = perms_addr_opt {
+            let user = viewer.as_ref().unwrap();
+            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            let role: Role = env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args);
+            let can_mod = (role as u32) >= (Role::Moderator as u32);
+            (role, can_mod)
+        } else {
+            (Role::Guest, false)
+        };
+
+        // Check if user has permission to create threads (requires Member+ role)
+        if (viewer_role as u32) < (Role::Member as u32) {
+            md = md.warning("You don't have permission to create threads on this board.");
+            return Self::render_footer_into(md).build();
+        }
+
         // Get flairs for the selector
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
             .get(&BoardKey::FlairDefs)
             .unwrap_or(Vec::new(env));
-
-        // Check if viewer is a moderator (for mod_only flairs)
-        let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
-            let permissions: Address = env
-                .storage()
-                .instance()
-                .get(&BoardKey::Permissions)
-                .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                env,
-                [board_id.into_val(env), viewer.as_ref().unwrap().into_val(env)],
-            );
-            let fn_name = Symbol::new(env, "can_moderate");
-            env.invoke_contract(&permissions, &fn_name, args)
-        } else {
-            false
-        };
 
         // Check if any flair is required
         let mut flair_required = false;
@@ -2047,10 +2051,11 @@ impl BoardsBoard {
             return Self::render_hidden_thread_message(env, board_id, viewer);
         }
 
-        // Determine if posting is allowed
+        // Determine if posting is allowed (requires Member+ role, not readonly, not locked)
         let is_readonly = config.is_readonly;
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
-        let can_post = !is_readonly && !is_locked;
+        let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
+        let can_post = !is_readonly && !is_locked && viewer_can_post;
 
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
@@ -2398,13 +2403,27 @@ impl BoardsBoard {
             .expect("Not initialized");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
-        // Determine if posting is allowed
+        // Get viewer role for permission check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+
+        // Determine if posting is allowed (requires Member+ role, not readonly, not locked)
         let thread = env
             .storage()
             .persistent()
             .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
-        let can_post = !config.is_readonly && !is_locked;
+        let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
+        let can_post = !config.is_readonly && !is_locked && viewer_can_post;
 
         // Get total reply count
         let count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
@@ -2471,13 +2490,27 @@ impl BoardsBoard {
             .expect("Not initialized");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
-        // Determine if posting is allowed
+        // Get viewer role for permission check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+
+        // Determine if posting is allowed (requires Member+ role, not readonly, not locked)
         let thread = env
             .storage()
             .persistent()
             .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
-        let can_post = !config.is_readonly && !is_locked;
+        let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
+        let can_post = !config.is_readonly && !is_locked && viewer_can_post;
 
         // Get total children count
         let count_args: Vec<Val> = Vec::from_array(env, [
@@ -2774,6 +2807,21 @@ impl BoardsBoard {
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to reply.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get viewer role and check permission to reply (requires Member+ role)
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            let user = viewer.as_ref().unwrap();
+            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+            env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
+        } else {
+            Role::Guest
+        };
+
+        if (viewer_role as u32) < (Role::Member as u32) {
+            md = md.warning("You don't have permission to reply on this board.");
             return Self::render_footer_into(md).build();
         }
 

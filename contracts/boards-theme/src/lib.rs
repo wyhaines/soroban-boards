@@ -1,7 +1,18 @@
 #![no_std]
 
+//! boards-theme: Styling contract for Soroban Boards
+//!
+//! This contract provides CSS/styling ONLY. It has no routing or rendering logic.
+//! All rendering and routing is handled by boards-main.
+//!
+//! Exports:
+//! - styles() / render_styles() - CSS stylesheet
+//! - init() - initialization
+//! - upgrade() - contract upgrade
+//! - get_* functions - contract address getters
+
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String};
 
 // Declare render capabilities
 soroban_render!(markdown, styles);
@@ -16,7 +27,7 @@ pub enum ThemeKey {
     Permissions,
     /// Content contract address
     Content,
-    /// Admin contract address (for admin UI delegation)
+    /// Admin contract address
     Admin,
 }
 
@@ -66,178 +77,6 @@ impl BoardsTheme {
             .instance()
             .get(&ThemeKey::Content)
             .expect("Not initialized")
-    }
-
-    /// Main render entry point - delegates to domain-specific contracts
-    ///
-    /// Routing:
-    /// - `/`, `/create`, `/help` → Registry
-    /// - `/admin/*`, `/b/{id}/settings`, etc. → Admin
-    /// - `/b/{id}/*` → Board contract (looked up via Registry)
-    pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Registry)
-            .expect("Not initialized");
-
-        Router::new(&env, path.clone())
-            // Registry routes: home, create, help
-            .handle(b"/", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
-            .or_handle(b"/help", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
-            .or_handle(b"/create", |_| Self::delegate_to_registry(&env, &registry, &path, &viewer))
-            // Admin routes - delegate to admin contract
-            .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/banned", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/flags", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/invites", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            // Board routes - delegate to board contract
-            .or_handle(b"/b/{id}/*", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::delegate_to_board(&env, &registry, board_id, &path, &viewer)
-            })
-            .or_handle(b"/b/{id}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::delegate_to_board(&env, &registry, board_id, &path, &viewer)
-            })
-            // Default - delegate to registry (home page)
-            .or_default(|_| Self::delegate_to_registry(&env, &registry, &None, &viewer))
-    }
-
-    /// Delegate rendering to the registry contract
-    fn delegate_to_registry(env: &Env, registry: &Address, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
-        let args: Vec<Val> = Vec::from_array(env, [
-            path.into_val(env),
-            viewer.into_val(env),
-        ]);
-        env.invoke_contract(registry, &Symbol::new(env, "render"), args)
-    }
-
-    /// Delegate rendering to the admin contract
-    fn delegate_to_admin(env: &Env, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
-        let admin: Address = env
-            .storage()
-            .instance()
-            .get(&ThemeKey::Admin)
-            .expect("Admin contract not initialized");
-
-        let args: Vec<Val> = Vec::from_array(env, [
-            path.into_val(env),
-            viewer.into_val(env),
-        ]);
-        env.invoke_contract(&admin, &Symbol::new(env, "render"), args)
-    }
-
-    /// Delegate rendering to a board contract
-    ///
-    /// Looks up the board contract address from registry, then calls its render()
-    /// with the relative path (stripping `/b/{id}` prefix).
-    fn delegate_to_board(env: &Env, registry: &Address, board_id: u64, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
-        // Get board contract address from registry
-        let board_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_contract_opt: Option<Address> = env.invoke_contract(
-            registry,
-            &Symbol::new(env, "get_board_contract"),
-            board_args,
-        );
-
-        let Some(board_contract) = board_contract_opt else {
-            // Board not found - return error page
-            return MarkdownBuilder::new(env)
-                .h1("Board Not Found")
-                .paragraph("The requested board does not exist.")
-                .render_link("Back to Home", "/")
-                .build();
-        };
-
-        // Convert path to relative path for board contract
-        // e.g., "/b/0/t/1" -> "/t/1", "/b/0" -> "/"
-        let relative_path = Self::strip_board_prefix(env, path, board_id);
-
-        let args: Vec<Val> = Vec::from_array(env, [
-            relative_path.into_val(env),
-            viewer.into_val(env),
-        ]);
-        env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
-    }
-
-    /// Strip the `/b/{id}` prefix from a path to get relative path for board contract
-    fn strip_board_prefix(env: &Env, path: &Option<String>, board_id: u64) -> Option<String> {
-        let Some(p) = path else {
-            return Some(String::from_str(env, "/"));
-        };
-
-        // Build the prefix we need to strip: "/b/{board_id}"
-        // For simplicity, we'll use a fixed approach
-        let path_len = p.len() as usize;
-
-        // Calculate prefix length: "/b/" + digits + optional rest
-        // We need to find where the board_id ends
-        let mut prefix = [0u8; 32];
-        let prefix_start = b"/b/";
-        prefix[0..3].copy_from_slice(prefix_start);
-
-        // Convert board_id to string
-        let mut id_bytes = [0u8; 20];
-        let id_len = Self::u64_to_bytes(board_id, &mut id_bytes);
-        prefix[3..3 + id_len].copy_from_slice(&id_bytes[0..id_len]);
-        let prefix_len = 3 + id_len;
-
-        // Copy path to buffer for comparison
-        let mut path_buf = [0u8; 256];
-        let copy_len = if path_len > 256 { 256 } else { path_len };
-        p.copy_into_slice(&mut path_buf[0..copy_len]);
-
-        // Check if path starts with prefix
-        if copy_len >= prefix_len && &path_buf[0..prefix_len] == &prefix[0..prefix_len] {
-            // Path matches prefix, extract the rest
-            if copy_len == prefix_len {
-                // Exact match like "/b/0", return "/"
-                return Some(String::from_str(env, "/"));
-            } else if path_buf[prefix_len] == b'/' {
-                // Path has more after prefix, like "/b/0/t/1"
-                // Return from the slash onwards
-                let rest_len = copy_len - prefix_len;
-                let rest_slice = &path_buf[prefix_len..copy_len];
-                // Convert slice to String
-                return Some(Self::bytes_to_string(env, rest_slice, rest_len));
-            }
-        }
-
-        // Fallback - return root
-        Some(String::from_str(env, "/"))
-    }
-
-    /// Convert u64 to byte slice, return number of bytes written
-    fn u64_to_bytes(mut n: u64, buf: &mut [u8; 20]) -> usize {
-        if n == 0 {
-            buf[0] = b'0';
-            return 1;
-        }
-
-        let mut temp = [0u8; 20];
-        let mut len = 0;
-
-        while n > 0 {
-            temp[len] = b'0' + (n % 10) as u8;
-            n /= 10;
-            len += 1;
-        }
-
-        // Reverse into buf
-        for i in 0..len {
-            buf[i] = temp[len - 1 - i];
-        }
-
-        len
-    }
-
-    /// Convert byte slice to String
-    fn bytes_to_string(env: &Env, bytes: &[u8], len: usize) -> String {
-        // Create String from byte slice
-        String::from_bytes(env, &bytes[0..len])
     }
 
     /// Public styles method for viewer/test access
@@ -497,24 +336,6 @@ impl BoardsTheme {
             .rule(".reply-meta", "gap: var(--space-xs);")
             .rule(".reply-meta a", "padding: 0.125rem 0.25rem;")
             .media_end()
-            .build()
-    }
-
-    /// Render header component
-    pub fn render_header(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
-        MarkdownBuilder::new(&env)
-            .div_start("nav-bar")
-            .render_link("Soroban Boards", "/")
-            .render_link("Help", "/help")
-            .div_end()
-            .build()
-    }
-
-    /// Render footer component
-    pub fn render_footer(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
-        MarkdownBuilder::new(&env)
-            .hr()
-            .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
             .build()
     }
 
