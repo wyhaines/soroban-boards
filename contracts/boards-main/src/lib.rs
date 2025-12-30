@@ -82,6 +82,21 @@ pub struct PermissionSet {
     pub is_banned: bool,
 }
 
+/// Community metadata (same structure as community contract for compatibility)
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityMeta {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+    pub description: String,
+    pub owner: Address,
+    pub created_at: u64,
+    pub board_count: u64,
+    pub member_count: u64,
+    pub is_private: bool,
+}
+
 #[contract]
 pub struct BoardsMain;
 
@@ -436,7 +451,7 @@ impl BoardsMain {
     // Page Rendering
     // ========================================================================
 
-    /// Render the home page with board list
+    /// Render the home page with communities and standalone boards
     fn render_home(env: &Env, viewer: &Option<Address>) -> Bytes {
         let registry: Address = env
             .storage()
@@ -456,8 +471,47 @@ impl BoardsMain {
             md = md.note("Connect your wallet to participate in discussions.");
         }
 
-        md = md.h2("Boards")
-            .newline();
+        // === Communities Section ===
+        md = md.newline()
+            .h2("Communities");
+
+        // Get community contract
+        let community_contract_opt: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&MainKey::Community);
+
+        if let Some(community_contract) = community_contract_opt {
+            // Fetch listed communities
+            let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
+            let communities: Vec<CommunityMeta> = env.invoke_contract(
+                &community_contract,
+                &Symbol::new(env, "list_listed_communities"),
+                list_args,
+            );
+
+            if communities.is_empty() {
+                md = md.paragraph("No communities yet.");
+            } else {
+                // Sort communities alphabetically by name
+                let sorted_communities = Self::sort_communities_by_name(env, communities);
+
+                md = md.raw_str("<div class=\"community-list\">\n");
+                for community in sorted_communities.iter() {
+                    md = Self::render_community_card(env, md, &community);
+                }
+                md = md.raw_str("</div>\n");
+            }
+
+            md = md.newline()
+                .render_link("+ Create New Community", "/new");
+        } else {
+            md = md.paragraph("Community features not configured.");
+        }
+
+        // === Standalone Boards Section ===
+        md = md.newline()
+            .h2("Standalone Boards");
 
         // Get board count from registry
         let count: u64 = env.invoke_contract(
@@ -467,17 +521,12 @@ impl BoardsMain {
         );
 
         if count == 0 {
-            md = md.paragraph("No boards yet. Be the first to create one!");
+            md = md.paragraph("No standalone boards yet.");
         } else {
-            // List boards (up to 20)
-            let mut displayed = 0u32;
-            md = md.raw_str("<div class=\"board-list\">\n");
+            // Collect standalone listed boards
+            let mut standalone_boards: Vec<BoardMeta> = Vec::new(env);
 
             for i in 0..count {
-                if displayed >= 20 {
-                    break;
-                }
-
                 // Check if board is listed
                 let listed_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
                 let is_listed: bool = env.invoke_contract(
@@ -490,6 +539,19 @@ impl BoardsMain {
                     continue;
                 }
 
+                // Check if board is in a community
+                let community_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+                let community_id: Option<u64> = env.invoke_contract(
+                    &registry,
+                    &Symbol::new(env, "get_board_community"),
+                    community_args,
+                );
+
+                // Only include standalone boards (not in any community)
+                if community_id.is_some() {
+                    continue;
+                }
+
                 // Get board metadata
                 let board_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
                 let board_opt: Option<BoardMeta> = env.invoke_contract(
@@ -499,8 +561,25 @@ impl BoardsMain {
                 );
 
                 if let Some(board) = board_opt {
+                    standalone_boards.push_back(board);
+                }
+
+                // Limit to 20 boards
+                if standalone_boards.len() >= 20 {
+                    break;
+                }
+            }
+
+            if standalone_boards.is_empty() {
+                md = md.paragraph("No standalone boards yet.");
+            } else {
+                // Sort boards alphabetically by name
+                let sorted_boards = Self::sort_boards_by_name(env, standalone_boards);
+
+                md = md.raw_str("<div class=\"board-list\">\n");
+                for board in sorted_boards.iter() {
                     // Check private status
-                    let private_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+                    let private_args: Vec<Val> = Vec::from_array(env, [board.id.into_val(env)]);
                     let is_private: bool = env.invoke_contract(
                         &registry,
                         &Symbol::new(env, "get_board_private"),
@@ -522,13 +601,8 @@ impl BoardsMain {
                         md = md.raw_str(" <span class=\"badge\">private</span>");
                     }
                     md = md.raw_str("</span></a>\n");
-                    displayed += 1;
                 }
-            }
-            md = md.raw_str("</div>\n");
-
-            if displayed == 0 {
-                md = md.paragraph("No boards yet. Be the first to create one!");
+                md = md.raw_str("</div>\n");
             }
         }
 
@@ -1038,6 +1112,199 @@ impl BoardsMain {
         }
 
         Bytes::from_slice(env, &buffer[idx..])
+    }
+
+    // ========================================================================
+    // Sorting Helpers
+    // ========================================================================
+
+    /// Compare two Soroban Strings alphabetically (case-insensitive).
+    /// Returns: -1 if a < b, 0 if a == b, 1 if a > b
+    fn compare_strings(a: &String, b: &String) -> i32 {
+        let a_len = a.len() as usize;
+        let b_len = b.len() as usize;
+
+        // Copy each string into its own buffer (copy_into_slice requires exact length match)
+        let mut a_buf = [0u8; 64];
+        let mut b_buf = [0u8; 64];
+
+        let a_copy_len = if a_len > 64 { 64 } else { a_len };
+        let b_copy_len = if b_len > 64 { 64 } else { b_len };
+
+        if a_copy_len > 0 {
+            a.copy_into_slice(&mut a_buf[..a_copy_len]);
+        }
+        if b_copy_len > 0 {
+            b.copy_into_slice(&mut b_buf[..b_copy_len]);
+        }
+
+        // Compare byte by byte up to the shorter length
+        let min_len = if a_copy_len < b_copy_len { a_copy_len } else { b_copy_len };
+
+        for i in 0..min_len {
+            // Convert to lowercase for comparison
+            let a_char = if a_buf[i] >= b'A' && a_buf[i] <= b'Z' {
+                a_buf[i] + 32
+            } else {
+                a_buf[i]
+            };
+            let b_char = if b_buf[i] >= b'A' && b_buf[i] <= b'Z' {
+                b_buf[i] + 32
+            } else {
+                b_buf[i]
+            };
+
+            if a_char < b_char {
+                return -1;
+            }
+            if a_char > b_char {
+                return 1;
+            }
+        }
+
+        // If all compared bytes are equal, shorter string comes first
+        if a_len < b_len {
+            -1
+        } else if a_len > b_len {
+            1
+        } else {
+            0
+        }
+    }
+
+    /// Sort communities alphabetically by name using selection sort.
+    /// Uses Soroban Vec operations to avoid fixed-size arrays.
+    fn sort_communities_by_name(env: &Env, communities: Vec<CommunityMeta>) -> Vec<CommunityMeta> {
+        let len = communities.len();
+        if len <= 1 {
+            return communities;
+        }
+
+        // Build result by repeatedly finding the minimum
+        let mut result: Vec<CommunityMeta> = Vec::new(env);
+        let mut used: Vec<bool> = Vec::new(env);
+
+        // Initialize used flags
+        for _ in 0..len {
+            used.push_back(false);
+        }
+
+        // Selection sort: find minimum each iteration
+        for _ in 0..len {
+            let mut min_idx: Option<u32> = None;
+
+            for j in 0..len {
+                if used.get(j).unwrap_or(true) {
+                    continue;
+                }
+
+                match min_idx {
+                    None => min_idx = Some(j),
+                    Some(current_min) => {
+                        let current = communities.get(current_min).unwrap();
+                        let candidate = communities.get(j).unwrap();
+                        if Self::compare_strings(&candidate.name, &current.name) < 0 {
+                            min_idx = Some(j);
+                        }
+                    }
+                }
+            }
+
+            if let Some(idx) = min_idx {
+                result.push_back(communities.get(idx).unwrap());
+                used.set(idx, true);
+            }
+        }
+
+        result
+    }
+
+    /// Sort boards alphabetically by name using selection sort.
+    /// Uses Soroban Vec operations to avoid fixed-size arrays.
+    fn sort_boards_by_name(env: &Env, boards: Vec<BoardMeta>) -> Vec<BoardMeta> {
+        let len = boards.len();
+        if len <= 1 {
+            return boards;
+        }
+
+        // Build result by repeatedly finding the minimum
+        let mut result: Vec<BoardMeta> = Vec::new(env);
+        let mut used: Vec<bool> = Vec::new(env);
+
+        // Initialize used flags
+        for _ in 0..len {
+            used.push_back(false);
+        }
+
+        // Selection sort: find minimum each iteration
+        for _ in 0..len {
+            let mut min_idx: Option<u32> = None;
+
+            for j in 0..len {
+                if used.get(j).unwrap_or(true) {
+                    continue;
+                }
+
+                match min_idx {
+                    None => min_idx = Some(j),
+                    Some(current_min) => {
+                        let current = boards.get(current_min).unwrap();
+                        let candidate = boards.get(j).unwrap();
+                        if Self::compare_strings(&candidate.name, &current.name) < 0 {
+                            min_idx = Some(j);
+                        }
+                    }
+                }
+            }
+
+            if let Some(idx) = min_idx {
+                result.push_back(boards.get(idx).unwrap());
+                used.set(idx, true);
+            }
+        }
+
+        result
+    }
+
+    /// Render a single community card (same format as communities page).
+    fn render_community_card<'a>(_env: &'a Env, mut md: MarkdownBuilder<'a>, community: &CommunityMeta) -> MarkdownBuilder<'a> {
+        // Build the URL for the link
+        let mut url_buf = [0u8; 64];
+        let prefix = b"render:/c/";
+        url_buf[0..10].copy_from_slice(prefix);
+        let name_len = community.name.len() as usize;
+        let name_copy_len = if name_len > 50 { 50 } else { name_len };
+        community.name.copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
+        let url = core::str::from_utf8(&url_buf[0..10 + name_copy_len]).unwrap_or("");
+
+        // Wrap entire card in an <a> tag like board-card
+        md = md.raw_str("<a href=\"");
+        md = md.text(url);
+        md = md.raw_str("\" class=\"community-card\">");
+
+        // Display name as title span
+        md = md.raw_str("<span class=\"community-card-title\">");
+        md = md.text_string(&community.display_name);
+        md = md.raw_str("</span>");
+
+        // Description as desc span
+        md = md.raw_str("<span class=\"community-card-desc\">");
+        md = md.text_string(&community.description);
+        md = md.raw_str("</span>");
+
+        // Stats as meta span
+        md = md.raw_str("<span class=\"community-card-meta\">");
+        md = md.number(community.board_count as u32);
+        md = md.raw_str(" boards · ");
+        md = md.number(community.member_count as u32);
+        md = md.raw_str(" members");
+        if community.is_private {
+            md = md.raw_str(" <span class=\"badge\">Private</span>");
+        }
+        md = md.raw_str("</span>");
+
+        md = md.raw_str("</a>\n");
+        md
     }
 
     // ========================================================================

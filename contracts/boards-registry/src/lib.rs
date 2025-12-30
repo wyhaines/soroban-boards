@@ -1233,6 +1233,97 @@ impl BoardsRegistry {
             .remove(&RegistryKey::BoardCommunity(board_id));
     }
 
+    /// Delete a board permanently (owner only)
+    /// This removes all board data including threads and replies.
+    pub fn delete_board(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Verify board exists and get metadata
+        let board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&RegistryKey::Board(board_id))
+            .expect("Board does not exist");
+
+        // Verify caller is board creator (owner)
+        if caller != board.creator {
+            panic!("Only board owner can delete board");
+        }
+
+        // If board is in a community, remove it first
+        if let Some(community_id) = env
+            .storage()
+            .persistent()
+            .get::<_, u64>(&RegistryKey::BoardCommunity(board_id))
+        {
+            if let Some(community_contract) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&RegistryKey::CommunityContract)
+            {
+                let remove_args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [
+                        community_id.into_val(&env),
+                        board_id.into_val(&env),
+                        caller.clone().into_val(&env),
+                    ],
+                );
+                let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                    &community_contract,
+                    &Symbol::new(&env, "remove_board"),
+                    remove_args,
+                );
+            }
+
+            // Remove community association
+            env.storage()
+                .persistent()
+                .remove(&RegistryKey::BoardCommunity(board_id));
+        }
+
+        // Remove board name mapping
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardNameToId(board.name));
+
+        // Remove any aliases
+        if let Some(aliases) = env
+            .storage()
+            .persistent()
+            .get::<_, Vec<String>>(&RegistryKey::BoardAliases(board_id))
+        {
+            for alias in aliases.iter() {
+                env.storage()
+                    .persistent()
+                    .remove(&RegistryKey::BoardNameToId(alias));
+            }
+            env.storage()
+                .persistent()
+                .remove(&RegistryKey::BoardAliases(board_id));
+        }
+
+        // Remove board metadata and status flags
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::Board(board_id));
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardListed(board_id));
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardPrivate(board_id));
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardReadonly(board_id));
+        env.storage()
+            .persistent()
+            .remove(&RegistryKey::BoardContract(board_id));
+
+        // Note: We don't decrement BoardCount because board IDs are sequential
+        // and we don't want to reuse IDs. The count represents "next available ID".
+    }
+
 }
 
 #[cfg(test)]

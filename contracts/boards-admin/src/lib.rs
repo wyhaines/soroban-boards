@@ -239,6 +239,10 @@ impl BoardsAdmin {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_settings(&env, board_id, &viewer)
             })
+            .or_handle(b"/b/{id}/delete", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_delete(&env, board_id, &viewer)
+            })
             .or_handle(b"/b/{id}/flairs", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_flairs(&env, board_id, &viewer)
@@ -271,6 +275,10 @@ impl BoardsAdmin {
             .or_handle(b"/admin/b/{id}/settings", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
                 Self::render_settings(&env, board_id, &viewer)
+            })
+            .or_handle(b"/admin/b/{id}/delete", |req| {
+                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
+                Self::render_delete(&env, board_id, &viewer)
             })
             .or_handle(b"/admin/b/{id}/flairs", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
@@ -815,7 +823,7 @@ impl BoardsAdmin {
             return Self::render_footer_into(md).build();
         }
 
-        if let Some(board) = board_opt {
+        if let Some(ref board) = board_opt {
             md = md.h2("Board Name")
                 .text("**Current name:** ").text_string(&board.name).newline();
 
@@ -1194,7 +1202,114 @@ impl BoardsAdmin {
             .text(" | ")
             .raw_str("[Voting Config](render:/admin/b/")
             .number(board_id as u32)
-            .raw_str("/voting)");
+            .raw_str("/voting)")
+            .newline()
+            .newline();
+
+        // Danger Zone - only show to board owner
+        if let (Some(v), Some(ref board)) = (viewer, &board_opt) {
+            if *v == board.creator {
+                md = md.h2("Danger Zone")
+                    .warning("These actions are irreversible.")
+                    .raw_str("[Delete Board](render:/admin/b/")
+                    .number(board_id as u32)
+                    .raw_str("/delete)")
+                    .newline();
+            }
+        }
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render delete board confirmation page
+    fn render_delete(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+
+        // Get board metadata
+        let board_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let board_opt: Option<BoardMeta> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_board"),
+            board_args,
+        );
+
+        let mut md = MarkdownBuilder::new(env);
+
+        // Back navigation
+        md = md.div_start("back-nav")
+            .raw_str("<a href=\"render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/settings\" class=\"back-link\">← Back to Settings</a>")
+            .div_end()
+            .newline();
+
+        let board = match board_opt {
+            Some(b) => b,
+            None => {
+                return md.h1("Board Not Found")
+                    .paragraph("This board does not exist.")
+                    .build();
+            }
+        };
+
+        md = md.h1("Delete Board");
+
+        // Check if viewer is logged in
+        if viewer.is_none() {
+            return md
+                .warning("Please connect your wallet to access this page.")
+                .build();
+        }
+
+        let viewer_addr = viewer.as_ref().unwrap();
+
+        // Check if viewer is the board owner
+        if *viewer_addr != board.creator {
+            return md
+                .warning("Only the board owner can delete this board.")
+                .build();
+        }
+
+        // Show warning and confirmation
+        md = md
+            .warning("This action is permanent and cannot be undone!")
+            .newline()
+            .paragraph("You are about to delete:")
+            .raw_str("<div class=\"board-card\" style=\"pointer-events: none;\"><span class=\"board-card-title\">")
+            .text_string(&board.name)
+            .raw_str("</span><span class=\"board-card-desc\">")
+            .text_string(&board.description)
+            .raw_str("</span><span class=\"board-card-meta\">")
+            .number(board.thread_count as u32)
+            .text(" threads")
+            .raw_str("</span></div>\n")
+            .newline();
+
+        if board.thread_count > 0 {
+            md = md.note("This board contains threads. All threads and replies will be permanently deleted.");
+        }
+
+        md = md.newline()
+            .paragraph("To confirm deletion, click the button below:")
+            .newline()
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
+            .text_string(&viewer_addr.to_string())
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/\" />\n")
+            .newline()
+            .form_link_to("Delete Board Permanently", "registry", "delete_board")
+            .newline()
+            .newline()
+            .raw_str("<a href=\"render:/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/settings\">Cancel</a>\n");
 
         Self::render_footer_into(md).build()
     }
