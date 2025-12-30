@@ -121,6 +121,8 @@ pub enum PermKey {
     CommunityBannedUsers(u64),
     /// User flair for a board (board_id, user) -> UserFlair
     UserFlair(u64, Address),
+    /// First time a user was seen (for account age tracking)
+    FirstSeen(Address),
 }
 
 /// Permission check result with all relevant permissions
@@ -1404,6 +1406,41 @@ impl BoardsPermissions {
 
         env.deployer().update_current_contract_wasm(new_wasm_hash);
     }
+
+    // ==================== First-Seen Tracking ====================
+
+    /// Record the first time a user was seen (for account age tracking).
+    /// This should be called on a user's first interaction with the system.
+    /// If the user has already been seen, this is a no-op.
+    pub fn record_first_seen(env: Env, user: Address) {
+        let key = PermKey::FirstSeen(user);
+        if !env.storage().persistent().has(&key) {
+            let timestamp = env.ledger().timestamp();
+            env.storage().persistent().set(&key, &timestamp);
+        }
+    }
+
+    /// Get the timestamp when a user was first seen.
+    /// Returns None if the user has never been recorded.
+    pub fn get_first_seen(env: Env, user: Address) -> Option<u64> {
+        env.storage().persistent().get(&PermKey::FirstSeen(user))
+    }
+
+    /// Get a user's account age in seconds.
+    /// Returns 0 if the user has never been seen.
+    pub fn get_account_age(env: Env, user: Address) -> u64 {
+        match env.storage().persistent().get(&PermKey::FirstSeen(user)) {
+            Some(first_seen) => {
+                let now = env.ledger().timestamp();
+                if now > first_seen {
+                    now - first_seen
+                } else {
+                    0
+                }
+            }
+            None => 0,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -2663,5 +2700,82 @@ mod test {
         client.set_community_role(&0, &user, &Role::Member, &owner1);
         assert_eq!(client.get_community_role(&0, &user), Role::Member);
         assert_eq!(client.get_community_role(&1, &user), Role::Guest);
+    }
+
+    #[test]
+    fn test_first_seen_tracking() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let user = Address::generate(&env);
+
+        // User has not been seen yet
+        assert_eq!(client.get_first_seen(&user), None);
+        assert_eq!(client.get_account_age(&user), 0);
+
+        // Record first seen
+        client.record_first_seen(&user);
+
+        // Now user should have a first seen timestamp
+        let first_seen = client.get_first_seen(&user);
+        assert!(first_seen.is_some());
+
+        // Account age should be 0 initially (same timestamp)
+        assert_eq!(client.get_account_age(&user), 0);
+    }
+
+    #[test]
+    fn test_first_seen_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let user = Address::generate(&env);
+
+        // Record first seen
+        client.record_first_seen(&user);
+        let first_seen = client.get_first_seen(&user).unwrap();
+
+        // Record again - should not change the timestamp
+        client.record_first_seen(&user);
+        let second_check = client.get_first_seen(&user).unwrap();
+
+        assert_eq!(first_seen, second_check);
+    }
+
+    #[test]
+    fn test_multiple_users_first_seen() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPermissions, ());
+        let client = BoardsPermissionsClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let user1 = Address::generate(&env);
+        let user2 = Address::generate(&env);
+
+        // Record user1
+        client.record_first_seen(&user1);
+        assert!(client.get_first_seen(&user1).is_some());
+        assert!(client.get_first_seen(&user2).is_none());
+
+        // Record user2
+        client.record_first_seen(&user2);
+        assert!(client.get_first_seen(&user1).is_some());
+        assert!(client.get_first_seen(&user2).is_some());
     }
 }

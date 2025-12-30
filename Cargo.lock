@@ -214,6 +214,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "boards-config"
+version = "0.1.0"
+dependencies = [
+ "soroban-render-sdk",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "boards-content"
 version = "0.1.0"
 dependencies = [

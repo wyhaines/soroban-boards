@@ -11,6 +11,7 @@ members = [
     "contracts/boards-admin",
     "contracts/boards-community",
     "contracts/boards-voting",
+    "contracts/boards-config",
 ]
 
 [workspace.package]

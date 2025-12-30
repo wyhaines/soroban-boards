@@ -18,6 +18,8 @@ pub enum AdminKey {
     Content,
     /// Theme contract address (for shared components if needed)
     Theme,
+    /// Config contract address (for site-wide settings)
+    Config,
 }
 
 // ============================================================================
@@ -142,6 +144,52 @@ pub struct CommunityMeta {
     pub is_private: bool,
 }
 
+// ============================================================================
+// Config Types (must match boards-config contract)
+// ============================================================================
+
+/// Creation thresholds for boards/communities
+#[contracttype]
+#[derive(Clone)]
+pub struct CreationThresholds {
+    pub min_karma: i64,
+    pub min_account_age_secs: u64,
+    pub min_post_count: u32,
+    pub require_profile: bool,
+    pub per_user_limit: u32,
+    pub xlm_lock_stroops: i128,
+}
+
+/// Instance branding configuration
+#[contracttype]
+#[derive(Clone)]
+pub struct Branding {
+    pub site_name: String,
+    pub tagline: String,
+    pub logo_url: String,
+    pub favicon_url: String,
+    pub footer_text: String,
+    pub primary_color: String,
+}
+
+/// Name length limits
+#[contracttype]
+#[derive(Clone)]
+pub struct NameLimits {
+    pub min_length: u32,
+    pub max_length: u32,
+}
+
+/// Default voting config
+#[contracttype]
+#[derive(Clone)]
+pub struct DefaultVotingCfg {
+    pub enabled: bool,
+    pub allow_downvotes: bool,
+    pub karma_enabled: bool,
+    pub karma_multiplier: u32,
+}
+
 #[contract]
 pub struct BoardsAdmin;
 
@@ -173,7 +221,7 @@ fn parse_string_to_u32(_env: &Env, s: &String) -> u32 {
 #[contractimpl]
 impl BoardsAdmin {
     /// Initialize the admin contract
-    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, theme: Address) {
+    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, theme: Address, config: Address) {
         if env.storage().instance().has(&AdminKey::Registry) {
             panic!("Already initialized");
         }
@@ -181,6 +229,7 @@ impl BoardsAdmin {
         env.storage().instance().set(&AdminKey::Permissions, &permissions);
         env.storage().instance().set(&AdminKey::Content, &content);
         env.storage().instance().set(&AdminKey::Theme, &theme);
+        env.storage().instance().set(&AdminKey::Config, &config);
     }
 
     /// Get registry address
@@ -213,6 +262,26 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Theme)
             .expect("Not initialized")
+    }
+
+    /// Get config address
+    pub fn get_config(env: Env) -> Option<Address> {
+        env.storage().instance().get(&AdminKey::Config)
+    }
+
+    /// Set config address (registry admin only)
+    pub fn set_config(env: Env, config: Address, caller: Address) {
+        caller.require_auth();
+        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
+        let is_admin: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "is_admin"),
+            Vec::from_array(&env, [caller.into_val(&env)]),
+        );
+        if !is_admin {
+            panic!("Only registry admin can set config");
+        }
+        env.storage().instance().set(&AdminKey::Config, &config);
     }
 
     /// Main render entry point for admin pages
@@ -308,6 +377,31 @@ impl BoardsAdmin {
             })
             .or_handle(b"/admin/registry", |_| {
                 Self::render_registry_admin(&env, &viewer)
+            })
+            // Site settings routes (global admin)
+            .or_handle(b"/settings", |_| {
+                Self::render_site_settings(&env, &viewer)
+            })
+            .or_handle(b"/admin/settings", |_| {
+                Self::render_site_settings(&env, &viewer)
+            })
+            .or_handle(b"/settings/branding", |_| {
+                Self::render_branding_settings(&env, &viewer)
+            })
+            .or_handle(b"/admin/settings/branding", |_| {
+                Self::render_branding_settings(&env, &viewer)
+            })
+            .or_handle(b"/settings/thresholds", |_| {
+                Self::render_threshold_settings(&env, &viewer)
+            })
+            .or_handle(b"/admin/settings/thresholds", |_| {
+                Self::render_threshold_settings(&env, &viewer)
+            })
+            .or_handle(b"/settings/operational", |_| {
+                Self::render_operational_settings(&env, &viewer)
+            })
+            .or_handle(b"/admin/settings/operational", |_| {
+                Self::render_operational_settings(&env, &viewer)
             })
             // Default - show not found
             .or_default(|_| Self::render_not_found(&env))
@@ -1861,6 +1955,379 @@ impl BoardsAdmin {
         md = md
             .newline()
             .render_link("← Back to Home", "/");
+
+        Self::render_footer_into(md).build()
+    }
+
+    // ========================================================================
+    // Site Settings Render Functions
+    // ========================================================================
+
+    /// Navigation for site settings pages
+    fn render_settings_nav(env: &Env) -> MarkdownBuilder<'_> {
+        MarkdownBuilder::new(env)
+            .render_link("Soroban Boards", "/")
+            .text(" | ")
+            .render_link("Admin", "/admin/registry")
+            .text(" | ")
+            .render_link("Settings", "/admin/settings")
+            .newline()
+            .hr()
+    }
+
+    /// Check if viewer is a registry admin
+    fn is_registry_admin(env: &Env, viewer: &Option<Address>) -> bool {
+        if let Some(user) = viewer {
+            let registry: Address = env
+                .storage()
+                .instance()
+                .get(&AdminKey::Registry)
+                .expect("Not initialized");
+            env.invoke_contract(
+                &registry,
+                &Symbol::new(env, "is_admin"),
+                Vec::from_array(env, [user.into_val(env)]),
+            )
+        } else {
+            false
+        }
+    }
+
+    /// Render main site settings page
+    fn render_site_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_settings_nav(env)
+            .h1("Site Settings");
+
+        if !Self::is_registry_admin(env, viewer) {
+            md = md.warning("You must be a registry admin to access site settings.");
+            return Self::render_footer_into(md).build();
+        }
+
+        md = md
+            .paragraph("Configure global settings for this Soroban Boards instance.")
+            .newline()
+            // Branding card
+            .raw_str("<div class=\"card\">\n")
+            .raw_str("<h3><a href=\"render:/admin/settings/branding\">Branding</a></h3>\n")
+            .raw_str("<p>Site name, tagline, logo, footer text, and primary color.</p>\n")
+            .raw_str("</div>\n")
+            .newline()
+            // Thresholds card
+            .raw_str("<div class=\"card\">\n")
+            .raw_str("<h3><a href=\"render:/admin/settings/thresholds\">Creation Thresholds</a></h3>\n")
+            .raw_str("<p>Requirements for creating boards and communities: karma, account age, post count, and per-user limits.</p>\n")
+            .raw_str("</div>\n")
+            .newline()
+            // Operational card
+            .raw_str("<div class=\"card\">\n")
+            .raw_str("<h3><a href=\"render:/admin/settings/operational\">Operational Settings</a></h3>\n")
+            .raw_str("<p>Reply depth, chunk sizes, edit windows, and name length limits.</p>\n")
+            .raw_str("</div>\n")
+            .newline()
+            .render_link("← Back to Registry Admin", "/admin/registry");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render branding settings page
+    fn render_branding_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_settings_nav(env)
+            .h1("Branding Settings");
+
+        if !Self::is_registry_admin(env, viewer) {
+            md = md.warning("You must be a registry admin to access site settings.");
+            return Self::render_footer_into(md).build();
+        }
+
+        // Get current branding from config
+        let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
+
+        if config_opt.is_none() {
+            md = md.warning("Config contract not set. Please contact the administrator.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let config = config_opt.unwrap();
+        let branding: Branding = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_branding"),
+            Vec::new(env),
+        );
+
+        md = md
+            .h2("Current Branding")
+            .newline()
+            .text("- **Site Name:** ").text_string(&branding.site_name).newline()
+            .text("- **Tagline:** ").text_string(&branding.tagline).newline()
+            // Color swatch: inline span with background color and contrasting text
+            .raw_str("- **Primary Color:** <span style=\"background-color:")
+            .text_string(&branding.primary_color)
+            .raw_str(";color:#fff;padding:2px 8px;border-radius:4px;border:1px solid #333;\">")
+            .text_string(&branding.primary_color)
+            .raw_str("</span>\n");
+
+        if branding.logo_url.len() > 0 {
+            md = md.text("- **Logo URL:** ").text_string(&branding.logo_url).newline();
+        } else {
+            md = md.text("- **Logo URL:** *(not set)*").newline();
+        }
+
+        if branding.favicon_url.len() > 0 {
+            md = md.text("- **Favicon URL:** ").text_string(&branding.favicon_url).newline();
+        } else {
+            md = md.text("- **Favicon URL:** *(not set)*").newline();
+        }
+
+        if branding.footer_text.len() > 0 {
+            md = md.text("- **Footer Text:** ").text_string(&branding.footer_text).newline();
+        } else {
+            md = md.text("- **Footer Text:** *(using default)*").newline();
+        }
+
+        // Update forms - one per field, pre-populated with current values
+        // Each field is wrapped in a data-form div for proper form boundary detection
+        md = md
+            .newline()
+            .h2("Update Branding")
+            .newline()
+            // Site Name form
+            .raw_str("<div data-form>\n\n")
+            .h3("Site Name")
+            .input_with_value_string("site_name", "Site name", &branding.site_name)
+            .newline()
+            .form_link_to("Update Site Name", "admin", "set_site_name")
+            .raw_str("\n</div>\n\n")
+            // Tagline form
+            .raw_str("<div data-form>\n\n")
+            .h3("Tagline")
+            .textarea_markdown_with_value_string("tagline", 3, "Tagline", &branding.tagline)
+            .newline()
+            .form_link_to("Update Tagline", "admin", "set_tagline")
+            .raw_str("\n</div>\n\n")
+            // Primary Color form
+            .raw_str("<div data-form>\n\n")
+            .h3("Primary Color")
+            .input_with_value_string("primary_color", "CSS color (e.g., #7857e1)", &branding.primary_color)
+            .newline()
+            .form_link_to("Update Primary Color", "admin", "set_primary_color")
+            .raw_str("\n</div>\n\n")
+            // Logo URL form
+            .raw_str("<div data-form>\n\n")
+            .h3("Logo URL")
+            .input_with_value_string("logo_url", "URL to logo image", &branding.logo_url)
+            .newline()
+            .form_link_to("Update Logo URL", "admin", "set_logo_url")
+            .raw_str("\n</div>\n\n")
+            // Favicon URL form
+            .raw_str("<div data-form>\n\n")
+            .h3("Favicon URL")
+            .input_with_value_string("favicon_url", "URL to favicon", &branding.favicon_url)
+            .newline()
+            .form_link_to("Update Favicon URL", "admin", "set_favicon_url")
+            .raw_str("\n</div>\n\n")
+            // Footer Text form
+            .raw_str("<div data-form>\n\n")
+            .h3("Footer Text")
+            .textarea_markdown_with_value_string("footer_text", 3, "Custom footer text", &branding.footer_text)
+            .newline()
+            .form_link_to("Update Footer Text", "admin", "set_footer_text")
+            .raw_str("\n</div>\n\n")
+            .render_link("← Back to Settings", "/admin/settings");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render threshold settings page
+    fn render_threshold_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_settings_nav(env)
+            .h1("Creation Thresholds");
+
+        if !Self::is_registry_admin(env, viewer) {
+            md = md.warning("You must be a registry admin to access site settings.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
+
+        if config_opt.is_none() {
+            md = md.warning("Config contract not set. Please contact the administrator.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let config = config_opt.unwrap();
+
+        // Board thresholds
+        let board_thresholds: CreationThresholds = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_board_thresholds"),
+            Vec::new(env),
+        );
+
+        md = md
+            .h2("Board Creation Thresholds")
+            .text("**Minimum Karma:** ").number(board_thresholds.min_karma as u32).newline()
+            .text("**Minimum Account Age (seconds):** ").number(board_thresholds.min_account_age_secs as u32).newline()
+            .text("**Minimum Post Count:** ").number(board_thresholds.min_post_count).newline()
+            .text("**Require Profile:** ").text(if board_thresholds.require_profile { "Yes" } else { "No" }).newline()
+            .text("**Per-User Limit:** ").number(board_thresholds.per_user_limit).text(" (0 = unlimited)").newline()
+            .text("**XLM Lock (stroops):** ").number(board_thresholds.xlm_lock_stroops as u32).newline()
+            .newline()
+            .h3("Update Board Thresholds")
+            .raw_str("<input type=\"hidden\" name=\"threshold_type\" value=\"board\" />\n")
+            .input("min_karma", "Min Karma (0 = none)")
+            .newline()
+            .input("min_account_age_secs", "Min Account Age (seconds, 0 = none)")
+            .newline()
+            .input("min_post_count", "Min Post Count (0 = none)")
+            .newline()
+            .input("require_profile", "Require Profile (true/false)")
+            .newline()
+            .input("per_user_limit", "Per-User Limit (0 = unlimited)")
+            .newline()
+            .input("xlm_lock_stroops", "XLM Lock in stroops (0 = none)")
+            .newline()
+            .form_link_to("Update Board Thresholds", "admin", "update_thresholds");
+
+        // Community thresholds
+        let community_thresholds: CreationThresholds = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_community_thresholds"),
+            Vec::new(env),
+        );
+
+        md = md
+            .newline()
+            .h2("Community Creation Thresholds")
+            .text("**Minimum Karma:** ").number(community_thresholds.min_karma as u32).newline()
+            .text("**Minimum Account Age (seconds):** ").number(community_thresholds.min_account_age_secs as u32).newline()
+            .text("**Minimum Post Count:** ").number(community_thresholds.min_post_count).newline()
+            .text("**Require Profile:** ").text(if community_thresholds.require_profile { "Yes" } else { "No" }).newline()
+            .text("**Per-User Limit:** ").number(community_thresholds.per_user_limit).text(" (0 = unlimited)").newline()
+            .text("**XLM Lock (stroops):** ").number(community_thresholds.xlm_lock_stroops as u32).newline()
+            .newline()
+            .h3("Update Community Thresholds")
+            .raw_str("<input type=\"hidden\" name=\"threshold_type\" value=\"community\" />\n")
+            .input("min_karma", "Min Karma (0 = none)")
+            .newline()
+            .input("min_account_age_secs", "Min Account Age (seconds, 0 = none)")
+            .newline()
+            .input("min_post_count", "Min Post Count (0 = none)")
+            .newline()
+            .input("require_profile", "Require Profile (true/false)")
+            .newline()
+            .input("per_user_limit", "Per-User Limit (0 = unlimited)")
+            .newline()
+            .input("xlm_lock_stroops", "XLM Lock in stroops (0 = none)")
+            .newline()
+            .form_link_to("Update Community Thresholds", "admin", "update_thresholds")
+            .newline()
+            .newline()
+            .render_link("← Back to Settings", "/admin/settings");
+
+        Self::render_footer_into(md).build()
+    }
+
+    /// Render operational settings page
+    fn render_operational_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_settings_nav(env)
+            .h1("Operational Settings");
+
+        if !Self::is_registry_admin(env, viewer) {
+            md = md.warning("You must be a registry admin to access site settings.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
+
+        if config_opt.is_none() {
+            md = md.warning("Config contract not set. Please contact the administrator.");
+            return Self::render_footer_into(md).build();
+        }
+
+        let config = config_opt.unwrap();
+
+        // Get current values
+        let max_reply_depth: u32 = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_max_reply_depth"),
+            Vec::new(env),
+        );
+        let reply_chunk_size: u32 = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_reply_chunk_size"),
+            Vec::new(env),
+        );
+        let default_edit_window: u64 = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_default_edit_window"),
+            Vec::new(env),
+        );
+        let thread_body_max_bytes: u32 = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_thread_body_max_bytes"),
+            Vec::new(env),
+        );
+        let board_name_limits: NameLimits = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_board_name_limits"),
+            Vec::new(env),
+        );
+        let community_name_limits: NameLimits = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_community_name_limits"),
+            Vec::new(env),
+        );
+
+        md = md
+            .h2("Reply Settings")
+            .text("**Max Reply Depth:** ").number(max_reply_depth).newline()
+            .text("**Reply Chunk Size:** ").number(reply_chunk_size).newline()
+            .newline()
+            .input("max_reply_depth", "Max Reply Depth")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_max_reply_depth")
+            .newline()
+            .input("reply_chunk_size", "Reply Chunk Size")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_reply_chunk_size")
+            .newline()
+            .newline()
+            .h2("Content Settings")
+            .text("**Default Edit Window:** ").number(default_edit_window as u32).text(" seconds (").number((default_edit_window / 3600) as u32).text(" hours)").newline()
+            .text("**Thread Body Max Bytes:** ").number(thread_body_max_bytes).newline()
+            .newline()
+            .input("default_edit_window", "Edit Window (seconds)")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_default_edit_window")
+            .newline()
+            .input("thread_body_max_bytes", "Thread Body Max Bytes")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_thread_body_max_bytes")
+            .newline()
+            .newline()
+            .h2("Name Length Limits")
+            .text("**Board Name:** ").number(board_name_limits.min_length).text("-").number(board_name_limits.max_length).text(" characters").newline()
+            .text("**Community Name:** ").number(community_name_limits.min_length).text("-").number(community_name_limits.max_length).text(" characters").newline()
+            .newline()
+            .h3("Update Board Name Limits")
+            .raw_str("<input type=\"hidden\" name=\"limit_type\" value=\"board\" />\n")
+            .input("min_length", "Min Length")
+            .newline()
+            .input("max_length", "Max Length")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_name_limits")
+            .newline()
+            .newline()
+            .h3("Update Community Name Limits")
+            .raw_str("<input type=\"hidden\" name=\"limit_type\" value=\"community\" />\n")
+            .input("min_length", "Min Length")
+            .newline()
+            .input("max_length", "Max Length")
+            .newline()
+            .form_link_to("Update", "admin", "config_set_name_limits")
+            .newline()
+            .newline()
+            .render_link("← Back to Settings", "/admin/settings");
 
         Self::render_footer_into(md).build()
     }
@@ -3489,6 +3956,246 @@ impl BoardsAdmin {
         );
     }
 
+    // ========================================================================
+    // Config Operations (site-wide settings)
+    // ========================================================================
+
+    /// Helper to verify caller is registry admin
+    fn require_registry_admin(env: &Env, caller: &Address) {
+        caller.require_auth();
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
+        let is_admin: bool = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "is_admin"),
+            Vec::from_array(env, [caller.into_val(env)]),
+        );
+        if !is_admin {
+            panic!("Caller must be registry admin");
+        }
+    }
+
+    /// Helper to get and update branding
+    fn update_branding_field<F>(env: &Env, caller: &Address, updater: F)
+    where
+        F: FnOnce(&mut Branding),
+    {
+        Self::require_registry_admin(env, caller);
+
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
+
+        // Get current branding
+        let mut branding: Branding = env.invoke_contract(
+            &config,
+            &Symbol::new(env, "get_branding"),
+            Vec::new(env),
+        );
+
+        // Apply the update
+        updater(&mut branding);
+
+        // Save updated branding
+        let args: Vec<Val> = Vec::from_array(env, [branding.into_val(env), caller.into_val(env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(env, "set_branding"), args);
+    }
+
+    /// Set site name (registry admin only)
+    pub fn set_site_name(env: Env, site_name: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            if site_name.len() > 0 {
+                b.site_name = site_name;
+            }
+        });
+    }
+
+    /// Set tagline (registry admin only)
+    pub fn set_tagline(env: Env, tagline: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            if tagline.len() > 0 {
+                b.tagline = tagline;
+            }
+        });
+    }
+
+    /// Set primary color (registry admin only)
+    pub fn set_primary_color(env: Env, primary_color: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            if primary_color.len() > 0 {
+                b.primary_color = primary_color;
+            }
+        });
+    }
+
+    /// Set logo URL (registry admin only)
+    pub fn set_logo_url(env: Env, logo_url: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            b.logo_url = logo_url;
+        });
+    }
+
+    /// Set favicon URL (registry admin only)
+    pub fn set_favicon_url(env: Env, favicon_url: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            b.favicon_url = favicon_url;
+        });
+    }
+
+    /// Set footer text (registry admin only)
+    pub fn set_footer_text(env: Env, footer_text: String, caller: Address) {
+        Self::update_branding_field(&env, &caller, |b| {
+            b.footer_text = footer_text;
+        });
+    }
+
+    /// Update creation thresholds (registry admin only)
+    pub fn update_thresholds(
+        env: Env,
+        threshold_type: String,
+        min_karma: Option<String>,
+        min_account_age_secs: Option<String>,
+        min_post_count: Option<String>,
+        require_profile: Option<String>,
+        per_user_limit: Option<String>,
+        xlm_lock_stroops: Option<String>,
+        caller: Address,
+    ) {
+        Self::require_registry_admin(&env, &caller);
+
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
+
+        // Determine type
+        let is_board = {
+            let len = threshold_type.len() as usize;
+            let mut buf = [0u8; 16];
+            let copy_len = core::cmp::min(len, 16);
+            threshold_type.copy_into_slice(&mut buf[..copy_len]);
+            &buf[..5] == b"board"
+        };
+
+        // Get current thresholds
+        let mut thresholds: CreationThresholds = if is_board {
+            env.invoke_contract(&config, &Symbol::new(&env, "get_board_thresholds"), Vec::new(&env))
+        } else {
+            env.invoke_contract(&config, &Symbol::new(&env, "get_community_thresholds"), Vec::new(&env))
+        };
+
+        // Update fields
+        if let Some(s) = min_karma {
+            if s.len() > 0 {
+                thresholds.min_karma = parse_string_to_u32(&env, &s) as i64;
+            }
+        }
+        if let Some(s) = min_account_age_secs {
+            if s.len() > 0 {
+                thresholds.min_account_age_secs = parse_string_to_u32(&env, &s) as u64;
+            }
+        }
+        if let Some(s) = min_post_count {
+            if s.len() > 0 {
+                thresholds.min_post_count = parse_string_to_u32(&env, &s);
+            }
+        }
+        if let Some(s) = require_profile {
+            let len = s.len() as usize;
+            if len == 4 {
+                let mut buf = [0u8; 4];
+                s.copy_into_slice(&mut buf);
+                thresholds.require_profile = &buf == b"true";
+            }
+        }
+        if let Some(s) = per_user_limit {
+            if s.len() > 0 {
+                thresholds.per_user_limit = parse_string_to_u32(&env, &s);
+            }
+        }
+        if let Some(s) = xlm_lock_stroops {
+            if s.len() > 0 {
+                thresholds.xlm_lock_stroops = parse_string_to_u32(&env, &s) as i128;
+            }
+        }
+
+        // Save updated thresholds
+        let func_name = if is_board { "set_board_thresholds" } else { "set_community_thresholds" };
+        let args: Vec<Val> = Vec::from_array(&env, [thresholds.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, func_name), args);
+    }
+
+    /// Set site-wide max reply depth (registry admin only)
+    pub fn config_set_max_reply_depth(env: Env, max_reply_depth: String, caller: Address) {
+        Self::require_registry_admin(&env, &caller);
+        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let depth = parse_string_to_u32(&env, &max_reply_depth);
+        let args: Vec<Val> = Vec::from_array(&env, [depth.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_max_reply_depth"), args);
+    }
+
+    /// Set site-wide reply chunk size (registry admin only)
+    pub fn config_set_reply_chunk_size(env: Env, reply_chunk_size: String, caller: Address) {
+        Self::require_registry_admin(&env, &caller);
+        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let size = parse_string_to_u32(&env, &reply_chunk_size);
+        let args: Vec<Val> = Vec::from_array(&env, [size.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_reply_chunk_size"), args);
+    }
+
+    /// Set default edit window (registry admin only)
+    pub fn config_set_default_edit_window(env: Env, default_edit_window: String, caller: Address) {
+        Self::require_registry_admin(&env, &caller);
+        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let seconds = parse_string_to_u32(&env, &default_edit_window) as u64;
+        let args: Vec<Val> = Vec::from_array(&env, [seconds.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_default_edit_window"), args);
+    }
+
+    /// Set thread body max bytes (registry admin only)
+    pub fn config_set_thread_body_max_bytes(env: Env, thread_body_max_bytes: String, caller: Address) {
+        Self::require_registry_admin(&env, &caller);
+        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let max_bytes = parse_string_to_u32(&env, &thread_body_max_bytes);
+        let args: Vec<Val> = Vec::from_array(&env, [max_bytes.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_thread_body_max_bytes"), args);
+    }
+
+    /// Set name limits (registry admin only)
+    pub fn config_set_name_limits(
+        env: Env,
+        limit_type: String,
+        min_length: String,
+        max_length: String,
+        caller: Address,
+    ) {
+        Self::require_registry_admin(&env, &caller);
+        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+
+        let is_board = {
+            let len = limit_type.len() as usize;
+            let mut buf = [0u8; 16];
+            let copy_len = core::cmp::min(len, 16);
+            limit_type.copy_into_slice(&mut buf[..copy_len]);
+            &buf[..5] == b"board"
+        };
+
+        let limits = NameLimits {
+            min_length: parse_string_to_u32(&env, &min_length),
+            max_length: parse_string_to_u32(&env, &max_length),
+        };
+
+        let func_name = if is_board { "set_board_name_limits" } else { "set_community_name_limits" };
+        let args: Vec<Val> = Vec::from_array(&env, [limits.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&config, &Symbol::new(&env, func_name), args);
+    }
+
     /// Upgrade the contract WASM
     pub fn upgrade(env: Env, new_wasm_hash: BytesN<32>) {
         let registry: Address = env
@@ -3520,13 +4227,15 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let config = Address::generate(&env);
 
-        client.init(&registry, &permissions, &content, &theme);
+        client.init(&registry, &permissions, &content, &theme, &config);
 
         assert_eq!(client.get_registry(), registry);
         assert_eq!(client.get_permissions(), permissions);
         assert_eq!(client.get_content(), content);
         assert_eq!(client.get_theme(), theme);
+        assert_eq!(client.get_config(), Some(config));
     }
 
     #[test]
@@ -3542,10 +4251,11 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let config = Address::generate(&env);
 
-        client.init(&registry, &permissions, &content, &theme);
+        client.init(&registry, &permissions, &content, &theme, &config);
         // Should panic on second init
-        client.init(&registry, &permissions, &content, &theme);
+        client.init(&registry, &permissions, &content, &theme, &config);
     }
 
     #[test]
@@ -3560,8 +4270,9 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
+        let config = Address::generate(&env);
 
-        client.init(&registry, &permissions, &content, &theme);
+        client.init(&registry, &permissions, &content, &theme, &config);
 
         // Render unknown path
         let path = String::from_str(&env, "/unknown");

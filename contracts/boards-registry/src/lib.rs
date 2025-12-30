@@ -40,6 +40,10 @@ pub enum RegistryKey {
     BoardCommunity(u64),
     /// Voting contract address
     VotingContract,
+    /// Config contract address
+    ConfigContract,
+    /// Count of boards created by a user (for threshold limits)
+    UserBoardCount(Address),
 }
 
 /// Addresses of shared service contracts
@@ -206,6 +210,56 @@ impl BoardsRegistry {
             panic!("Registry is paused");
         }
 
+        // Check creation thresholds if config contract is set
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&RegistryKey::ConfigContract)
+        {
+            let user_board_count = Self::count_user_boards(env.clone(), caller.clone());
+
+            // Get account age from permissions contract
+            let contracts = Self::get_contracts(env.clone());
+            let account_age_args: Vec<Val> =
+                Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            let user_account_age: u64 = env.invoke_contract(
+                &contracts.permissions,
+                &Symbol::new(&env, "get_account_age"),
+                account_age_args,
+            );
+
+            // Check thresholds
+            let check_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    0u32.into_val(&env),  // CreationType::Board = 0
+                    caller.clone().into_val(&env),
+                    user_board_count.into_val(&env),
+                    0i64.into_val(&env),  // user_karma (TODO: get from voting contract)
+                    user_account_age.into_val(&env),
+                    0u32.into_val(&env),  // user_post_count (TODO: get from content)
+                    false.into_val(&env), // has_profile (TODO: get from profile contract)
+                ],
+            );
+
+            // Call config.check_thresholds and check result
+            // The return type is ThresholdResult { passed: bool, reason: String }
+            let result: (bool, String) = env.invoke_contract(
+                &config,
+                &Symbol::new(&env, "check_thresholds"),
+                check_args,
+            );
+
+            if !result.0 {
+                // Convert reason to panic message
+                let mut buf = [0u8; 64];
+                let len = core::cmp::min(result.1.len() as usize, 64);
+                result.1.copy_into_slice(&mut buf[..len]);
+                let reason = core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
+                panic!("{}", reason);
+            }
+        }
+
         // Get next board ID
         let board_id: u64 = env
             .storage()
@@ -323,6 +377,20 @@ impl BoardsRegistry {
             &contracts.permissions,
             &fn_name,
             args,
+        );
+
+        // Increment user's board count for threshold tracking
+        let user_count = Self::count_user_boards(env.clone(), caller.clone());
+        env.storage()
+            .persistent()
+            .set(&RegistryKey::UserBoardCount(caller.clone()), &(user_count + 1));
+
+        // Record first-seen timestamp for the user (idempotent if already recorded)
+        let record_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &contracts.permissions,
+            &Symbol::new(&env, "record_first_seen"),
+            record_args,
         );
 
         board_id
@@ -1057,6 +1125,36 @@ impl BoardsRegistry {
             .get(&RegistryKey::VotingContract)
     }
 
+    /// Set the config contract address (admin only)
+    pub fn set_config_contract(env: Env, config: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
+
+        env.storage()
+            .instance()
+            .set(&RegistryKey::ConfigContract, &config);
+
+        // Also register with alias "config" for form:@config:method
+        env.storage().instance().set(
+            &RegistryKey::Contract(Symbol::new(&env, "config")),
+            &config,
+        );
+    }
+
+    /// Get the config contract address
+    pub fn get_config_contract(env: Env) -> Option<Address> {
+        env.storage()
+            .instance()
+            .get(&RegistryKey::ConfigContract)
+    }
+
+    /// Get how many boards a user has created
+    pub fn count_user_boards(env: Env, user: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&RegistryKey::UserBoardCount(user))
+            .unwrap_or(0)
+    }
+
     /// Create a board within a community
     /// This creates the board and associates it with the community
     pub fn create_board_in_community(
@@ -1431,11 +1529,11 @@ mod test {
         assert!(!client.is_paused());
 
         // Pause
-        client.set_paused(&true);
+        client.set_paused(&true, &admin);
         assert!(client.is_paused());
 
         // Unpause
-        client.set_paused(&false);
+        client.set_paused(&false, &admin);
         assert!(!client.is_paused());
     }
 
@@ -1458,7 +1556,7 @@ mod test {
         client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
         // Pause the registry
-        client.set_paused(&true);
+        client.set_paused(&true, &admin);
 
         // Try to create a board - should panic
         let creator = Address::generate(&env);
@@ -1666,7 +1764,7 @@ mod test {
 
         // Register a new contract (e.g., profile service)
         let profile_contract = Address::generate(&env);
-        client.set_contract(&Symbol::new(&env, "profile"), &profile_contract);
+        client.set_contract(&Symbol::new(&env, "profile"), &profile_contract, &admin);
 
         // Should be retrievable via get_contract_by_alias
         assert_eq!(
@@ -1682,7 +1780,7 @@ mod test {
 
         // Can update existing contract
         let new_permissions = Address::generate(&env);
-        client.set_contract(&Symbol::new(&env, "perms"), &new_permissions);
+        client.set_contract(&Symbol::new(&env, "perms"), &new_permissions, &admin);
         assert_eq!(
             client.get_contract(&Symbol::new(&env, "perms")),
             Some(new_permissions)

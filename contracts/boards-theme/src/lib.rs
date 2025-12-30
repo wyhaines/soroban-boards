@@ -12,7 +12,7 @@
 //! - get_* functions - contract address getters
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, String};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec};
 
 // Declare render capabilities
 soroban_render!(markdown, styles);
@@ -29,6 +29,8 @@ pub enum ThemeKey {
     Content,
     /// Admin contract address
     Admin,
+    /// Config contract address (for custom CSS)
+    Config,
 }
 
 #[contract]
@@ -37,7 +39,7 @@ pub struct BoardsTheme;
 #[contractimpl]
 impl BoardsTheme {
     /// Initialize the theme contract
-    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, admin: Address) {
+    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, admin: Address, config: Address) {
         if env.storage().instance().has(&ThemeKey::Registry) {
             panic!("Already initialized");
         }
@@ -45,6 +47,30 @@ impl BoardsTheme {
         env.storage().instance().set(&ThemeKey::Permissions, &permissions);
         env.storage().instance().set(&ThemeKey::Content, &content);
         env.storage().instance().set(&ThemeKey::Admin, &admin);
+        env.storage().instance().set(&ThemeKey::Config, &config);
+    }
+
+    /// Get config contract address
+    pub fn get_config(env: Env) -> Option<Address> {
+        env.storage().instance().get(&ThemeKey::Config)
+    }
+
+    /// Set config contract address (for upgrades - requires registry admin auth)
+    pub fn set_config(env: Env, config: Address, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is the registry (admin)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&ThemeKey::Registry)
+            .expect("Not initialized");
+
+        if caller != registry {
+            panic!("Only registry can set config");
+        }
+
+        env.storage().instance().set(&ThemeKey::Config, &config);
     }
 
     /// Get admin contract address
@@ -88,7 +114,7 @@ impl BoardsTheme {
     /// Named render_styles to follow the render_* convention for routable content
     /// Accepts path/viewer for consistency with render_* convention (unused here)
     pub fn render_styles(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
-        StyleBuilder::new(&env)
+        let base_css = StyleBuilder::new(&env)
             .root_vars_start()
             // Primary colors (Stellar lilac)
             .var("primary", "#7857e1")
@@ -336,7 +362,37 @@ impl BoardsTheme {
             .rule(".reply-meta", "gap: var(--space-xs);")
             .rule(".reply-meta a", "padding: 0.125rem 0.25rem;")
             .media_end()
-            .build()
+            .build();
+
+        // Append custom CSS from config if available
+        let custom_css = Self::get_custom_css_from_config(&env);
+        if custom_css.len() > 0 {
+            let mut result = base_css;
+            result.append(&Bytes::from_slice(&env, b"\n/* Custom CSS */\n"));
+            result.append(&custom_css);
+            result
+        } else {
+            base_css
+        }
+    }
+
+    /// Get custom CSS from config contract, with graceful fallback
+    fn get_custom_css_from_config(env: &Env) -> Bytes {
+        let config_opt: Option<Address> = env.storage().instance().get(&ThemeKey::Config);
+
+        if let Some(config) = config_opt {
+            let result = env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
+                &config,
+                &Symbol::new(env, "render_custom_css"),
+                Vec::from_array(env, [Option::<String>::None.into_val(env), Option::<Address>::None.into_val(env)]),
+            );
+            if let Ok(Ok(css)) = result {
+                return css;
+            }
+        }
+
+        // No custom CSS
+        Bytes::new(env)
     }
 
     /// Upgrade the contract WASM
@@ -370,9 +426,11 @@ mod test {
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let admin = Address::generate(&env);
-        client.init(&registry, &permissions, &content, &admin);
+        let config = Address::generate(&env);
+        client.init(&registry, &permissions, &content, &admin, &config);
 
         let css = client.styles();
         assert!(css.len() > 0);
+        assert_eq!(client.get_config(), Some(config));
     }
 }

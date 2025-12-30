@@ -43,6 +43,7 @@ UPGRADE_ADMIN=false
 UPGRADE_MAIN=false
 UPGRADE_COMMUNITY=false
 UPGRADE_VOTING=false
+UPGRADE_CONFIG=false
 UPGRADE_BOARDS=false
 
 if [ $# -gt 0 ]; then
@@ -57,11 +58,12 @@ if [ $# -gt 0 ]; then
             main)        UPGRADE_MAIN=true ;;
             community)   UPGRADE_COMMUNITY=true ;;
             voting)      UPGRADE_VOTING=true ;;
+            config)      UPGRADE_CONFIG=true ;;
             boards)      UPGRADE_BOARDS=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, boards, all"
+                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, config, boards, all"
                 exit 1
                 ;;
         esac
@@ -77,6 +79,7 @@ if [ "$UPGRADE_ALL" = true ]; then
     UPGRADE_MAIN=true
     UPGRADE_COMMUNITY=true
     UPGRADE_VOTING=true
+    UPGRADE_CONFIG=true
     UPGRADE_BOARDS=true
 fi
 
@@ -339,6 +342,104 @@ if [ "$UPGRADE_VOTING" = true ]; then
     echo ""
 fi
 
+# Function to upgrade config contract directly (handles old 2-param and new 1-param signatures)
+upgrade_config_direct() {
+    local contract_id=$1
+    local wasm_hash=$2
+
+    echo -e "${YELLOW}Upgrading Config ($contract_id) directly...${NC}"
+
+    local deployer_addr=$(stellar keys address $DEPLOYER)
+
+    # Try the new 1-param signature first (via registry), fall back to old 2-param signature
+    local result=$(stellar contract invoke \
+        --id "$REGISTRY_ID" \
+        --source $DEPLOYER \
+        --network $NETWORK \
+        -- upgrade_contract \
+        --contract_id "$contract_id" \
+        --new_wasm_hash "$wasm_hash" \
+        --caller "$deployer_addr" 2>&1) || true
+
+    if echo "$result" | grep -q "MismatchingParameterLen"; then
+        echo -e "${YELLOW}Old config contract detected, using direct 2-param upgrade...${NC}"
+        # Old contract has upgrade(wasm_hash, caller) - call directly
+        stellar contract invoke \
+            --id "$contract_id" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- upgrade \
+            --new_wasm_hash "$wasm_hash" \
+            --caller "$deployer_addr" 2>&1 | grep -v "^ℹ" || true
+    fi
+
+    echo -e "${GREEN}Config upgraded successfully${NC}"
+}
+
+# Upgrade or Deploy Config contract
+if [ "$UPGRADE_CONFIG" = true ]; then
+    echo -e "${GREEN}=== Config Contract ===${NC}"
+
+    # Check if CONFIG_ID exists in env
+    if [ -z "$CONFIG_ID" ]; then
+        echo -e "${YELLOW}Config contract not found - deploying new...${NC}"
+        CONFIG_ID=$(deploy_contract "boards_config")
+
+        # Initialize Config
+        echo -e "${YELLOW}Initializing Config...${NC}"
+        stellar contract invoke \
+            --id "$CONFIG_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- init \
+            --registry "$REGISTRY_ID" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Config initialized${NC}"
+
+        # Register with registry
+        echo -e "${YELLOW}Registering Config with Registry...${NC}"
+        stellar contract invoke \
+            --id "$REGISTRY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_contract \
+            --alias config \
+            --address "$CONFIG_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Config registered as @config${NC}"
+
+        # Update Main contract with config address
+        echo -e "${YELLOW}Setting Config in Main contract...${NC}"
+        stellar contract invoke \
+            --id "$MAIN_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_config \
+            --config "$CONFIG_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Main updated with Config${NC}"
+
+        # Update Theme contract with config address
+        echo -e "${YELLOW}Setting Config in Theme contract...${NC}"
+        stellar contract invoke \
+            --id "$THEME_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_config \
+            --config "$CONFIG_ID" \
+            --caller "$REGISTRY_ID" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Theme updated with Config${NC}"
+
+        # Update env file
+        echo "CONFIG_ID=$CONFIG_ID" >> "$ENV_FILE"
+    else
+        echo -e "Upgrading existing Config ($CONFIG_ID)"
+        CONFIG_HASH=$(install_wasm "boards_config")
+        echo -e "WASM hash: ${BLUE}$CONFIG_HASH${NC}"
+        upgrade_config_direct "$CONFIG_ID" "$CONFIG_HASH"
+    fi
+    echo ""
+fi
+
 # Upgrade Board contracts (need to iterate through all boards)
 if [ "$UPGRADE_BOARDS" = true ]; then
     echo -e "${GREEN}=== Upgrading Board Contracts ===${NC}"
@@ -407,6 +508,9 @@ if [ -n "$COMMUNITY_ID" ]; then
 fi
 if [ -n "$VOTING_ID" ]; then
     echo "  Voting:       $VOTING_ID"
+fi
+if [ -n "$CONFIG_ID" ]; then
+    echo "  Config:       $CONFIG_ID"
 fi
 echo ""
 echo "All existing data has been preserved."

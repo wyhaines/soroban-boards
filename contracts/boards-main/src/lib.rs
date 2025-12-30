@@ -42,6 +42,8 @@ pub enum MainKey {
     Admin,
     /// Community contract address
     Community,
+    /// Config contract address (for branding/settings)
+    Config,
 }
 
 /// Board metadata (same structure as registry for compatibility)
@@ -103,7 +105,7 @@ pub struct BoardsMain;
 #[contractimpl]
 impl BoardsMain {
     /// Initialize the main contract with service contract addresses
-    pub fn init(env: Env, registry: Address, theme: Address, permissions: Address, content: Address, admin: Address, community: Address) {
+    pub fn init(env: Env, registry: Address, theme: Address, permissions: Address, content: Address, admin: Address, community: Address, config: Address) {
         if env.storage().instance().has(&MainKey::Registry) {
             panic!("Already initialized");
         }
@@ -114,6 +116,33 @@ impl BoardsMain {
         env.storage().instance().set(&MainKey::Content, &content);
         env.storage().instance().set(&MainKey::Admin, &admin);
         env.storage().instance().set(&MainKey::Community, &community);
+        env.storage().instance().set(&MainKey::Config, &config);
+    }
+
+    /// Get config contract address
+    pub fn get_config(env: Env) -> Option<Address> {
+        env.storage().instance().get(&MainKey::Config)
+    }
+
+    /// Set config contract address (for upgrades - requires registry admin auth)
+    pub fn set_config(env: Env, config: Address, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is a registry admin
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+
+        if !is_admin {
+            panic!("Only registry admin can set config");
+        }
+
+        env.storage().instance().set(&MainKey::Config, &config);
     }
 
     /// Get community contract address
@@ -267,17 +296,17 @@ impl BoardsMain {
     pub fn set_community(env: Env, community: Address, caller: Address) {
         caller.require_auth();
 
-        // Verify caller is the registry admin
+        // Verify caller is a registry admin
         let registry: Address = env
             .storage()
             .instance()
             .get(&MainKey::Registry)
             .expect("Not initialized");
 
-        let admin_args: Vec<Val> = Vec::new(&env);
-        let admin: Address = env.invoke_contract(&registry, &Symbol::new(&env, "get_admin"), admin_args);
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
 
-        if caller != admin {
+        if !is_admin {
             panic!("Only registry admin can set community");
         }
 
@@ -333,6 +362,8 @@ impl BoardsMain {
                 Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
             })
             // Admin routes - delegate to admin contract
+            .or_handle(b"/admin/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/admin/settings/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/banned", |_| Self::delegate_to_admin(&env, &path, &viewer))
@@ -377,6 +408,29 @@ impl BoardsMain {
     // Navigation
     // ========================================================================
 
+    /// Build an include tag for config contract: {{include contract=CONTRACT_ID func="name"}}
+    fn config_include(env: &Env, func_name: &[u8]) -> Bytes {
+        let config_opt: Option<Address> = env.storage().instance().get(&MainKey::Config);
+
+        if let Some(config) = config_opt {
+            let config_id = Self::address_to_contract_id_string(env, &config);
+            let mut result = Bytes::from_slice(env, b"{{include contract=");
+            result.append(&config_id);
+            result.append(&Bytes::from_slice(env, b" func=\""));
+            result.append(&Bytes::from_slice(env, func_name));
+            result.append(&Bytes::from_slice(env, b"\"}}"));
+            result
+        } else {
+            // Fallback if config not set
+            match func_name {
+                b"site_name" => Bytes::from_slice(env, b"Soroban Boards"),
+                b"tagline" => Bytes::from_slice(env, b"Decentralized discussion forums on Stellar"),
+                b"footer_text" => Bytes::from_slice(env, b"Powered by Soroban Render on Stellar"),
+                _ => Bytes::new(env),
+            }
+        }
+    }
+
     /// Render the navigation bar with profile link
     fn render_nav<'a>(env: &'a Env, viewer: &Option<Address>) -> MarkdownBuilder<'a> {
         let registry: Address = env
@@ -385,9 +439,18 @@ impl BoardsMain {
             .get(&MainKey::Registry)
             .expect("Not initialized");
 
+        // Meta tags for document head (favicon, title, theme-color)
+        // Included at start so viewer can extract and apply them
+        let meta_include = Self::config_include(env, b"meta");
+
+        // Site name loaded via include for progressive loading
+        let site_name_include = Self::config_include(env, b"site_name");
         let mut md = MarkdownBuilder::new(env)
+            .raw(meta_include)  // Meta tags first (viewer extracts and removes)
             .div_start("nav-bar")
-            .render_link("Soroban Boards", "/")
+            .raw_str("<a href=\"render:/\">")
+            .raw(site_name_include)
+            .raw_str("</a>")
             .render_link("Communities", "/communities")
             .render_link("Help", "/help");
 
@@ -437,13 +500,11 @@ impl BoardsMain {
         md.div_end()
     }
 
-    /// Append footer to builder
-    fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
+    /// Append footer to builder - uses include for progressive loading
+    fn render_footer_into<'a>(env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
+        let footer_include = Self::config_include(env, b"footer_text");
         md.div_start("footer")
-            .text("Powered by ")
-            .link("Soroban Render", "https://github.com/wyhaines/soroban-render")
-            .text(" on ")
-            .link("Stellar", "https://stellar.org")
+            .raw(footer_include)
             .div_end()
     }
 
@@ -459,10 +520,18 @@ impl BoardsMain {
             .get(&MainKey::Registry)
             .expect("Not initialized");
 
+        // Branding loaded via includes for progressive loading
+        let site_name_include = Self::config_include(env, b"site_name");
+        let tagline_include = Self::config_include(env, b"tagline");
+
         let mut md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar div for markdown parsing
-            .h1("Soroban Boards")
-            .paragraph("Decentralized discussion forums on Stellar");
+            .raw_str("<h1>")
+            .raw(site_name_include)
+            .raw_str("</h1>\n<p>")
+            .raw(tagline_include)
+            .raw_str("</p>\n")
+            .newline();  // Blank line before callout for markdown parsing
 
         // Show connection status
         if viewer.is_some() {
@@ -618,7 +687,7 @@ impl BoardsMain {
 
         md = md.newline();
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render create board form
@@ -629,7 +698,7 @@ impl BoardsMain {
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to create a board.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         md = md
@@ -659,7 +728,7 @@ impl BoardsMain {
             .newline()
             .render_link("Cancel", "/");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render help page
@@ -681,7 +750,7 @@ impl BoardsMain {
             .list_item("Browse existing boards or create a new one")
             .list_item("Create threads and reply to discussions")
             .list_item("Flag inappropriate content");
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render crosspost form
@@ -693,7 +762,7 @@ impl BoardsMain {
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to crosspost.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Parse query params from path
@@ -705,7 +774,7 @@ impl BoardsMain {
 
         if from_board == 0 || from_thread == 0 {
             md = md.warning("Invalid crosspost parameters.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get registry and content contract
@@ -725,7 +794,7 @@ impl BoardsMain {
 
         let Some(board_contract) = board_contract_opt else {
             md = md.warning("Original board not found.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         };
 
         // Get thread title
@@ -742,7 +811,7 @@ impl BoardsMain {
 
         let Some((thread_title, _author)) = thread_info else {
             md = md.warning("Original thread not found.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         };
 
         // Get board list for target selection
@@ -809,7 +878,7 @@ impl BoardsMain {
             .number(from_thread as u32)
             .raw_str(")");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Parse crosspost query parameters from path
@@ -898,7 +967,7 @@ impl BoardsMain {
         let md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar for markdown parsing
             .raw(content);
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Delegate rendering to the admin contract
@@ -1344,11 +1413,13 @@ mod test {
         let content = Address::generate(&env);
         let admin = Address::generate(&env);
         let community = Address::generate(&env);
+        let config = Address::generate(&env);
 
-        client.init(&registry, &theme, &permissions, &content, &admin, &community);
+        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
 
         assert_eq!(client.get_registry(), registry);
         assert_eq!(client.get_theme(), theme);
         assert_eq!(client.get_community(), Some(community));
+        assert_eq!(client.get_config(), Some(config));
     }
 }

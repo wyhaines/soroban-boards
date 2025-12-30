@@ -16,8 +16,12 @@ pub enum CommunityKey {
     Permissions,
     /// Theme contract address
     Theme,
+    /// Config contract address
+    Config,
     /// Total number of communities
     CommunityCount,
+    /// Count of communities created by a user (for threshold limits)
+    UserCommunityCount(Address),
     /// Community metadata by ID
     Community(u64),
     /// Community ID by name (case-insensitive lookup)
@@ -165,6 +169,32 @@ impl BoardsCommunity {
         env.storage().instance().set(&CommunityKey::CommunityCount, &0u64);
     }
 
+    /// Set the config contract address (called from registry)
+    pub fn set_config(env: Env, config: Address) {
+        // Verify caller is the registry
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Registry)
+            .expect("Not initialized");
+        registry.require_auth();
+
+        env.storage().instance().set(&CommunityKey::Config, &config);
+    }
+
+    /// Get the config contract address
+    pub fn get_config(env: Env) -> Option<Address> {
+        env.storage().instance().get(&CommunityKey::Config)
+    }
+
+    /// Get how many communities a user has created
+    pub fn count_user_communities(env: Env, user: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&CommunityKey::UserCommunityCount(user))
+            .unwrap_or(0)
+    }
+
     /// Create a new community
     /// Note: is_private and is_listed are Strings from form input ("true"/"false")
     pub fn create_community(
@@ -207,6 +237,58 @@ impl BoardsCommunity {
             .has(&CommunityKey::CommunityByName(name_lower.clone()))
         {
             panic!("Community name already exists");
+        }
+
+        // Check creation thresholds if config contract is set
+        if let Some(config) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&CommunityKey::Config)
+        {
+            let user_community_count = Self::count_user_communities(env.clone(), caller.clone());
+
+            // Get account age from permissions contract
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&CommunityKey::Permissions)
+                .expect("Not initialized");
+            let account_age_args: Vec<Val> =
+                Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            let user_account_age: u64 = env.invoke_contract(
+                &permissions,
+                &Symbol::new(&env, "get_account_age"),
+                account_age_args,
+            );
+
+            // Check thresholds
+            let check_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    1u32.into_val(&env),  // CreationType::Community = 1
+                    caller.clone().into_val(&env),
+                    user_community_count.into_val(&env),
+                    0i64.into_val(&env),  // user_karma (TODO: get from voting contract)
+                    user_account_age.into_val(&env),
+                    0u32.into_val(&env),  // user_post_count (TODO: get from content)
+                    false.into_val(&env), // has_profile (TODO: get from profile contract)
+                ],
+            );
+
+            // Call config.check_thresholds and check result
+            let result: (bool, String) = env.invoke_contract(
+                &config,
+                &Symbol::new(&env, "check_thresholds"),
+                check_args,
+            );
+
+            if !result.0 {
+                let mut buf = [0u8; 64];
+                let len = core::cmp::min(result.1.len() as usize, 64);
+                result.1.copy_into_slice(&mut buf[..len]);
+                let reason = core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
+                panic!("{}", reason);
+            }
         }
 
         // Get next community ID
@@ -272,6 +354,25 @@ impl BoardsCommunity {
         env.storage()
             .instance()
             .set(&CommunityKey::CommunityCount, &(community_id + 1));
+
+        // Increment user's community count for threshold tracking
+        let user_count = Self::count_user_communities(env.clone(), caller.clone());
+        env.storage()
+            .persistent()
+            .set(&CommunityKey::UserCommunityCount(caller.clone()), &(user_count + 1));
+
+        // Record first-seen timestamp for the user (idempotent if already recorded)
+        let permissions: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Permissions)
+            .expect("Not initialized");
+        let record_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &permissions,
+            &Symbol::new(&env, "record_first_seen"),
+            record_args,
+        );
 
         community_id
     }
