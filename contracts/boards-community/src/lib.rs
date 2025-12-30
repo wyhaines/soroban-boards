@@ -482,6 +482,39 @@ impl BoardsCommunity {
             .get(&CommunityKey::BoardCommunity(board_id))
     }
 
+    /// Fix board_count to match actual boards list (owner only)
+    /// Use this to repair data inconsistencies
+    pub fn fix_board_count(env: Env, community_id: u64, caller: Address) {
+        caller.require_auth();
+
+        let mut community: CommunityMeta = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::Community(community_id))
+            .expect("Community does not exist");
+
+        // Only owner can fix
+        if caller != community.owner {
+            panic!("Only community owner can fix board count");
+        }
+
+        // Get actual boards list
+        let boards: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::CommunityBoards(community_id))
+            .unwrap_or_else(|| Vec::new(&env));
+
+        // Update count to match reality
+        let actual_count = boards.len() as u64;
+        if community.board_count != actual_count {
+            community.board_count = actual_count;
+            env.storage()
+                .persistent()
+                .set(&CommunityKey::Community(community_id), &community);
+        }
+    }
+
     /// Set community rules (owner/admin only)
     pub fn set_rules(env: Env, community_id: u64, rules: CommunityRules, caller: Address) {
         caller.require_auth();
@@ -949,6 +982,9 @@ impl BoardsCommunity {
                     if sub_path.starts_with(b"/delete") {
                         return Self::render_delete(&env, &community_name, viewer);
                     }
+                    if sub_path.starts_with(b"/fix-count") {
+                        return Self::render_fix_count(&env, &community_name, viewer);
+                    }
                 }
 
                 return Self::render_community_home(&env, &community_name, viewer);
@@ -1336,6 +1372,14 @@ impl BoardsCommunity {
         // Danger Zone
         builder = builder.newline();
         builder = builder.h2("Danger Zone");
+
+        // Fix board count - useful for data inconsistencies
+        builder = builder.paragraph("If your board count appears incorrect, you can recalculate it:");
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/fix-count\">Fix Board Count</a>\n");
+        builder = builder.newline();
+
         builder = builder.warning("Deleting a community is permanent and cannot be undone.");
         builder = builder.newline();
         builder = builder.raw_str("<a href=\"render:/c/");
@@ -1415,6 +1459,89 @@ impl BoardsCommunity {
 
             builder = builder.newline();
             builder = builder.raw_str("<a href=\"form:delete_community\" class=\"soroban-action\">Delete Community</a>\n");
+            builder = builder.text(" | ");
+            builder = builder.raw_str("<a href=\"render:/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\">Cancel</a>\n");
+        }
+
+        builder.build()
+    }
+
+    fn render_fix_count(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
+        let community = match Self::get_community_by_name(env.clone(), name.clone()) {
+            Some(c) => c,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Community not found")
+                    .build();
+            }
+        };
+
+        // Check if viewer is owner
+        let is_owner = match &viewer {
+            Some(v) => *v == community.owner,
+            None => false,
+        };
+
+        if !is_owner {
+            return MarkdownBuilder::new(env)
+                .warning("Only the community owner can fix the board count.")
+                .build();
+        }
+
+        // Get actual boards
+        let boards: Vec<u64> = env
+            .storage()
+            .persistent()
+            .get(&CommunityKey::CommunityBoards(community.id))
+            .unwrap_or_else(|| Vec::new(env));
+
+        let actual_count = boards.len() as u64;
+
+        let mut builder = MarkdownBuilder::new(env);
+
+        // Back navigation
+        builder = builder.div_start("back-nav");
+        builder = builder.raw_str("<a href=\"render:/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/settings\" class=\"back-link\">← Back to Settings</a>");
+        builder = builder.div_end();
+        builder = builder.newline();
+
+        builder = builder.h1("Fix Board Count");
+
+        builder = builder.paragraph("Current status:");
+        builder = builder.raw_str("<ul>\n");
+        builder = builder.raw_str("<li>Stored board count: <strong>");
+        builder = builder.number(community.board_count as u32);
+        builder = builder.raw_str("</strong></li>\n");
+        builder = builder.raw_str("<li>Actual boards: <strong>");
+        builder = builder.number(actual_count as u32);
+        builder = builder.raw_str("</strong></li>\n");
+        builder = builder.raw_str("</ul>\n");
+        builder = builder.newline();
+
+        if community.board_count == actual_count {
+            builder = builder.tip("Board count is already correct. No fix needed.");
+            builder = builder.newline();
+            builder = builder.raw_str("<a href=\"render:/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\">Back to Settings</a>\n");
+        } else {
+            builder = builder.note("Click below to update the stored count to match reality.");
+            builder = builder.newline();
+            builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+            builder = builder.number(community.id as u32);
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+            builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\" />\n");
+            builder = builder.newline();
+            builder = builder.form_link_to("Fix Board Count", "community", "fix_board_count");
             builder = builder.text(" | ");
             builder = builder.raw_str("<a href=\"render:/c/");
             builder = builder.text_string(&community.name);
