@@ -46,6 +46,18 @@ pub enum MainKey {
     Config,
 }
 
+/// Chunk metadata for progressive loading
+#[contracttype]
+#[derive(Clone)]
+pub struct ChunkMeta {
+    /// Number of chunks
+    pub count: u32,
+    /// Total bytes across all chunks
+    pub total_bytes: u32,
+    /// Version number (for cache invalidation)
+    pub version: u32,
+}
+
 /// Board metadata (same structure as registry for compatibility)
 #[contracttype]
 #[derive(Clone)]
@@ -97,6 +109,16 @@ pub struct CommunityMeta {
     pub board_count: u64,
     pub member_count: u64,
     pub is_private: bool,
+}
+
+/// Result of checking if a user can create a board or community
+/// (duplicated from permissions contract for cross-contract calls)
+#[contracttype]
+#[derive(Clone)]
+pub struct CanCreateResult {
+    pub allowed: bool,
+    pub is_bypass: bool,
+    pub reason: String,
 }
 
 #[contract]
@@ -579,8 +601,47 @@ impl BoardsMain {
                 md = md.raw_str("</div>\n");
             }
 
-            md = md.newline()
-                .render_link("+ Create New Community", "/new");
+            // Show community creation link based on permissions
+            md = md.newline();
+            if let Some(ref v) = viewer {
+                // Check if user can create communities
+                if let Some(permissions) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+                    let can_create_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
+                    let can_create: CanCreateResult = env
+                        .try_invoke_contract::<CanCreateResult, soroban_sdk::Error>(
+                            &permissions,
+                            &Symbol::new(env, "can_create_community"),
+                            can_create_args,
+                        )
+                        .unwrap_or_else(|_| Ok(CanCreateResult {
+                            allowed: true,
+                            is_bypass: false,
+                            reason: String::from_str(env, ""),
+                        }))
+                        .unwrap_or_else(|_| CanCreateResult {
+                            allowed: true,
+                            is_bypass: false,
+                            reason: String::from_str(env, ""),
+                        });
+
+                    if can_create.allowed {
+                        md = md.render_link("+ Create New Community", "/new");
+                        if can_create.is_bypass {
+                            md = md.raw_str(" <span class=\"badge-admin\">Admin</span>");
+                        }
+                    } else {
+                        md = md.raw_str("<span class=\"action-disabled\" title=\"")
+                            .text_string(&can_create.reason)
+                            .raw_str("\">+ Create New Community</span>");
+                    }
+                } else {
+                    // No permissions contract - allow by default
+                    md = md.render_link("+ Create New Community", "/new");
+                }
+            } else {
+                // Not logged in - show link anyway (will be blocked at form)
+                md = md.render_link("+ Create New Community", "/new");
+            }
         } else {
             md = md.paragraph("Community features not configured.");
         }
@@ -682,11 +743,69 @@ impl BoardsMain {
             }
         }
 
-        md = md.newline()
-            .render_link("+ Create New Board", "/create");
+        // Show board creation link based on permissions
+        md = md.newline();
+        if let Some(ref v) = viewer {
+            // Check if user can create boards
+            if let Some(permissions) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+                let can_create_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
+                let can_create: CanCreateResult = env
+                    .try_invoke_contract::<CanCreateResult, soroban_sdk::Error>(
+                        &permissions,
+                        &Symbol::new(env, "can_create_board"),
+                        can_create_args,
+                    )
+                    .unwrap_or_else(|_| Ok(CanCreateResult {
+                        allowed: false,
+                        is_bypass: false,
+                        reason: String::from_str(env, "Permission check unavailable"),
+                    }))
+                    .unwrap_or_else(|_| CanCreateResult {
+                        allowed: false,
+                        is_bypass: false,
+                        reason: String::from_str(env, "Permission check failed"),
+                    });
 
-        // Show admin links if viewer is logged in
-        if viewer.is_some() {
+                if can_create.allowed {
+                    md = md.render_link("+ Create New Board", "/create");
+                    if can_create.is_bypass {
+                        md = md.raw_str(" <span class=\"badge-admin\">Admin</span>");
+                    }
+                } else {
+                    md = md.raw_str("<span class=\"action-disabled\" title=\"")
+                        .text_string(&can_create.reason)
+                        .raw_str("\">+ Create New Board</span>");
+                }
+            } else {
+                // No permissions contract - deny with warning
+                md = md.raw_str("<span class=\"action-disabled\" title=\"System not fully configured\">+ Create New Board</span>");
+            }
+        } else {
+            // Not logged in - show link anyway (will be blocked at form)
+            md = md.render_link("+ Create New Board", "/create");
+        }
+
+        // Check if viewer is a site admin before showing admin links
+        let is_admin = if let Some(ref user) = viewer {
+            if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+                let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
+                env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "is_admin"),
+                    admin_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false) // Fail-closed: if check fails, don't show admin links
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Show admin links only if viewer is an admin
+        if is_admin {
             md = md
                 .text(" | ")
                 .render_link("Site Settings", "/admin/settings")
@@ -1525,6 +1644,49 @@ impl BoardsMain {
 
         md = md.raw_str("</a>\n");
         md
+    }
+
+    // ========================================================================
+    // Progressive Loading (delegates to config contract)
+    // ========================================================================
+
+    /// Get a chunk from a collection (delegates to config contract)
+    /// Used by the viewer's progressive loader for footer, tagline, etc.
+    pub fn get_chunk(env: Env, collection: Symbol, index: u32) -> Option<Bytes> {
+        let config_opt: Option<Address> = env.storage().instance().get(&MainKey::Config);
+        if let Some(config) = config_opt {
+            let args: Vec<Val> = Vec::from_array(&env, [
+                collection.into_val(&env),
+                index.into_val(&env),
+            ]);
+            env.try_invoke_contract::<Option<Bytes>, soroban_sdk::Error>(
+                &config,
+                &Symbol::new(&env, "get_chunk"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+        } else {
+            None
+        }
+    }
+
+    /// Get chunk metadata for a collection (delegates to config contract)
+    pub fn get_chunk_meta(env: Env, collection: Symbol) -> Option<ChunkMeta> {
+        let config_opt: Option<Address> = env.storage().instance().get(&MainKey::Config);
+        if let Some(config) = config_opt {
+            let args: Vec<Val> = Vec::from_array(&env, [collection.into_val(&env)]);
+            env.try_invoke_contract::<ChunkMeta, soroban_sdk::Error>(
+                &config,
+                &Symbol::new(&env, "get_chunk_meta"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+        } else {
+            None
+        }
     }
 
     // ========================================================================

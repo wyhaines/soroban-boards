@@ -11,6 +11,7 @@
 //! Render functions are provided for use with soroban-render's include system:
 //! `{{include contract=CONFIG_ID func="site_name"}}`
 
+use soroban_chonk::prelude::*;
 use soroban_render_sdk::prelude::*;
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
@@ -58,6 +59,12 @@ pub enum ConfigKey {
     // === Voting Defaults ===
     /// Default voting config for new boards
     DefaultVotingConfig,
+
+    // === Chonk Storage ===
+    /// Footer text stored in chonk for unlimited size
+    FooterTextChonk,
+    /// Tagline stored in chonk for unlimited size
+    TaglineChonk,
 }
 
 // =============================================================================
@@ -160,6 +167,18 @@ impl DefaultVotingConfig {
             karma_multiplier: 1,
         }
     }
+}
+
+/// Chunk metadata for progressive loading
+#[contracttype]
+#[derive(Clone)]
+pub struct ChunkMeta {
+    /// Number of chunks
+    pub count: u32,
+    /// Total bytes across all chunks
+    pub total_bytes: u32,
+    /// Version number (for cache invalidation)
+    pub version: u32,
 }
 
 // =============================================================================
@@ -324,6 +343,19 @@ impl BoardsConfig {
     /// Set branding configuration (admin only)
     pub fn set_branding(env: Env, branding: Branding, caller: Address) {
         Self::require_admin(&env, &caller);
+
+        // Store footer_text in chonk for unlimited size rendering
+        let footer_bytes = Self::string_to_bytes_chunked(&env, &branding.footer_text);
+        let footer_chonk = Chonk::open(&env, Symbol::new(&env, "footer"));
+        footer_chonk.clear();
+        footer_chonk.write_chunked(footer_bytes, 1024);
+
+        // Store tagline in chonk for unlimited size rendering
+        let tagline_bytes = Self::string_to_bytes_chunked(&env, &branding.tagline);
+        let tagline_chonk = Chonk::open(&env, Symbol::new(&env, "tagline"));
+        tagline_chonk.clear();
+        tagline_chonk.write_chunked(tagline_bytes, 1024);
+
         env.storage().instance().set(&ConfigKey::Branding, &branding);
     }
 
@@ -597,13 +629,46 @@ impl BoardsConfig {
     }
 
     /// Render footer text - for includes: {{include contract=CONFIG func="footer_text"}}
+    /// Returns a continuation tag for progressive loading from chonk storage
     pub fn render_footer_text(
         env: Env,
         _path: Option<String>,
         _viewer: Option<Address>,
     ) -> Bytes {
-        let branding = Self::get_branding(env.clone());
-        Self::string_to_bytes(&env, &branding.footer_text)
+        let footer_chonk = Chonk::open(&env, Symbol::new(&env, "footer"));
+        let count = footer_chonk.count();
+
+        if count > 0 {
+            // Return continuation tag for progressive loading
+            // {{continue collection="footer" from=0 total=N}}
+            let mut result = Bytes::from_slice(&env, b"{{continue collection=\"footer\" from=0 total=");
+            result.append(&Self::u32_to_bytes(&env, count));
+            result.append(&Bytes::from_slice(&env, b"}}"));
+            result
+        } else {
+            // Fallback to branding struct for backward compatibility
+            // Use chunked conversion to handle any length
+            let branding = Self::get_branding(env.clone());
+            Self::string_to_bytes_chunked(&env, &branding.footer_text)
+        }
+    }
+
+    /// Get a chunk from a collection (for progressive loading)
+    /// Called by the viewer's progressive loader
+    pub fn get_chunk(env: Env, collection: Symbol, index: u32) -> Option<Bytes> {
+        let chonk = Chonk::open(&env, collection);
+        chonk.get(index)
+    }
+
+    /// Get chunk metadata for a collection
+    /// Returns { count, total_bytes, version }
+    pub fn get_chunk_meta(env: Env, collection: Symbol) -> ChunkMeta {
+        let chonk = Chonk::open(&env, collection);
+        ChunkMeta {
+            count: chonk.count(),
+            total_bytes: chonk.total_bytes(),
+            version: 1,
+        }
     }
 
     /// Render header (site name as h1 + tagline) - for includes: {{include contract=CONFIG func="header"}}
@@ -690,16 +755,80 @@ impl BoardsConfig {
     // Helpers
     // =========================================================================
 
+    /// Convert u32 to Bytes (for building tags)
+    fn u32_to_bytes(env: &Env, n: u32) -> Bytes {
+        let mut buf = [0u8; 10]; // max digits for u32
+        let mut i = 0;
+        let mut num = n;
+
+        if num == 0 {
+            return Bytes::from_slice(env, b"0");
+        }
+
+        while num > 0 {
+            buf[i] = b'0' + (num % 10) as u8;
+            num /= 10;
+            i += 1;
+        }
+
+        // Reverse the digits
+        let mut result = [0u8; 10];
+        for j in 0..i {
+            result[j] = buf[i - 1 - j];
+        }
+
+        Bytes::from_slice(env, &result[..i])
+    }
+
+    /// Convert String to Bytes with a fixed buffer (for short strings)
     fn string_to_bytes(env: &Env, s: &String) -> Bytes {
         let len = s.len() as usize;
         if len == 0 {
             return Bytes::new(env);
         }
-        // Use a reasonably sized buffer - URLs and text should fit
+        // Use a buffer for shorter text content
         let mut buf = [0u8; 512];
         let copy_len = core::cmp::min(len, 512);
         s.copy_into_slice(&mut buf[..copy_len]);
         Bytes::from_slice(env, &buf[..copy_len])
+    }
+
+    /// Convert String to Bytes in chunks for unlimited size support
+    /// Processes the string in 1024-byte chunks and assembles into a single Bytes
+    fn string_to_bytes_chunked(env: &Env, s: &String) -> Bytes {
+        let len = s.len() as usize;
+        if len == 0 {
+            return Bytes::new(env);
+        }
+
+        const CHUNK_SIZE: usize = 1024;
+        let mut result = Bytes::new(env);
+        let mut buf = [0u8; CHUNK_SIZE];
+        let mut offset = 0;
+
+        while offset < len {
+            let remaining = len - offset;
+            let chunk_len = core::cmp::min(remaining, CHUNK_SIZE);
+
+            // Copy this chunk from string to buffer
+            // Note: copy_into_slice copies the entire string, so we extract the slice we need
+            if offset == 0 {
+                // First chunk - copy and take what we need
+                s.copy_into_slice(&mut buf[..chunk_len]);
+            } else {
+                // For subsequent chunks, we need to copy the full string and extract our portion
+                // This is inefficient but necessary given Soroban's String API
+                let mut full_buf = [0u8; 8192]; // Large enough for most strings
+                let full_len = core::cmp::min(len, 8192);
+                s.copy_into_slice(&mut full_buf[..full_len]);
+                buf[..chunk_len].copy_from_slice(&full_buf[offset..offset + chunk_len]);
+            }
+
+            result.append(&Bytes::from_slice(env, &buf[..chunk_len]));
+            offset += chunk_len;
+        }
+
+        result
     }
 
     // =========================================================================

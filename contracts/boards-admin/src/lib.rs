@@ -435,12 +435,43 @@ impl BoardsAdmin {
             .hr()
     }
 
-    /// Append footer to builder
-    fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.newline()
-            .newline()
-            .hr()
-            .paragraph("*Powered by [Soroban Render](https://github.com/wyhaines/soroban-render) on [Stellar](https://stellar.org)*")
+    /// Convert an Address to its contract ID string as Bytes
+    fn address_to_contract_id_string(env: &Env, addr: &Address) -> Bytes {
+        let addr_str = addr.to_string();
+        let len = addr_str.len() as usize;
+        let mut buf = [0u8; 56]; // Contract IDs are 56 chars
+        let copy_len = core::cmp::min(len, 56);
+        addr_str.copy_into_slice(&mut buf[..copy_len]);
+        Bytes::from_slice(env, &buf[..copy_len])
+    }
+
+    /// Build an include tag for config contract: {{include contract=CONTRACT_ID func="name"}}
+    fn config_include(env: &Env, func_name: &[u8]) -> Bytes {
+        let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
+
+        if let Some(config) = config_opt {
+            let config_id = Self::address_to_contract_id_string(env, &config);
+            let mut result = Bytes::from_slice(env, b"{{include contract=");
+            result.append(&config_id);
+            result.append(&Bytes::from_slice(env, b" func=\""));
+            result.append(&Bytes::from_slice(env, func_name));
+            result.append(&Bytes::from_slice(env, b"\"}}"));
+            result
+        } else {
+            // Fallback if config not set
+            match func_name {
+                b"footer_text" => Bytes::from_slice(env, b"Powered by Soroban Render on Stellar"),
+                _ => Bytes::new(env),
+            }
+        }
+    }
+
+    /// Append footer to builder - uses include for configured footer text
+    fn render_footer_into<'a>(env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
+        let footer_include = Self::config_include(env, b"footer_text");
+        md.div_start("footer")
+            .raw(footer_include)
+            .div_end()
     }
 
     /// Render not found page
@@ -490,7 +521,7 @@ impl BoardsAdmin {
 
         if !can_view {
             md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Fetch owner
@@ -587,7 +618,7 @@ impl BoardsAdmin {
             .text(" ")
             .form_link_to("Add as Admin", "admin", "add_admin");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render banned users page
@@ -616,7 +647,7 @@ impl BoardsAdmin {
 
         if !can_view {
             md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Fetch bans
@@ -669,7 +700,7 @@ impl BoardsAdmin {
             .newline()
             .form_link_to("Ban User", "admin", "ban_user");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render flag queue page
@@ -703,7 +734,7 @@ impl BoardsAdmin {
 
         if !can_view {
             md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Fetch flagged content
@@ -777,7 +808,7 @@ impl BoardsAdmin {
             }
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render invite requests page
@@ -806,7 +837,7 @@ impl BoardsAdmin {
 
         if !can_view {
             md = md.warning("You must be a moderator to view this page.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Fetch pending invite requests
@@ -866,7 +897,7 @@ impl BoardsAdmin {
             .number(board_id as u32)
             .raw_str("/members)");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render board settings page
@@ -914,7 +945,7 @@ impl BoardsAdmin {
 
         if !can_admin {
             md = md.warning("You must be an admin to view this page.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         if let Some(ref board) = board_opt {
@@ -1312,7 +1343,7 @@ impl BoardsAdmin {
             }
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render delete board confirmation page
@@ -1405,7 +1436,7 @@ impl BoardsAdmin {
             .number(board_id as u32)
             .raw_str("/settings\">Cancel</a>\n");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render flair management page
@@ -1439,7 +1470,7 @@ impl BoardsAdmin {
 
         if !can_admin {
             md = md.warning("You must be an admin to manage flairs.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get board contract
@@ -1522,7 +1553,7 @@ impl BoardsAdmin {
             md = md.warning("Board contract not found.");
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render flair edit page
@@ -1556,7 +1587,7 @@ impl BoardsAdmin {
 
         if !can_admin {
             md = md.warning("You must be an admin to edit flairs.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get board contract
@@ -1679,7 +1710,7 @@ impl BoardsAdmin {
             md = md.warning("Board contract not found.");
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render rules editor page
@@ -1713,7 +1744,7 @@ impl BoardsAdmin {
 
         if !can_admin {
             md = md.warning("You must be an admin to edit board rules.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get board contract
@@ -1778,7 +1809,7 @@ impl BoardsAdmin {
             md = md.warning("Board contract not found.");
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render voting configuration page
@@ -1812,7 +1843,7 @@ impl BoardsAdmin {
 
         if !can_admin {
             md = md.warning("You must be an admin to configure voting.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get voting contract from registry
@@ -1864,7 +1895,7 @@ impl BoardsAdmin {
             md = md.note("Voting contract is not configured for this board. Voting features are disabled.");
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render registry admin page
@@ -1883,7 +1914,7 @@ impl BoardsAdmin {
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to access registry admin.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let viewer_addr = viewer.as_ref().unwrap();
@@ -1956,7 +1987,7 @@ impl BoardsAdmin {
             .newline()
             .render_link("← Back to Home", "/");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     // ========================================================================
@@ -2000,7 +2031,7 @@ impl BoardsAdmin {
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         md = md
@@ -2026,7 +2057,7 @@ impl BoardsAdmin {
             .newline()
             .render_link("← Back to Registry Admin", "/admin/registry");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render branding settings page
@@ -2036,7 +2067,7 @@ impl BoardsAdmin {
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get current branding from config
@@ -2044,7 +2075,7 @@ impl BoardsAdmin {
 
         if config_opt.is_none() {
             md = md.warning("Config contract not set. Please contact the administrator.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let config = config_opt.unwrap();
@@ -2134,7 +2165,7 @@ impl BoardsAdmin {
             .raw_str("\n</div>\n\n")
             .render_link("← Back to Settings", "/admin/settings");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render threshold settings page
@@ -2144,14 +2175,14 @@ impl BoardsAdmin {
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
 
         if config_opt.is_none() {
             md = md.warning("Config contract not set. Please contact the administrator.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let config = config_opt.unwrap();
@@ -2242,7 +2273,7 @@ impl BoardsAdmin {
             .newline()
             .render_link("← Back to Settings", "/admin/settings");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render operational settings page
@@ -2252,14 +2283,14 @@ impl BoardsAdmin {
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let config_opt: Option<Address> = env.storage().instance().get(&AdminKey::Config);
 
         if config_opt.is_none() {
             md = md.warning("Config contract not set. Please contact the administrator.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         let config = config_opt.unwrap();
@@ -2347,7 +2378,7 @@ impl BoardsAdmin {
             .newline()
             .render_link("← Back to Settings", "/admin/settings");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     // ========================================================================

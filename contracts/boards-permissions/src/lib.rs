@@ -123,6 +123,14 @@ pub enum PermKey {
     UserFlair(u64, Address),
     /// First time a user was seen (for account age tracking)
     FirstSeen(Address),
+
+    // Site-level keys (moved from registry for proper separation of concerns)
+    /// Site-wide admin addresses
+    SiteAdmins,
+    /// Count of boards created by a user (for threshold limits)
+    UserBoardCount(Address),
+    /// Count of posts (threads + replies) by a user (for threshold limits)
+    UserPostCount(Address),
 }
 
 /// Permission check result with all relevant permissions
@@ -135,6 +143,19 @@ pub struct PermissionSet {
     pub can_moderate: bool,
     pub can_admin: bool,
     pub is_banned: bool,
+}
+
+/// Result of checking if a user can create a board or community.
+/// Used by the UI to show/hide creation buttons and display reasons.
+#[contracttype]
+#[derive(Clone)]
+pub struct CanCreateResult {
+    /// Whether the user is allowed to create
+    pub allowed: bool,
+    /// Whether the user is using admin bypass (skipping thresholds)
+    pub is_bypass: bool,
+    /// Reason why creation is not allowed (empty if allowed)
+    pub reason: String,
 }
 
 #[contract]
@@ -286,6 +307,25 @@ impl BoardsPermissions {
 
     /// Get a user's role for a board
     pub fn get_role(env: Env, board_id: u64, user: Address) -> Role {
+        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
+
+        // Check if user is a site admin - they get Admin role on all boards
+        if Self::is_site_admin(env.clone(), user.clone()) {
+            return Role::Admin;
+        }
+
+        // Also check registry's is_admin for backwards compatibility
+        if let Some(registry) = env.storage().instance().get::<_, Address>(&PermKey::Registry) {
+            let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "is_admin"),
+                admin_args,
+            ) {
+                return Role::Admin;
+            }
+        }
+
         env.storage()
             .persistent()
             .get(&PermKey::BoardRole(board_id, user))
@@ -300,6 +340,42 @@ impl BoardsPermissions {
 
     /// Get full permission set for a user on a board
     pub fn get_permissions(env: Env, board_id: u64, user: Address) -> PermissionSet {
+        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
+
+        // Check if user is a site admin - they get full permissions on all boards
+        let is_site_admin = Self::is_site_admin(env.clone(), user.clone());
+
+        // Also check registry's is_admin for backwards compatibility
+        let is_registry_admin = if !is_site_admin {
+            if let Some(registry) = env.storage().instance().get::<_, Address>(&PermKey::Registry) {
+                let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+                env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(&env, "is_admin"),
+                    admin_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        // Site admins get full permissions
+        if is_site_admin || is_registry_admin {
+            return PermissionSet {
+                role: Role::Admin,
+                can_view: true,
+                can_post: true,
+                can_moderate: true,
+                can_admin: true,
+                is_banned: false,
+            };
+        }
+
         let role = Self::get_role(env.clone(), board_id, user.clone());
         let is_banned = Self::is_banned(env.clone(), board_id, user);
 
@@ -1439,6 +1515,533 @@ impl BoardsPermissions {
                 }
             }
             None => 0,
+        }
+    }
+
+    // ============================================================
+    // Site Admin Management (moved from registry)
+    // ============================================================
+
+    /// Initialize site admins. Can only be called once.
+    /// Called during initial deployment/migration.
+    pub fn init_site_admins(env: Env, admins: Vec<Address>) {
+        if env.storage().instance().has(&PermKey::SiteAdmins) {
+            panic!("Site admins already initialized");
+        }
+        env.storage().instance().set(&PermKey::SiteAdmins, &admins);
+    }
+
+    /// Check if an address is a site admin.
+    pub fn is_site_admin(env: Env, address: Address) -> bool {
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&PermKey::SiteAdmins)
+            .unwrap_or(Vec::new(&env));
+
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == address {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Get all site admin addresses.
+    pub fn get_site_admins(env: Env) -> Vec<Address> {
+        env.storage()
+            .instance()
+            .get(&PermKey::SiteAdmins)
+            .unwrap_or(Vec::new(&env))
+    }
+
+    /// Add a new site admin. Requires existing admin auth.
+    pub fn add_site_admin(env: Env, new_admin: Address, caller: Address) {
+        caller.require_auth();
+
+        if !Self::is_site_admin(env.clone(), caller.clone()) {
+            panic!("Only site admins can add admins");
+        }
+
+        let mut admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&PermKey::SiteAdmins)
+            .unwrap_or(Vec::new(&env));
+
+        // Check if already an admin
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == new_admin {
+                panic!("Already a site admin");
+            }
+        }
+
+        admins.push_back(new_admin);
+        env.storage().instance().set(&PermKey::SiteAdmins, &admins);
+    }
+
+    /// Remove a site admin. Requires existing admin auth.
+    /// Cannot remove the last admin.
+    pub fn remove_site_admin(env: Env, admin_to_remove: Address, caller: Address) {
+        caller.require_auth();
+
+        if !Self::is_site_admin(env.clone(), caller.clone()) {
+            panic!("Only site admins can remove admins");
+        }
+
+        let admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&PermKey::SiteAdmins)
+            .unwrap_or(Vec::new(&env));
+
+        if admins.len() <= 1 {
+            panic!("Cannot remove the last site admin");
+        }
+
+        let mut new_admins = Vec::new(&env);
+        let mut found = false;
+        for i in 0..admins.len() {
+            let admin = admins.get(i).unwrap();
+            if admin == admin_to_remove {
+                found = true;
+            } else {
+                new_admins.push_back(admin);
+            }
+        }
+
+        if !found {
+            panic!("Address is not a site admin");
+        }
+
+        env.storage().instance().set(&PermKey::SiteAdmins, &new_admins);
+    }
+
+    // ============================================================
+    // User Board Count Tracking (moved from registry)
+    // ============================================================
+
+    /// Get the number of boards created by a user.
+    pub fn get_user_board_count(env: Env, user: Address) -> u32 {
+        env.storage()
+            .instance()
+            .get(&PermKey::UserBoardCount(user))
+            .unwrap_or(0)
+    }
+
+    /// Increment a user's board count.
+    /// Called after a board is successfully created.
+    pub fn increment_user_board_count(env: Env, user: Address) {
+        let count = Self::get_user_board_count(env.clone(), user.clone());
+        env.storage()
+            .instance()
+            .set(&PermKey::UserBoardCount(user), &(count + 1));
+    }
+
+    // ============================================================
+    // User Post Count Tracking
+    // ============================================================
+
+    /// Get the number of posts (threads + replies) by a user.
+    pub fn get_post_count(env: Env, user: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&PermKey::UserPostCount(user))
+            .unwrap_or(0)
+    }
+
+    /// Increment a user's post count.
+    /// Called by content contract after a thread or reply is created.
+    pub fn increment_post_count(env: Env, user: Address, caller: Address) {
+        // Require auth from the calling contract (content contract)
+        caller.require_auth();
+
+        let count = Self::get_post_count(env.clone(), user.clone());
+        env.storage()
+            .persistent()
+            .set(&PermKey::UserPostCount(user), &(count + 1));
+    }
+
+    // ============================================================
+    // Migration Functions (for upgrading existing deployments)
+    // ============================================================
+
+    /// Migrate site admins from registry to permissions.
+    /// Call this after upgrading to copy existing admin list from registry.
+    /// Only callable if site admins not already initialized.
+    pub fn migrate_site_admins(env: Env, admins: Vec<Address>) {
+        // Only allow migration if not already initialized
+        if env.storage().instance().has(&PermKey::SiteAdmins) {
+            let existing: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&PermKey::SiteAdmins)
+                .unwrap();
+            if existing.len() > 0 {
+                panic!("Site admins already initialized");
+            }
+        }
+
+        if admins.is_empty() {
+            panic!("At least one admin required");
+        }
+
+        // Require auth from the first admin in the list
+        admins.get(0).unwrap().require_auth();
+
+        env.storage().instance().set(&PermKey::SiteAdmins, &admins);
+    }
+
+    /// Migrate a user's board count from registry to permissions.
+    /// This allows copying existing UserBoardCount data during upgrade.
+    /// Requires site admin auth.
+    pub fn migrate_user_board_count(env: Env, user: Address, count: u32, caller: Address) {
+        caller.require_auth();
+
+        if !Self::is_site_admin(env.clone(), caller) {
+            panic!("Only site admins can migrate data");
+        }
+
+        env.storage()
+            .instance()
+            .set(&PermKey::UserBoardCount(user), &count);
+    }
+
+    // ============================================================
+    // Creation Permission Checks (for UI display)
+    // ============================================================
+
+    /// Check if a user can create a board.
+    ///
+    /// Returns a CanCreateResult indicating:
+    /// - allowed: Whether the user can create a board
+    /// - is_bypass: Whether they're using admin bypass (skipping thresholds)
+    /// - reason: Why creation is not allowed (empty if allowed)
+    ///
+    /// This is used by the UI to show/hide/disable the "Create Board" button
+    /// and display appropriate feedback to users.
+    pub fn can_create_board(env: Env, user: Address) -> CanCreateResult {
+        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
+
+        // Check if user is site admin (local storage) - bypass all thresholds
+        if Self::is_site_admin(env.clone(), user.clone()) {
+            return CanCreateResult {
+                allowed: true,
+                is_bypass: true,
+                reason: String::from_str(&env, ""),
+            };
+        }
+
+        // Get registry to look up config contract
+        let registry: Option<Address> = env.storage().instance().get(&PermKey::Registry);
+        let registry = match registry {
+            Some(r) => r,
+            None => {
+                // No registry configured - deny with warning
+                return CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Registry not configured"),
+                };
+            }
+        };
+
+        // Also check registry's is_admin (for backwards compatibility with pre-migration data)
+        let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+        if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(&env, "is_admin"),
+            admin_args,
+        ) {
+            return CanCreateResult {
+                allowed: true,
+                is_bypass: true,
+                reason: String::from_str(&env, ""),
+            };
+        }
+
+        // Get config contract from registry
+        let config_args: Vec<Val> = Vec::new(&env);
+        let config: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_config_contract"),
+                config_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        // If no config contract, deny with warning
+        let config = match config {
+            Some(c) => c,
+            None => {
+                return CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Config not found"),
+                };
+            }
+        };
+
+        // Get user's creation stats
+        let user_board_count = Self::get_user_board_count(env.clone(), user.clone());
+        let user_account_age = Self::get_account_age(env.clone(), user.clone());
+        let user_post_count = Self::get_post_count(env.clone(), user.clone());
+
+        // Get user's karma from voting contract
+        let voting: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_voting_contract"),
+                Vec::new(&env),
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let user_karma: i64 = if let Some(voting_addr) = voting {
+            let karma_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            env.try_invoke_contract::<i64, soroban_sdk::Error>(
+                &voting_addr,
+                &Symbol::new(&env, "get_total_karma"),
+                karma_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Get user's profile status from profile contract (if registered)
+        let profile_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
+        let profile_contract: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract"),
+                profile_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let has_profile: bool = if let Some(profile_addr) = profile_contract {
+            let profile_check_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &profile_addr,
+                &Symbol::new(&env, "has_profile"),
+                profile_check_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(true) // If check fails, assume they have profile
+        } else {
+            true // No profile contract = profile not required
+        };
+
+        // Check thresholds via config contract
+        let check_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                0u32.into_val(&env), // CreationType::Board = 0
+                user.into_val(&env),
+                user_board_count.into_val(&env),
+                user_karma.into_val(&env),
+                user_account_age.into_val(&env),
+                user_post_count.into_val(&env),
+                has_profile.into_val(&env),
+            ],
+        );
+
+        let result = env.try_invoke_contract::<(bool, String), soroban_sdk::Error>(
+            &config,
+            &Symbol::new(&env, "check_thresholds"),
+            check_args,
+        );
+
+        match result {
+            Ok(Ok((passed, reason))) => CanCreateResult {
+                allowed: passed,
+                is_bypass: false,
+                reason,
+            },
+            _ => {
+                // Threshold check failed - deny with warning
+                CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Threshold check failed"),
+                }
+            }
+        }
+    }
+
+    /// Check if a user can create a community.
+    ///
+    /// Returns a CanCreateResult indicating:
+    /// - allowed: Whether the user can create a community
+    /// - is_bypass: Whether they're using admin bypass (skipping thresholds)
+    /// - reason: Why creation is not allowed (empty if allowed)
+    ///
+    /// This is used by the UI to show/hide/disable the "Create Community" button
+    /// and display appropriate feedback to users.
+    pub fn can_create_community(env: Env, user: Address) -> CanCreateResult {
+        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
+
+        // Check if user is site admin (local storage) - bypass all thresholds
+        if Self::is_site_admin(env.clone(), user.clone()) {
+            return CanCreateResult {
+                allowed: true,
+                is_bypass: true,
+                reason: String::from_str(&env, ""),
+            };
+        }
+
+        // Get registry to look up config contract
+        let registry: Option<Address> = env.storage().instance().get(&PermKey::Registry);
+        let registry = match registry {
+            Some(r) => r,
+            None => {
+                // No registry configured - deny with warning
+                return CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Registry not configured"),
+                };
+            }
+        };
+
+        // Also check registry's is_admin (for backwards compatibility with pre-migration data)
+        let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+        if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(&env, "is_admin"),
+            admin_args,
+        ) {
+            return CanCreateResult {
+                allowed: true,
+                is_bypass: true,
+                reason: String::from_str(&env, ""),
+            };
+        }
+
+        // Get config contract from registry
+        let config_args: Vec<Val> = Vec::new(&env);
+        let config: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_config_contract"),
+                config_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        // If no config contract, deny with warning
+        let config = match config {
+            Some(c) => c,
+            None => {
+                return CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Config not found"),
+                };
+            }
+        };
+
+        // Get user's creation stats
+        // For communities, we use community count from community contract
+        // but fall back to 0 for now (TODO: add community count tracking)
+        let user_community_count = 0u32;
+        let user_account_age = Self::get_account_age(env.clone(), user.clone());
+        let user_post_count = Self::get_post_count(env.clone(), user.clone());
+
+        // Get user's karma from voting contract
+        let voting: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_voting_contract"),
+                Vec::new(&env),
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let user_karma: i64 = if let Some(voting_addr) = voting {
+            let karma_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            env.try_invoke_contract::<i64, soroban_sdk::Error>(
+                &voting_addr,
+                &Symbol::new(&env, "get_total_karma"),
+                karma_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(0)
+        } else {
+            0
+        };
+
+        // Get user's profile status from profile contract (if registered)
+        let profile_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
+        let profile_contract: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract"),
+                profile_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let has_profile: bool = if let Some(profile_addr) = profile_contract {
+            let profile_check_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &profile_addr,
+                &Symbol::new(&env, "has_profile"),
+                profile_check_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(true) // If check fails, assume they have profile
+        } else {
+            true // No profile contract = profile not required
+        };
+
+        // Check thresholds via config contract
+        let check_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                1u32.into_val(&env), // CreationType::Community = 1
+                user.into_val(&env),
+                user_community_count.into_val(&env),
+                user_karma.into_val(&env),
+                user_account_age.into_val(&env),
+                user_post_count.into_val(&env),
+                has_profile.into_val(&env),
+            ],
+        );
+
+        let result = env.try_invoke_contract::<(bool, String), soroban_sdk::Error>(
+            &config,
+            &Symbol::new(&env, "check_thresholds"),
+            check_args,
+        );
+
+        match result {
+            Ok(Ok((passed, reason))) => CanCreateResult {
+                allowed: passed,
+                is_bypass: false,
+                reason,
+            },
+            _ => {
+                // Threshold check failed - deny with warning
+                CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Threshold check failed"),
+                }
+            }
         }
     }
 }

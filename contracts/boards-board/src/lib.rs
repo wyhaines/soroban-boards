@@ -258,6 +258,201 @@ impl BoardsBoard {
         env.storage().instance().set(&BoardKey::Voting, &voting);
     }
 
+    /// Create a new board using this board contract.
+    ///
+    /// This is the primary way to create boards. It handles:
+    /// - Site admin bypass (admins skip all threshold checks)
+    /// - Creation threshold checks via config contract
+    /// - Registration with the registry
+    /// - Local board initialization
+    /// - User board count tracking
+    ///
+    /// Note: The board contract must already be initialized with registry and permissions
+    /// addresses before calling this function.
+    ///
+    /// Parameters:
+    /// - name: Board name (3-50 chars, alphanumeric + underscore + hyphen)
+    /// - description: Board description
+    /// - is_private: String "true" or "false" from form input
+    /// - is_listed: String "true" or "false" from form input
+    /// - caller: The address creating the board (must authorize)
+    ///
+    /// Returns the assigned board ID.
+    pub fn create_board(
+        env: Env,
+        name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        // Get required contract addresses
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Board contract not initialized with registry");
+
+        let permissions: Option<Address> = env.storage().instance().get(&BoardKey::Permissions);
+
+        // Parse is_private string to bool
+        let is_private_bool = is_private.len() == 4 && {
+            let mut buf = [0u8; 4];
+            is_private.copy_into_slice(&mut buf);
+            &buf == b"true"
+        };
+
+        // Parse is_listed string to bool (default to listed)
+        // Note: is_listed is tracked in registry metadata, not in board contract
+        let _is_listed_bool = if is_listed.len() == 0 {
+            true
+        } else if is_listed.len() == 5 {
+            let mut buf = [0u8; 5];
+            is_listed.copy_into_slice(&mut buf);
+            &buf != b"false"
+        } else {
+            true
+        };
+
+        // Check if caller is site admin (bypass all threshold checks)
+        let is_site_admin = if let Some(ref perms) = permissions {
+            let args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                perms,
+                &Symbol::new(&env, "is_site_admin"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
+        } else {
+            false
+        };
+
+        // If not site admin, check creation thresholds
+        if !is_site_admin {
+            // Get config contract from registry
+            let config_args: Vec<Val> = Vec::new(&env);
+            let config: Option<Address> = env
+                .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(&env, "get_config_contract"),
+                    config_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+
+            if let Some(config_addr) = config {
+                // Get user's board count from permissions
+                let user_board_count = if let Some(ref perms) = permissions {
+                    let count_args: Vec<Val> =
+                        Vec::from_array(&env, [caller.clone().into_val(&env)]);
+                    env.try_invoke_contract::<u32, soroban_sdk::Error>(
+                        perms,
+                        &Symbol::new(&env, "get_user_board_count"),
+                        count_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0)
+                } else {
+                    0
+                };
+
+                // Get user's account age from permissions
+                let user_account_age = if let Some(ref perms) = permissions {
+                    let age_args: Vec<Val> =
+                        Vec::from_array(&env, [caller.clone().into_val(&env)]);
+                    env.try_invoke_contract::<u64, soroban_sdk::Error>(
+                        perms,
+                        &Symbol::new(&env, "get_account_age"),
+                        age_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0)
+                } else {
+                    0
+                };
+
+                // Check thresholds via config contract
+                let check_args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [
+                        0u32.into_val(&env),           // CreationType::Board = 0
+                        caller.clone().into_val(&env), // user
+                        user_board_count.into_val(&env),
+                        0i64.into_val(&env),  // user_karma (TODO)
+                        user_account_age.into_val(&env),
+                        0u32.into_val(&env),  // user_post_count (TODO)
+                        false.into_val(&env), // has_profile (TODO)
+                    ],
+                );
+
+                let result: (bool, String) = env.invoke_contract(
+                    &config_addr,
+                    &Symbol::new(&env, "check_thresholds"),
+                    check_args,
+                );
+
+                if !result.0 {
+                    // Convert reason to panic message
+                    let mut buf = [0u8; 64];
+                    let len = core::cmp::min(result.1.len() as usize, 64);
+                    result.1.copy_into_slice(&mut buf[..len]);
+                    let reason =
+                        core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
+                    panic!("{}", reason);
+                }
+            }
+        }
+
+        // Get board ID - if already initialized via init(), use that ID
+        // Otherwise, we'll generate based on our own counter or expect init to be called first
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .unwrap_or(0);
+
+        // Initialize board config
+        env.storage().instance().set(&BoardKey::ThreadCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&BoardKey::PinnedThreads, &Vec::<u64>::new(&env));
+        env.storage().instance().set(
+            &BoardKey::Config,
+            &BoardConfig {
+                name,
+                description,
+                is_private: is_private_bool,
+                is_readonly: false,
+                max_reply_depth: 10,
+                reply_chunk_size: 6,
+            },
+        );
+
+        // Set default edit window (24 hours)
+        env.storage()
+            .instance()
+            .set(&BoardKey::EditWindow, &86400u64);
+
+        // Increment user's board count in permissions
+        if let Some(ref perms) = permissions {
+            let inc_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                perms,
+                &Symbol::new(&env, "increment_user_board_count"),
+                inc_args,
+            );
+        }
+
+        board_id
+    }
+
     // Flair management functions
 
     /// Create a new flair (Admin+ only)

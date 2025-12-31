@@ -217,6 +217,7 @@ dependencies = [
 name = "boards-config"
 version = "0.1.0"
 dependencies = [
+ "soroban-chonk",
  "soroban-render-sdk",
  "soroban-sdk",
 ]

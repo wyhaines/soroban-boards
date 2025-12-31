@@ -1,5 +1,30 @@
 #![no_std]
 
+//! # Boards Registry Contract
+//!
+//! ## PURPOSE
+//!
+//! The registry is ONLY a contract address registry - a place where contracts
+//! register their addresses and aliases so they can find each other.
+//!
+//! **DO NOT ADD** board/community/content creation logic, metadata storage,
+//! or any domain-specific functionality to this contract.
+//!
+//! The registry should ONLY handle:
+//! - Contract address registration by alias (e.g., "perms" -> Address)
+//! - Alias lookups (get_contract_by_alias, get_contract)
+//! - Admin management for registry-level operations
+//!
+//! All board/community/content logic belongs in their respective contracts:
+//! - Board creation/metadata → boards-board
+//! - Community creation/metadata → boards-community
+//! - Content storage → boards-content
+//! - Permissions → boards-permissions
+//!
+//! NOTE: This contract currently contains legacy board metadata functions
+//! (create_board, get_board, list_boards, etc.) for backwards compatibility.
+//! These should be migrated to boards-board in a future refactor.
+
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 /// Storage keys for the registry contract
@@ -828,16 +853,50 @@ impl BoardsRegistry {
             .set(&RegistryKey::Contract(alias), &address);
     }
 
-    /// Get all admin addresses
+    /// Get all admin addresses (delegates to permissions contract)
     pub fn get_admins(env: Env) -> Vec<Address> {
+        // Try permissions contract first
+        if let Some(contracts) = env
+            .storage()
+            .instance()
+            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
+        {
+            let args: Vec<Val> = Vec::new(&env);
+            if let Ok(Ok(admins)) = env.try_invoke_contract::<Vec<Address>, soroban_sdk::Error>(
+                &contracts.permissions,
+                &Symbol::new(&env, "get_site_admins"),
+                args,
+            ) {
+                if admins.len() > 0 {
+                    return admins;
+                }
+            }
+        }
+        // Fallback to local storage for migration compatibility
         env.storage()
             .instance()
             .get(&RegistryKey::Admins)
-            .expect("Not initialized")
+            .unwrap_or(Vec::new(&env))
     }
 
-    /// Check if an address is an admin
+    /// Check if an address is an admin (checks both permissions contract and local storage)
     pub fn is_admin(env: Env, address: Address) -> bool {
+        // Check permissions contract first
+        if let Some(contracts) = env
+            .storage()
+            .instance()
+            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
+        {
+            let args: Vec<Val> = Vec::from_array(&env, [address.clone().into_val(&env)]);
+            if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &contracts.permissions,
+                &Symbol::new(&env, "is_site_admin"),
+                args,
+            ) {
+                return true;
+            }
+        }
+        // Also check local storage (for backwards compatibility with pre-migration data)
         let admins: Vec<Address> = env
             .storage()
             .instance()
@@ -852,17 +911,34 @@ impl BoardsRegistry {
         false
     }
 
-    /// Add a new admin (requires existing admin auth)
+    /// Add a new admin (delegates to permissions contract)
     pub fn add_admin(env: Env, new_admin: Address, caller: Address) {
+        // Delegate to permissions contract
+        if let Some(contracts) = env
+            .storage()
+            .instance()
+            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
+        {
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [new_admin.clone().into_val(&env), caller.clone().into_val(&env)],
+            );
+            // This will require_auth on the caller within permissions contract
+            env.invoke_contract::<()>(
+                &contracts.permissions,
+                &Symbol::new(&env, "add_site_admin"),
+                args,
+            );
+            return;
+        }
+        // Fallback to local storage for migration compatibility
         Self::require_admin_auth(&env, &caller);
-
         let mut admins: Vec<Address> = env
             .storage()
             .instance()
             .get(&RegistryKey::Admins)
             .expect("Not initialized");
 
-        // Check if already an admin
         for i in 0..admins.len() {
             if admins.get(i).unwrap() == new_admin {
                 panic!("Already an admin");
@@ -873,11 +949,29 @@ impl BoardsRegistry {
         env.storage().instance().set(&RegistryKey::Admins, &admins);
     }
 
-    /// Remove an admin (requires existing admin auth)
+    /// Remove an admin (delegates to permissions contract)
     /// Cannot remove the last admin
     pub fn remove_admin(env: Env, admin_to_remove: Address, caller: Address) {
+        // Delegate to permissions contract
+        if let Some(contracts) = env
+            .storage()
+            .instance()
+            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
+        {
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [admin_to_remove.clone().into_val(&env), caller.clone().into_val(&env)],
+            );
+            // This will require_auth on the caller within permissions contract
+            env.invoke_contract::<()>(
+                &contracts.permissions,
+                &Symbol::new(&env, "remove_site_admin"),
+                args,
+            );
+            return;
+        }
+        // Fallback to local storage for migration compatibility
         Self::require_admin_auth(&env, &caller);
-
         let admins: Vec<Address> = env
             .storage()
             .instance()

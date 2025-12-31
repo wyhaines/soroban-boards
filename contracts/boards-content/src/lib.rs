@@ -240,12 +240,24 @@ impl BoardsContent {
         );
 
         // Record first-seen timestamp for the user (for account age tracking)
+        // and increment post count
         if let Some(perms) = env.storage().instance().get::<_, Address>(&ContentKey::Permissions) {
-            let record_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+            let record_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
                 &Symbol::new(&env, "record_first_seen"),
                 record_args,
+            );
+
+            // Increment user's post count
+            let inc_args: Vec<Val> = Vec::from_array(&env, [
+                caller.into_val(&env),
+                env.current_contract_address().into_val(&env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &perms,
+                &Symbol::new(&env, "increment_post_count"),
+                inc_args,
             );
         }
 
@@ -612,12 +624,24 @@ impl BoardsContent {
         }
 
         // Record first-seen timestamp for the user (for account age tracking)
+        // and increment post count
         if let Some(perms) = env.storage().instance().get::<_, Address>(&ContentKey::Permissions) {
-            let record_args: Vec<Val> = Vec::from_array(&env, [creator.into_val(&env)]);
+            let record_args: Vec<Val> = Vec::from_array(&env, [creator.clone().into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
                 &Symbol::new(&env, "record_first_seen"),
                 record_args,
+            );
+
+            // Increment user's post count
+            let inc_args: Vec<Val> = Vec::from_array(&env, [
+                creator.into_val(&env),
+                env.current_contract_address().into_val(&env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &perms,
+                &Symbol::new(&env, "increment_post_count"),
+                inc_args,
             );
         }
 

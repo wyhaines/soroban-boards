@@ -239,55 +239,73 @@ impl BoardsCommunity {
             panic!("Community name already exists");
         }
 
-        // Check creation thresholds if config contract is set
-        if let Some(config) = env
-            .storage()
-            .instance()
-            .get::<_, Address>(&CommunityKey::Config)
-        {
-            let user_community_count = Self::count_user_communities(env.clone(), caller.clone());
+        // Check if caller is site admin (bypass all threshold checks)
+        let permissions: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
+        let is_site_admin = if let Some(ref perms) = permissions {
+            let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                perms,
+                &Symbol::new(&env, "is_site_admin"),
+                admin_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
+        } else {
+            false
+        };
 
-            // Get account age from permissions contract
-            let permissions: Address = env
+        // Check creation thresholds if config contract is set (skip for site admins)
+        if !is_site_admin {
+            if let Some(config) = env
                 .storage()
                 .instance()
-                .get(&CommunityKey::Permissions)
-                .expect("Not initialized");
-            let account_age_args: Vec<Val> =
-                Vec::from_array(&env, [caller.clone().into_val(&env)]);
-            let user_account_age: u64 = env.invoke_contract(
-                &permissions,
-                &Symbol::new(&env, "get_account_age"),
-                account_age_args,
-            );
+                .get::<_, Address>(&CommunityKey::Config)
+            {
+                let user_community_count = Self::count_user_communities(env.clone(), caller.clone());
 
-            // Check thresholds
-            let check_args: Vec<Val> = Vec::from_array(
-                &env,
-                [
-                    1u32.into_val(&env),  // CreationType::Community = 1
-                    caller.clone().into_val(&env),
-                    user_community_count.into_val(&env),
-                    0i64.into_val(&env),  // user_karma (TODO: get from voting contract)
-                    user_account_age.into_val(&env),
-                    0u32.into_val(&env),  // user_post_count (TODO: get from content)
-                    false.into_val(&env), // has_profile (TODO: get from profile contract)
-                ],
-            );
+                // Get account age from permissions contract
+                let perms: Address = env
+                    .storage()
+                    .instance()
+                    .get(&CommunityKey::Permissions)
+                    .expect("Not initialized");
+                let account_age_args: Vec<Val> =
+                    Vec::from_array(&env, [caller.clone().into_val(&env)]);
+                let user_account_age: u64 = env.invoke_contract(
+                    &perms,
+                    &Symbol::new(&env, "get_account_age"),
+                    account_age_args,
+                );
 
-            // Call config.check_thresholds and check result
-            let result: (bool, String) = env.invoke_contract(
-                &config,
-                &Symbol::new(&env, "check_thresholds"),
-                check_args,
-            );
+                // Check thresholds
+                let check_args: Vec<Val> = Vec::from_array(
+                    &env,
+                    [
+                        1u32.into_val(&env),  // CreationType::Community = 1
+                        caller.clone().into_val(&env),
+                        user_community_count.into_val(&env),
+                        0i64.into_val(&env),  // user_karma (TODO: get from voting contract)
+                        user_account_age.into_val(&env),
+                        0u32.into_val(&env),  // user_post_count (TODO: get from content)
+                        false.into_val(&env), // has_profile (TODO: get from profile contract)
+                    ],
+                );
 
-            if !result.0 {
-                let mut buf = [0u8; 64];
-                let len = core::cmp::min(result.1.len() as usize, 64);
-                result.1.copy_into_slice(&mut buf[..len]);
-                let reason = core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
-                panic!("{}", reason);
+                // Call config.check_thresholds and check result
+                let result: (bool, String) = env.invoke_contract(
+                    &config,
+                    &Symbol::new(&env, "check_thresholds"),
+                    check_args,
+                );
+
+                if !result.0 {
+                    let mut buf = [0u8; 64];
+                    let len = core::cmp::min(result.1.len() as usize, 64);
+                    result.1.copy_into_slice(&mut buf[..len]);
+                    let reason = core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
+                    panic!("{}", reason);
+                }
             }
         }
 
@@ -1337,6 +1355,8 @@ impl BoardsCommunity {
     }
 
     fn render_settings(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
+        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
+
         let community = match Self::get_community_by_name(env.clone(), name.clone()) {
             Some(c) => c,
             None => {
@@ -1352,7 +1372,45 @@ impl BoardsCommunity {
             None => false,
         };
 
-        if !is_owner {
+        // Check if viewer is a site admin (bypass owner check)
+        let is_site_admin = if let Some(ref user) = viewer {
+            // Check permissions contract first
+            let permissions: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
+            let perms_admin = if let Some(ref perms) = permissions {
+                let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
+                env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    perms,
+                    &Symbol::new(env, "is_site_admin"),
+                    admin_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false)
+            } else {
+                false
+            };
+
+            // Also check registry's is_admin for backwards compatibility
+            if perms_admin {
+                true
+            } else if let Some(registry) = env.storage().instance().get::<_, Address>(&CommunityKey::Registry) {
+                let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
+                env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "is_admin"),
+                    admin_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
+        if !is_owner && !is_site_admin {
             return MarkdownBuilder::new(env)
                 .warning("Only the community owner can access settings.")
                 .build();

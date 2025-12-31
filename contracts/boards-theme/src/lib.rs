@@ -310,6 +310,11 @@ impl BoardsTheme {
             .rule(".community-header h1", "margin-bottom: var(--space-xs);")
             .rule(".community-header p", "color: var(--text-muted); margin: 0;")
             .rule(".community-actions", "display: flex; gap: var(--space-sm); margin-top: var(--space-md);")
+            // Disabled action buttons (for threshold-restricted users)
+            .rule(".action-disabled", "display: inline-block; color: var(--text-muted); cursor: not-allowed; opacity: 0.6; padding: var(--space-xs) var(--space-sm); font-size: 0.875rem;")
+            .rule(".action-disabled:hover", "text-decoration: none;")
+            // Admin bypass badge
+            .rule(".badge-admin", "display: inline-block; background: var(--primary); color: white; padding: 0.125rem 0.375rem; border-radius: 4px; font-size: 0.6875rem; font-weight: 600; margin-left: var(--space-xs); vertical-align: middle;")
             // Dark mode
             .dark_mode_start()
             .rule_start(":root")
