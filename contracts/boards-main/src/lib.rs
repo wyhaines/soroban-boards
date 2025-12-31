@@ -344,6 +344,8 @@ impl BoardsMain {
         Router::new(&env, path.clone())
             // Home page
             .handle(b"/", |_| Self::render_home(&env, &viewer))
+            // My Account page
+            .or_handle(b"/account", |_| Self::render_account(&env, &viewer))
             // Create board form
             .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
             // Help page
@@ -453,6 +455,11 @@ impl BoardsMain {
             .raw_str("</a>")
             .render_link("Communities", "/communities")
             .render_link("Help", "/help");
+
+        // Add My Account link for logged-in users
+        if viewer.is_some() {
+            md = md.render_link("My Account", "/account");
+        }
 
         // Add profile link if profile contract is registered
         let profile_alias = Symbol::new(env, "profile");
@@ -678,9 +685,11 @@ impl BoardsMain {
         md = md.newline()
             .render_link("+ Create New Board", "/create");
 
-        // Show registry admin link if viewer is logged in
+        // Show admin links if viewer is logged in
         if viewer.is_some() {
             md = md
+                .text(" | ")
+                .render_link("Site Settings", "/admin/settings")
                 .text(" | ")
                 .render_link("Registry Admin", "/admin/registry");
         }
@@ -750,6 +759,148 @@ impl BoardsMain {
             .list_item("Browse existing boards or create a new one")
             .list_item("Create threads and reply to discussions")
             .list_item("Flag inappropriate content");
+        Self::render_footer_into(env, md).build()
+    }
+
+    /// Render My Account page
+    fn render_account(env: &Env, viewer: &Option<Address>) -> Bytes {
+        let mut md = Self::render_nav(env, viewer)
+            .newline()  // Blank line after nav-bar for markdown parsing
+            .h1("My Account");
+
+        let Some(user) = viewer else {
+            md = md.warning("Please connect your wallet to view your account information.");
+            return Self::render_footer_into(env, md).build();
+        };
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        // Get permissions contract for account age
+        let perms_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "perms").into_val(env)]);
+        let perms_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            perms_args,
+        );
+
+        // Get profile contract (if available)
+        let profile_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
+        let profile_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            profile_args,
+        );
+
+        // === User Identity Section ===
+        md = md.h2("Identity");
+
+        // Show wallet address
+        md = md
+            .text("**Wallet Address:** ")
+            .raw_str("<code class=\"address\">")
+            .text_string(&user.to_string())
+            .raw_str("</code>")
+            .newline()
+            .newline();
+
+        // Use the profile contract's nav link rendering (same as header)
+        // This handles profile detection internally and returns appropriate HTML
+        if let Some(ref profile_addr) = profile_opt {
+            // Build return path for the profile page's "Go Back" button
+            let self_addr = env.current_contract_address();
+            let self_id_str = Self::address_to_contract_id_string(env, &self_addr);
+            let mut return_path = self_id_str;
+            return_path.append(&Bytes::from_slice(env, b":/account"));
+
+            let args: Vec<Val> = Vec::from_array(env, [
+                viewer.into_val(env),
+                return_path.into_val(env),
+            ]);
+
+            // Call render_nav_link_return - it returns either:
+            // - "Create Profile" link if no profile
+            // - "@username" link if profile exists
+            let profile_link_opt: Option<Bytes> = env
+                .try_invoke_contract::<Bytes, soroban_sdk::Error>(
+                    profile_addr,
+                    &Symbol::new(env, "render_nav_link_return"),
+                    args,
+                )
+                .ok()
+                .and_then(|r| r.ok());
+
+            if let Some(profile_link) = profile_link_opt {
+                md = md
+                    .text("**Profile:** ")
+                    .raw(profile_link)
+                    .newline()
+                    .newline();
+            }
+        }
+
+        // === Account Stats Section ===
+        md = md.h2("Account Statistics");
+
+        if let Some(perms_addr) = perms_opt {
+            // Get account age
+            let age_args: Vec<Val> = Vec::from_array(env, [user.into_val(env)]);
+            let account_age_secs: u64 = env
+                .try_invoke_contract::<u64, soroban_sdk::Error>(
+                    &perms_addr,
+                    &Symbol::new(env, "get_account_age"),
+                    age_args.clone(),
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(0);
+
+            // Get first seen timestamp
+            let first_seen_opt: Option<u64> = env
+                .try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                    &perms_addr,
+                    &Symbol::new(env, "get_first_seen"),
+                    age_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+
+            if let Some(first_seen) = first_seen_opt {
+                md = md.text("**First Seen:** ").raw(Self::format_timestamp(env, first_seen)).newline().newline();
+
+                // Format account age nicely
+                let days = account_age_secs / 86400;
+                let hours = (account_age_secs % 86400) / 3600;
+                let minutes = (account_age_secs % 3600) / 60;
+
+                md = md.text("**Account Age:** ");
+                if days > 0 {
+                    md = md.number(days as u32).text(" days, ");
+                }
+                if hours > 0 || days > 0 {
+                    md = md.number(hours as u32).text(" hours, ");
+                }
+                md = md.number(minutes as u32).text(" minutes");
+                md = md.newline().newline();
+            } else {
+                md = md.text("**Account Age:** New account (not yet recorded)").newline().newline();
+            }
+        } else {
+            md = md.text("*Account statistics not available*").newline().newline();
+        }
+
+        // === Quick Links Section ===
+        md = md.h2("Quick Links")
+            .raw_str("<div class=\"quick-links\">\n")
+            .render_link("Home", "/")
+            .render_link("Communities", "/communities")
+            .render_link("Help", "/help")
+            .raw_str("</div>\n");
+
         Self::render_footer_into(env, md).build()
     }
 

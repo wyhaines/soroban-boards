@@ -294,6 +294,10 @@ impl BoardsTheme {
             .rule(".section", "margin-bottom: var(--space-lg);")
             // Footer
             .rule(".footer", "margin-top: var(--space-xl); padding-top: var(--space-md); border-top: 1px solid var(--border); color: var(--text-muted); font-size: 0.875rem;")
+            // Quick links (horizontal link row)
+            .rule(".quick-links", "display: flex; flex-wrap: wrap; gap: var(--space-sm); margin-top: var(--space-sm);")
+            .rule(".quick-links a", "padding: var(--space-xs) var(--space-sm); background: var(--bg-muted); border-radius: 4px; font-size: 0.875rem; color: var(--text) !important; text-decoration: none !important;")
+            .rule(".quick-links a:hover", "background: var(--primary); color: white !important; text-decoration: none !important;")
             // Community styles - use a.community-card for higher specificity over viewer's a.soroban-action
             .rule(".community-list", "display: flex; flex-direction: column; gap: var(--space-sm);")
             .rule("a.community-card", "display: flex !important; flex-direction: column; align-items: flex-start !important; background: var(--bg) !important; color: var(--text) !important; border: 1px solid var(--border); border-radius: 6px; padding: var(--space-md) !important; transition: border-color 0.15s, box-shadow 0.15s; text-decoration: none !important;")
