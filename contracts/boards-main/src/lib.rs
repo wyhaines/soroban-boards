@@ -96,6 +96,18 @@ pub struct PermissionSet {
     pub is_banned: bool,
 }
 
+/// Board configuration (same structure as boards-board for cross-contract calls)
+#[contracttype]
+#[derive(Clone)]
+pub struct BoardConfig {
+    pub name: String,
+    pub description: String,
+    pub is_private: bool,
+    pub is_readonly: bool,
+    pub max_reply_depth: u32,
+    pub reply_chunk_size: u32,
+}
+
 /// Community metadata (same structure as community contract for compatibility)
 #[contracttype]
 #[derive(Clone)]
@@ -312,6 +324,159 @@ impl BoardsMain {
         ]);
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "delete_community"), args);
+    }
+
+    /// Proxy function to create a standalone board
+    ///
+    /// This handles board creation by:
+    /// 1. Checking creation permissions
+    /// 2. Deploying a new board contract via registry WASM
+    /// 3. Initializing the board with metadata
+    /// 4. Registering with the registry
+    /// 5. Setting up permissions
+    pub fn create_board(
+        env: Env,
+        name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        caller: Address,
+    ) -> u64 {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        let permissions_opt: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&MainKey::Permissions);
+
+        let content_opt: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&MainKey::Content);
+
+        let theme_opt: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&MainKey::Theme);
+
+        // Check if caller can create boards (if permissions contract exists)
+        if let Some(ref perms) = permissions_opt {
+            let can_create_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            let can_create: CanCreateResult = env
+                .try_invoke_contract::<CanCreateResult, soroban_sdk::Error>(
+                    perms,
+                    &Symbol::new(&env, "can_create_board"),
+                    can_create_args,
+                )
+                .unwrap_or_else(|_| Ok(CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Permission check failed"),
+                }))
+                .unwrap_or_else(|_| CanCreateResult {
+                    allowed: false,
+                    is_bypass: false,
+                    reason: String::from_str(&env, "Permission check error"),
+                });
+
+            if !can_create.allowed {
+                panic!("Not allowed to create board");
+            }
+        }
+
+        // Get WASM hash for deploying board contracts
+        let wasm_hash: BytesN<32> = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "get_board_wasm_hash"),
+            Vec::new(&env),
+        );
+
+        // Deploy the board contract
+        let timestamp_bytes = Bytes::from_slice(&env, &env.ledger().timestamp().to_be_bytes());
+        let salt = env.crypto().sha256(&timestamp_bytes);
+        let deployed_address = env.deployer()
+            .with_current_contract(salt)
+            .deploy_v2(wasm_hash, ());
+
+        // Parse boolean strings from form
+        let is_private_bool = {
+            let mut buf = [0u8; 8];
+            let len = is_private.len() as usize;
+            if len > 0 && len <= 8 {
+                is_private.copy_into_slice(&mut buf[..len]);
+                &buf[..len] == b"true"
+            } else {
+                false
+            }
+        };
+
+        let is_listed_bool = {
+            let mut buf = [0u8; 8];
+            let len = is_listed.len() as usize;
+            if len > 0 && len <= 8 {
+                is_listed.copy_into_slice(&mut buf[..len]);
+                &buf[..len] != b"false"  // Default to true
+            } else {
+                true
+            }
+        };
+
+        // Get next board ID and register with registry
+        let register_args: Vec<Val> = Vec::from_array(&env, [
+            deployed_address.clone().into_val(&env),
+            caller.clone().into_val(&env),
+        ]);
+        let board_id: u64 = env.invoke_contract(
+            &registry,
+            &Symbol::new(&env, "register_board_contract"),
+            register_args,
+        );
+
+        // Initialize the board contract
+        let init_args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),                           // board_id
+            registry.into_val(&env),                           // registry
+            permissions_opt.into_val(&env),                    // permissions (Option)
+            content_opt.into_val(&env),                        // content (Option)
+            theme_opt.into_val(&env),                          // theme (Option)
+            name.into_val(&env),                               // name
+            description.into_val(&env),                        // description
+            is_private_bool.into_val(&env),                    // is_private
+            Some(caller.clone()).into_val(&env),               // creator (Option<Address>)
+            Some(is_listed_bool).into_val(&env),               // is_listed (Option<bool>)
+        ]);
+        env.invoke_contract::<()>(&deployed_address, &Symbol::new(&env, "init"), init_args);
+
+        // Set caller as board owner in permissions
+        if let Some(ref perms) = permissions_opt {
+            let set_role_args: Vec<Val> = Vec::from_array(&env, [
+                board_id.into_val(&env),
+                caller.clone().into_val(&env),
+                Role::Owner.into_val(&env),
+                caller.clone().into_val(&env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                perms,
+                &Symbol::new(&env, "set_role"),
+                set_role_args,
+            );
+
+            // Track user's board creation
+            let track_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                perms,
+                &Symbol::new(&env, "track_board_created"),
+                track_args,
+            );
+        }
+
+        board_id
     }
 
     /// Set community contract address (for upgrades - requires registry admin auth)
@@ -579,11 +744,11 @@ impl BoardsMain {
             .instance()
             .get(&MainKey::Community);
 
-        if let Some(community_contract) = community_contract_opt {
+        if let Some(ref community_contract) = community_contract_opt {
             // Fetch listed communities
             let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
             let communities: Vec<CommunityMeta> = env.invoke_contract(
-                &community_contract,
+                community_contract,
                 &Symbol::new(env, "list_listed_communities"),
                 list_args,
             );
@@ -650,10 +815,10 @@ impl BoardsMain {
         md = md.newline()
             .h2("Standalone Boards");
 
-        // Get board count from registry
+        // Get board contract count from registry
         let count: u64 = env.invoke_contract(
             &registry,
-            &Symbol::new(env, "board_count"),
+            &Symbol::new(env, "board_contract_count"),
             Vec::new(env),
         );
 
@@ -664,42 +829,114 @@ impl BoardsMain {
             let mut standalone_boards: Vec<BoardMeta> = Vec::new(env);
 
             for i in 0..count {
-                // Check if board is listed
-                let listed_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
-                let is_listed: bool = env.invoke_contract(
+                // Get board contract address from registry
+                let board_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+                let board_contract_opt: Option<Address> = env.invoke_contract(
                     &registry,
-                    &Symbol::new(env, "get_board_listed"),
-                    listed_args,
+                    &Symbol::new(env, "get_board_contract"),
+                    board_args,
                 );
+
+                let Some(board_contract) = board_contract_opt else {
+                    continue;
+                };
+
+                // Check if board is listed (query board contract directly)
+                let is_listed: bool = env
+                    .try_invoke_contract::<bool, soroban_sdk::Error>(
+                        &board_contract,
+                        &Symbol::new(env, "get_board_listed"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(false);
 
                 if !is_listed {
                     continue;
                 }
 
-                // Check if board is in a community
-                let community_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
-                let community_id: Option<u64> = env.invoke_contract(
-                    &registry,
-                    &Symbol::new(env, "get_board_community"),
-                    community_args,
-                );
+                // Check if board is in a community (query community contract)
+                let community_id: Option<u64> = if let Some(ref community_contract) = community_contract_opt {
+                    let community_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+                    env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                        community_contract,
+                        &Symbol::new(env, "get_board_community"),
+                        community_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+                } else {
+                    None
+                };
 
                 // Only include standalone boards (not in any community)
                 if community_id.is_some() {
                     continue;
                 }
 
-                // Get board metadata
-                let board_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
-                let board_opt: Option<BoardMeta> = env.invoke_contract(
-                    &registry,
-                    &Symbol::new(env, "get_board"),
-                    board_args,
-                );
+                // Get board metadata from board contract
+                let config: BoardConfig = env
+                    .try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                        &board_contract,
+                        &Symbol::new(env, "get_config"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(BoardConfig {
+                        name: String::from_str(env, "Unknown"),
+                        description: String::from_str(env, ""),
+                        is_private: false,
+                        is_readonly: false,
+                        max_reply_depth: 10,
+                        reply_chunk_size: 6,
+                    });
 
-                if let Some(board) = board_opt {
-                    standalone_boards.push_back(board);
-                }
+                let thread_count: u64 = env
+                    .try_invoke_contract::<u64, soroban_sdk::Error>(
+                        &board_contract,
+                        &Symbol::new(env, "thread_count"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0);
+
+                let created_at: u64 = env
+                    .try_invoke_contract::<u64, soroban_sdk::Error>(
+                        &board_contract,
+                        &Symbol::new(env, "get_created_at"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(0);
+
+                let creator: Address = env
+                    .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                        &board_contract,
+                        &Symbol::new(env, "get_creator"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten()
+                    .unwrap_or_else(|| Address::from_string(&String::from_str(env, "GAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAWHF")));
+
+                let board_meta = BoardMeta {
+                    id: i,
+                    name: config.name,
+                    description: config.description,
+                    creator,
+                    created_at,
+                    thread_count,
+                    is_readonly: config.is_readonly,
+                    is_private: config.is_private,
+                };
+
+                standalone_boards.push_back(board_meta);
 
                 // Limit to 20 boards
                 if standalone_boards.len() >= 20 {
@@ -715,14 +952,6 @@ impl BoardsMain {
 
                 md = md.raw_str("<div class=\"board-list\">\n");
                 for board in sorted_boards.iter() {
-                    // Check private status
-                    let private_args: Vec<Val> = Vec::from_array(env, [board.id.into_val(env)]);
-                    let is_private: bool = env.invoke_contract(
-                        &registry,
-                        &Symbol::new(env, "get_board_private"),
-                        private_args,
-                    );
-
                     // Board card with link wrapper
                     md = md.raw_str("<a href=\"render:/b/")
                         .number(board.id as u32)
@@ -734,7 +963,7 @@ impl BoardsMain {
                         .number(board.thread_count as u32)
                         .text(" threads · ")
                         .raw(Self::format_timestamp(env, board.created_at));
-                    if is_private {
+                    if board.is_private {
                         md = md.raw_str(" <span class=\"badge\">private</span>");
                     }
                     md = md.raw_str("</span></a>\n");
@@ -850,8 +1079,8 @@ impl BoardsMain {
             .text_string(&viewer.as_ref().unwrap().to_string())
             .raw_str("\" />\n")
             .newline()
-            // Use form_link_to to target registry contract
-            .form_link_to("Create Board", "registry", "create_board")
+            // Use form_link_to to target main contract (proxies to board creation)
+            .form_link_to("Create Board", "main", "create_board")
             .newline()
             .newline()
             .render_link("Cancel", "/");
@@ -1084,12 +1313,11 @@ impl BoardsMain {
             return Self::render_footer_into(env, md).build();
         };
 
-        // Get board list for target selection
-        let boards_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 100u64.into_val(env)]);
-        let boards: Vec<BoardMeta> = env.invoke_contract(
+        // Get board list for target selection by iterating board contracts
+        let count: u64 = env.invoke_contract(
             &registry,
-            &Symbol::new(env, "list_boards"),
-            boards_args,
+            &Symbol::new(env, "board_contract_count"),
+            Vec::new(env),
         );
 
         md = md
@@ -1108,13 +1336,41 @@ impl BoardsMain {
             .raw_str("<select name=\"target_board_id\">\n");
 
         // Add board options (excluding the source board)
-        for i in 0..boards.len() {
-            let board = boards.get(i).unwrap();
-            if board.id != from_board {
+        for i in 0..count {
+            if i == from_board {
+                continue;
+            }
+
+            let board_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
+            let target_contract_opt: Option<Address> = env.invoke_contract(
+                &registry,
+                &Symbol::new(env, "get_board_contract"),
+                board_args,
+            );
+
+            if let Some(target_contract) = target_contract_opt {
+                // Get board name from config
+                let config: BoardConfig = env
+                    .try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                        &target_contract,
+                        &Symbol::new(env, "get_config"),
+                        Vec::new(env),
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .unwrap_or(BoardConfig {
+                        name: String::from_str(env, "Unknown"),
+                        description: String::from_str(env, ""),
+                        is_private: false,
+                        is_readonly: false,
+                        max_reply_depth: 10,
+                        reply_chunk_size: 6,
+                    });
+
                 md = md.raw_str("<option value=\"")
-                    .number(board.id as u32)
+                    .number(i as u32)
                     .raw_str("\">")
-                    .text_string(&board.name)
+                    .text_string(&config.name)
                     .raw_str("</option>\n");
             }
         }

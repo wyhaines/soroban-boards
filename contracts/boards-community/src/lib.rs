@@ -80,18 +80,16 @@ pub struct CommunityRules {
     pub min_account_age_days: u32,
 }
 
-/// Board metadata (mirrors registry BoardMeta for cross-contract calls)
+/// Board configuration (matches boards-board BoardConfig)
 #[contracttype]
 #[derive(Clone)]
-pub struct BoardMeta {
-    pub id: u64,
+pub struct BoardConfig {
     pub name: String,
     pub description: String,
-    pub creator: Address,
-    pub created_at: u64,
-    pub thread_count: u64,
-    pub is_readonly: bool,
     pub is_private: bool,
+    pub is_readonly: bool,
+    pub max_reply_depth: u32,
+    pub reply_chunk_size: u32,
 }
 
 /// Minimal community info for navigation (used by board contract)
@@ -1180,13 +1178,13 @@ impl BoardsCommunity {
         builder
     }
 
-    /// Render a list of boards as cards (fetches metadata from registry)
+    /// Render a list of boards as cards (fetches metadata from board contracts)
     fn render_board_cards<'a>(env: &'a Env, mut builder: MarkdownBuilder<'a>, board_ids: &Vec<u64>) -> MarkdownBuilder<'a> {
         if board_ids.is_empty() {
             return builder.paragraph("No boards in this community yet.");
         }
 
-        // Get registry to fetch board metadata
+        // Get registry to look up board contracts
         let registry: Address = match env.storage().instance().get(&CommunityKey::Registry) {
             Some(r) => r,
             None => {
@@ -1197,29 +1195,45 @@ impl BoardsCommunity {
         builder = builder.raw_str("<div class=\"board-list\">\n");
 
         for board_id in board_ids.iter() {
-            // Fetch board metadata from registry
+            // Get board contract from registry
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-            let board_opt: Option<BoardMeta> = env.invoke_contract(
+            let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
-                &Symbol::new(env, "get_board"),
+                &Symbol::new(env, "get_board_contract"),
                 args,
-            );
+            ).ok().and_then(|r| r.ok()).flatten();
 
-            if let Some(board) = board_opt {
-                // Board card with link wrapper - use render:/b/ to go through main contract
-                builder = builder.raw_str("<a href=\"render:/b/")
-                    .number(board.id as u32)
-                    .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
-                    .text_string(&board.name)
-                    .raw_str("</span><span class=\"board-card-desc\">")
-                    .text_string(&board.description)
-                    .raw_str("</span><span class=\"board-card-meta\">")
-                    .number(board.thread_count as u32)
-                    .text(" threads");
-                if board.is_private {
-                    builder = builder.raw_str(" <span class=\"badge\">private</span>");
+            if let Some(board_contract) = board_contract_opt {
+                // Get config from board contract
+                let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "get_config"),
+                    Vec::new(env),
+                ).ok().and_then(|r| r.ok());
+
+                // Get thread count from board contract
+                let thread_count: u64 = env.try_invoke_contract::<u64, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "thread_count"),
+                    Vec::new(env),
+                ).ok().and_then(|r| r.ok()).unwrap_or(0);
+
+                if let Some(config) = config_opt {
+                    // Board card with link wrapper - use render:/b/ to go through main contract
+                    builder = builder.raw_str("<a href=\"render:/b/")
+                        .number(board_id as u32)
+                        .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
+                        .text_string(&config.name)
+                        .raw_str("</span><span class=\"board-card-desc\">")
+                        .text_string(&config.description)
+                        .raw_str("</span><span class=\"board-card-meta\">")
+                        .number(thread_count as u32)
+                        .text(" threads");
+                    if config.is_private {
+                        builder = builder.raw_str(" <span class=\"badge\">private</span>");
+                    }
+                    builder = builder.raw_str("</span></a>\n");
                 }
-                builder = builder.raw_str("</span></a>\n");
             }
         }
 

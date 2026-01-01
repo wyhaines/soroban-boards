@@ -298,60 +298,101 @@ stellar contract invoke \
 
 echo -e "${GREEN}Config registered as @config${NC}"
 
-# Register community contract with registry
+# Register community contract with registry using generic set_contract
 echo ""
 echo -e "${GREEN}=== Registering Community with Registry ===${NC}"
 stellar contract invoke \
     --id $REGISTRY_ID \
     --source $DEPLOYER \
     --network $NETWORK \
-    -- set_community_contract \
-    --community $COMMUNITY_ID \
+    -- set_contract \
+    --alias community \
+    --address $COMMUNITY_ID \
     --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Community registered${NC}"
 
-# Register voting contract with registry
+# Register voting contract with registry using generic set_contract
 echo ""
 echo -e "${GREEN}=== Registering Voting with Registry ===${NC}"
 stellar contract invoke \
     --id $REGISTRY_ID \
     --source $DEPLOYER \
     --network $NETWORK \
-    -- set_voting_contract \
-    --voting $VOTING_ID \
+    -- set_contract \
+    --alias voting \
+    --address $VOTING_ID \
     --caller $DEPLOYER_ADDR
 
 echo -e "${GREEN}Voting registered${NC}"
 
-# Create first board via registry (board contract is auto-deployed)
+# Create first board manually (deploy + register + init)
+# Note: create_board via main has auth chaining issues, so we do it directly
 echo ""
 echo -e "${GREEN}=== Creating First Board ===${NC}"
-BOARD_OUTPUT=$(stellar contract invoke \
+
+# Deploy board contract
+echo -e "${YELLOW}Deploying board contract...${NC}"
+BOARD_DEPLOY_OUTPUT=$(stellar contract deploy \
+    --wasm "$WASM_DIR/boards_board.wasm" \
+    --source $DEPLOYER \
+    --network $NETWORK 2>&1)
+BOARD_CONTRACT=$(echo "$BOARD_DEPLOY_OUTPUT" | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+
+if [ -z "$BOARD_CONTRACT" ]; then
+    echo -e "${RED}Error: Failed to deploy board contract${NC}"
+    echo "$BOARD_DEPLOY_OUTPUT"
+    exit 1
+fi
+
+echo -e "${GREEN}Board contract deployed: $BOARD_CONTRACT${NC}"
+
+# Register board with registry
+echo -e "${YELLOW}Registering board with registry...${NC}"
+BOARD_NUM_OUTPUT=$(stellar contract invoke \
     --id $REGISTRY_ID \
     --source $DEPLOYER \
     --network $NETWORK \
-    -- create_board \
+    -- register_board_contract \
+    --board_contract $BOARD_CONTRACT \
+    --caller $DEPLOYER_ADDR 2>&1)
+BOARD_NUM=$(echo "$BOARD_NUM_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
+
+echo -e "${GREEN}Board registered as #$BOARD_NUM${NC}"
+
+# Initialize board contract
+echo -e "${YELLOW}Initializing board...${NC}"
+stellar contract invoke \
+    --id $BOARD_CONTRACT \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --board_id $BOARD_NUM \
+    --registry $REGISTRY_ID \
+    --permissions "\"$PERMISSIONS_ID\"" \
+    --content "\"$CONTENT_ID\"" \
+    --theme "\"$THEME_ID\"" \
     --name "General" \
     --description "General discussion board" \
-    --is_private '""' \
-    --is_listed '"true"' \
-    --caller $DEPLOYER_ADDR 2>&1)
-# Extract board number (single digit at end)
-BOARD_NUM=$(echo "$BOARD_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
+    --is_private false \
+    --creator "\"$DEPLOYER_ADDR\"" \
+    --is_listed true
 
-echo -e "${GREEN}Created board #$BOARD_NUM (board contract auto-deployed)${NC}"
+echo -e "${GREEN}Board initialized${NC}"
 
-# Get the auto-deployed board contract address
-BOARD_CONTRACT_OUTPUT=$(stellar contract invoke \
-    --id $REGISTRY_ID \
+# Set deployer as board owner in permissions
+echo -e "${YELLOW}Setting board ownership...${NC}"
+stellar contract invoke \
+    --id $PERMISSIONS_ID \
     --source $DEPLOYER \
     --network $NETWORK \
-    -- get_board_contract \
-    --board_id 0 2>&1)
-# Extract contract ID (starts with C, may be quoted)
-BOARD_CONTRACT=$(echo "$BOARD_CONTRACT_OUTPUT" | tr -d '"' | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+    -- set_role \
+    --board_id $BOARD_NUM \
+    --user $DEPLOYER_ADDR \
+    --role 4 \
+    --caller $DEPLOYER_ADDR
 
+echo -e "${GREEN}Created board #$BOARD_NUM${NC}"
 echo -e "Board contract: ${YELLOW}$BOARD_CONTRACT${NC}"
 
 # Create a sample thread using the auto-deployed board contract

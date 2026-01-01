@@ -100,7 +100,7 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "BoardCount"
+                              "symbol": "BoardContractCount"
                             }
                           ]
                         },

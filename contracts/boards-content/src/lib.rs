@@ -231,12 +231,11 @@ impl BoardsContent {
         let chonk = Chonk::open(&env, key);
         chonk.write_chunked(body_bytes, 4096);
 
-        // Increment thread count in registry
-        let incr_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
-            &registry,
+        // Increment thread count in board contract
+        let _ = env.try_invoke_contract::<u64, soroban_sdk::Error>(
+            &board_contract,
             &Symbol::new(&env, "increment_thread_count"),
-            incr_args,
+            Vec::new(&env),
         );
 
         // Record first-seen timestamp for the user (for account age tracking)
@@ -1490,12 +1489,11 @@ impl BoardsContent {
             .persistent()
             .set(&ContentKey::CrosspostList(original_board_id, original_thread_id), &crosspost_list);
 
-        // Increment thread count in registry
-        let incr_args: Vec<Val> = Vec::from_array(&env, [target_board_id.into_val(&env)]);
-        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
-            &registry,
+        // Increment thread count in target board contract
+        let _ = env.try_invoke_contract::<u64, soroban_sdk::Error>(
+            &target_board_contract,
             &Symbol::new(&env, "increment_thread_count"),
-            incr_args,
+            Vec::new(&env),
         );
 
         Ok(new_thread_id)

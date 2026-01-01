@@ -26,18 +26,16 @@ pub enum AdminKey {
 // External Types (must match other contracts)
 // ============================================================================
 
-/// Board metadata from registry
+/// Board configuration from board contract
 #[contracttype]
 #[derive(Clone)]
-pub struct BoardMeta {
-    pub id: u64,
+pub struct BoardConfig {
     pub name: String,
     pub description: String,
-    pub creator: Address,
-    pub created_at: u64,
-    pub thread_count: u64,
-    pub is_readonly: bool,
     pub is_private: bool,
+    pub is_readonly: bool,
+    pub max_reply_depth: u32,
+    pub reply_chunk_size: u32,
 }
 
 /// Ban record from permissions contract
@@ -908,24 +906,47 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        // Get registry for board info (needed for title)
+        // Get registry for board contract lookup
         let registry: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        // Get board metadata for title
-        let board_opt: Option<BoardMeta> = env.invoke_contract(
+        // Get board contract address from registry
+        let board_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
-            &Symbol::new(env, "get_board"),
+            &Symbol::new(env, "get_board_contract"),
             Vec::from_array(env, [board_id.into_val(env)]),
         );
 
         // Build title with board name
         let mut md = Self::render_nav(env, board_id);
-        if let Some(ref board) = board_opt {
-            md = md.h1("Settings: ").text_string(&board.name).newline().newline();
+
+        // Get board config from board contract
+        let config_opt: Option<BoardConfig> = if let Some(ref board_addr) = board_contract_opt {
+            env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                board_addr,
+                &Symbol::new(env, "get_config"),
+                Vec::new(env),
+            ).ok().and_then(|r| r.ok())
+        } else {
+            None
+        };
+
+        // Get board creator for ownership checks
+        let creator_opt: Option<Address> = if let Some(ref board_addr) = board_contract_opt {
+            env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                board_addr,
+                &Symbol::new(env, "get_creator"),
+                Vec::new(env),
+            ).ok().and_then(|r| r.ok()).flatten()
+        } else {
+            None
+        };
+
+        if let Some(ref config) = config_opt {
+            md = md.h1("Settings: ").text_string(&config.name).newline().newline();
         } else {
             md = md.h1("Board Settings");
         }
@@ -948,30 +969,11 @@ impl BoardsAdmin {
             return Self::render_footer_into(env, md).build();
         }
 
-        if let Some(ref board) = board_opt {
+        if let Some(ref config) = config_opt {
             md = md.h2("Board Name")
-                .text("**Current name:** ").text_string(&board.name).newline();
-
-            // Get aliases
-            let aliases: Vec<String> = env.invoke_contract(
-                &registry,
-                &Symbol::new(env, "get_board_aliases"),
-                Vec::from_array(env, [board_id.into_val(env)]),
-            );
-
-            if !aliases.is_empty() {
-                md = md.text("**Aliases:** ");
-                for i in 0..aliases.len() {
-                    if i > 0 {
-                        md = md.text(", ");
-                    }
-                    md = md.text_string(&aliases.get(i).unwrap());
-                }
-                md = md.newline();
-            }
-
-            md = md.newline()
-                .note("Rename the board. The old name will become an alias that continues to work.")
+                .text("**Current name:** ").text_string(&config.name).newline()
+                .newline()
+                .note("Board name can be changed by updating the board configuration.")
                 .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                 .number(board_id as u32)
                 .raw_str("\" />\n")
@@ -1078,12 +1080,16 @@ impl BoardsAdmin {
                 .newline();
         }
 
-        // Board visibility setting
-        let is_listed: bool = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_listed"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
+        // Board visibility setting - query board contract
+        let is_listed: bool = if let Some(ref board_addr) = board_contract_opt {
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                board_addr,
+                &Symbol::new(env, "get_board_listed"),
+                Vec::new(env),
+            ).unwrap_or(Ok(false)).unwrap_or(false)
+        } else {
+            false
+        };
 
         md = md.h2("Board Visibility")
             .text("**Listed publicly:** ");
@@ -1109,12 +1115,8 @@ impl BoardsAdmin {
         md = md.newline()
             .newline();
 
-        // Board access control (public/private)
-        let is_private: bool = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_private"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
+        // Board access control (public/private) - get from config
+        let is_private = config_opt.as_ref().map(|c| c.is_private).unwrap_or(false);
 
         md = md.h2("Access Control")
             .text("**Board type:** ");
@@ -1140,18 +1142,16 @@ impl BoardsAdmin {
         md = md.newline()
             .newline();
 
-        // Board read-only status - query board contract directly
-        let board_contract: Address = env.invoke_contract::<Option<Address>>(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        ).expect("Board contract not found");
-
-        let is_readonly: bool = env.invoke_contract(
-            &board_contract,
-            &Symbol::new(env, "is_readonly"),
-            Vec::new(env),
-        );
+        // Board read-only status - use existing board_contract_opt
+        let is_readonly = if let Some(ref board_addr) = board_contract_opt {
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                board_addr,
+                &Symbol::new(env, "is_readonly"),
+                Vec::new(env),
+            ).unwrap_or(Ok(false)).unwrap_or(false)
+        } else {
+            false
+        };
 
         md = md.h2("Posting Status")
             .text("**Current status:** ");
@@ -1180,17 +1180,17 @@ impl BoardsAdmin {
         // Community Management Section
         md = md.h2("Community");
 
-        // Get community contract address from registry
+        // Get community contract address via alias lookup
         let community_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
-            &Symbol::new(env, "get_community_contract"),
-            Vec::new(env),
+            &Symbol::new(env, "get_contract_by_alias"),
+            Vec::from_array(env, [Symbol::new(env, "community").into_val(env)]),
         );
 
-        if let Some(community_contract) = community_contract_opt {
-            // Get current community association
+        if let Some(ref community_contract) = community_contract_opt {
+            // Get current community association from community contract
             let community_id_opt: Option<u64> = env.invoke_contract(
-                &registry,
+                community_contract,
                 &Symbol::new(env, "get_board_community"),
                 Vec::from_array(env, [board_id.into_val(env)]),
             );
@@ -1223,7 +1223,7 @@ impl BoardsAdmin {
                         .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
                         .number(board_id as u32)
                         .raw_str("/settings\" />\n")
-                        .form_link_to("Leave Community", "registry", "remove_board_from_community")
+                        .form_link_to("Leave Community", "community", "remove_board")
                         .newline();
                 } else {
                     md = md.text("**Status:** In community (ID: ")
@@ -1289,7 +1289,7 @@ impl BoardsAdmin {
                         .number(board_id as u32)
                         .raw_str("/settings\" />\n")
                         .newline()
-                        .form_link_to("Move to Community", "registry", "move_board_to_community")
+                        .form_link_to("Move to Community", "community", "add_board")
                         .newline();
                 }
             }
@@ -1332,8 +1332,8 @@ impl BoardsAdmin {
             .newline();
 
         // Danger Zone - only show to board owner
-        if let (Some(v), Some(ref board)) = (viewer, &board_opt) {
-            if *v == board.creator {
+        if let (Some(v), Some(ref creator)) = (viewer, &creator_opt) {
+            if v == creator {
                 md = md.h2("Danger Zone")
                     .warning("These actions are irreversible.")
                     .raw_str("[Delete Board](render:/admin/b/")
@@ -1354,12 +1354,11 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        // Get board metadata
-        let board_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_opt: Option<BoardMeta> = env.invoke_contract(
+        // Get board contract from registry
+        let board_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
-            &Symbol::new(env, "get_board"),
-            board_args,
+            &Symbol::new(env, "get_board_contract"),
+            Vec::from_array(env, [board_id.into_val(env)]),
         );
 
         let mut md = MarkdownBuilder::new(env);
@@ -1372,14 +1371,33 @@ impl BoardsAdmin {
             .div_end()
             .newline();
 
-        let board = match board_opt {
-            Some(b) => b,
+        let board_contract = match board_contract_opt {
+            Some(addr) => addr,
             None => {
                 return md.h1("Board Not Found")
                     .paragraph("This board does not exist.")
                     .build();
             }
         };
+
+        // Get board config and metadata from board contract
+        let config: BoardConfig = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_config"),
+            Vec::new(env),
+        );
+
+        let creator_opt: Option<Address> = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_creator"),
+            Vec::new(env),
+        );
+
+        let thread_count: u64 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "thread_count"),
+            Vec::new(env),
+        );
 
         md = md.h1("Delete Board");
 
@@ -1393,7 +1411,8 @@ impl BoardsAdmin {
         let viewer_addr = viewer.as_ref().unwrap();
 
         // Check if viewer is the board owner
-        if *viewer_addr != board.creator {
+        let is_owner = creator_opt.as_ref().map(|c| c == viewer_addr).unwrap_or(false);
+        if !is_owner {
             return md
                 .warning("Only the board owner can delete this board.")
                 .build();
@@ -1405,16 +1424,16 @@ impl BoardsAdmin {
             .newline()
             .paragraph("You are about to delete:")
             .raw_str("<div class=\"board-card\" style=\"pointer-events: none;\"><span class=\"board-card-title\">")
-            .text_string(&board.name)
+            .text_string(&config.name)
             .raw_str("</span><span class=\"board-card-desc\">")
-            .text_string(&board.description)
+            .text_string(&config.description)
             .raw_str("</span><span class=\"board-card-meta\">")
-            .number(board.thread_count as u32)
+            .number(thread_count as u32)
             .text(" threads")
             .raw_str("</span></div>\n")
             .newline();
 
-        if board.thread_count > 0 {
+        if thread_count > 0 {
             md = md.note("This board contains threads. All threads and replies will be permanently deleted.");
         }
 
@@ -1429,7 +1448,7 @@ impl BoardsAdmin {
             .raw_str("\" />\n")
             .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/\" />\n")
             .newline()
-            .form_link_to("Delete Board Permanently", "registry", "delete_board")
+            .form_link_to("Delete Board Permanently", "main", "delete_board")
             .newline()
             .newline()
             .raw_str("<a href=\"render:/admin/b/")
@@ -3186,38 +3205,29 @@ impl BoardsAdmin {
         is_listed: bool,
         caller: Address,
     ) {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Permissions)
-            .expect("Not initialized");
-
-        // Verify caller has admin permissions
-        let caller_perms: PermissionSet = env.invoke_contract(
-            &permissions,
-            &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
-        );
-
-        if !caller_perms.can_admin {
-            panic!("Caller must be admin or owner");
-        }
-
-        // Call registry's set_listed function
+        // Get registry to look up board contract
         let registry: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
+        // Get board contract address
+        let board_contract: Address = env.invoke_contract::<Option<Address>>(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            Vec::from_array(&env, [board_id.into_val(&env)]),
+        ).expect("Board contract not found");
+
+        // Call board contract's set_board_listed function
+        // (The board contract handles permission checking internally)
         let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
             is_listed.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
-            &registry,
-            &Symbol::new(&env, "set_listed"),
+            &board_contract,
+            &Symbol::new(&env, "set_board_listed"),
             args,
         );
     }
@@ -3249,37 +3259,28 @@ impl BoardsAdmin {
         is_private: bool,
         caller: Address,
     ) {
-        let permissions: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Permissions)
-            .expect("Not initialized");
-
-        // Verify caller has admin permissions
-        let caller_perms: PermissionSet = env.invoke_contract(
-            &permissions,
-            &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
-        );
-
-        if !caller_perms.can_admin {
-            panic!("Caller must be admin or owner");
-        }
-
-        // Call registry's set_private function
+        // Get registry to look up board contract
         let registry: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
+        // Get board contract address
+        let board_contract: Address = env.invoke_contract::<Option<Address>>(
+            &registry,
+            &Symbol::new(&env, "get_board_contract"),
+            Vec::from_array(&env, [board_id.into_val(&env)]),
+        ).expect("Board contract not found");
+
+        // Call board contract's set_private function
+        // (The board contract handles permission checking internally)
         let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
             is_private.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
-            &registry,
+            &board_contract,
             &Symbol::new(&env, "set_private"),
             args,
         );

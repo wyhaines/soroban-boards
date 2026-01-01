@@ -38,6 +38,12 @@ pub enum BoardKey {
     NextFlairId,
     /// Board rules (markdown text)
     Rules,
+    /// Whether board is listed publicly (for home page)
+    BoardListed,
+    /// Board creator address
+    Creator,
+    /// Board creation timestamp
+    CreatedAt,
 }
 
 /// Thread metadata
@@ -161,6 +167,8 @@ pub struct BoardsBoard;
 impl BoardsBoard {
     /// Initialize a board contract (called by registry after deployment)
     /// permissions is optional - if None, permission checks are skipped (useful for testing)
+    /// creator is optional - if None, no creator is recorded (for legacy boards)
+    /// is_listed defaults to true if not specified
     pub fn init(
         env: Env,
         board_id: u64,
@@ -171,6 +179,8 @@ impl BoardsBoard {
         name: String,
         description: String,
         is_private: bool,
+        creator: Option<Address>,
+        is_listed: Option<bool>,
     ) {
         if env.storage().instance().has(&BoardKey::BoardId) {
             panic!("Already initialized");
@@ -212,6 +222,17 @@ impl BoardsBoard {
 
         // Set default edit window (24 hours)
         env.storage().instance().set(&BoardKey::EditWindow, &86400u64);
+
+        // Store creator if provided
+        if let Some(creator_addr) = creator {
+            env.storage().instance().set(&BoardKey::Creator, &creator_addr);
+        }
+
+        // Store creation timestamp
+        env.storage().instance().set(&BoardKey::CreatedAt, &env.ledger().timestamp());
+
+        // Store listed status (default to true)
+        env.storage().instance().set(&BoardKey::BoardListed, &is_listed.unwrap_or(true));
     }
 
     /// Set content contract address (for boards created before this was added)
@@ -305,8 +326,7 @@ impl BoardsBoard {
         };
 
         // Parse is_listed string to bool (default to listed)
-        // Note: is_listed is tracked in registry metadata, not in board contract
-        let _is_listed_bool = if is_listed.len() == 0 {
+        let is_listed_bool = if is_listed.len() == 0 {
             true
         } else if is_listed.len() == 5 {
             let mut buf = [0u8; 5];
@@ -439,6 +459,11 @@ impl BoardsBoard {
         env.storage()
             .instance()
             .set(&BoardKey::EditWindow, &86400u64);
+
+        // Store creator, created_at, and listed status
+        env.storage().instance().set(&BoardKey::Creator, &caller);
+        env.storage().instance().set(&BoardKey::CreatedAt, &env.ledger().timestamp());
+        env.storage().instance().set(&BoardKey::BoardListed, &is_listed_bool);
 
         // Increment user's board count in permissions
         if let Some(ref perms) = permissions {
@@ -802,6 +827,71 @@ impl BoardsBoard {
             .expect("Not initialized")
     }
 
+    /// Get whether board is listed publicly (for home page)
+    pub fn get_board_listed(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get(&BoardKey::BoardListed)
+            .unwrap_or(true) // Default to listed for backward compatibility
+    }
+
+    /// Set whether board is listed publicly (owner/admin only)
+    pub fn set_board_listed(env: Env, is_listed: bool, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can change listed status");
+            }
+        }
+
+        env.storage().instance().set(&BoardKey::BoardListed, &is_listed);
+    }
+
+    /// Get board creator address
+    pub fn get_creator(env: Env) -> Option<Address> {
+        env.storage().instance().get(&BoardKey::Creator)
+    }
+
+    /// Get board creation timestamp
+    pub fn get_created_at(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&BoardKey::CreatedAt)
+            .unwrap_or(0) // Default to 0 for legacy boards
+    }
+
+    /// Increment thread count (called by content contract when creating threads)
+    /// This is separate from create_thread to allow external contracts to track thread counts
+    pub fn increment_thread_count(env: Env) -> u64 {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::ThreadCount)
+            .unwrap_or(0);
+        let new_count = count + 1;
+        env.storage().instance().set(&BoardKey::ThreadCount, &new_count);
+        new_count
+    }
+
     /// Get reply chunk size for waterfall loading
     pub fn get_chunk_size(env: Env) -> u32 {
         let config: BoardConfig = env
@@ -994,6 +1084,52 @@ impl BoardsBoard {
             .get(&BoardKey::Config)
             .expect("Not initialized");
         config.is_readonly = is_readonly;
+        env.storage().instance().set(&BoardKey::Config, &config);
+    }
+
+    /// Check if board is private (members only)
+    pub fn is_private(env: Env) -> bool {
+        env.storage()
+            .instance()
+            .get::<_, BoardConfig>(&BoardKey::Config)
+            .map(|c| c.is_private)
+            .unwrap_or(false)
+    }
+
+    /// Set board private status (owner/admin only)
+    pub fn set_private(env: Env, is_private: bool, caller: Address) {
+        caller.require_auth();
+
+        let board_id: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardId)
+            .expect("Not initialized");
+
+        // Check admin permissions (only if permissions contract is set)
+        if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .unwrap();
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
+            let fn_name = Symbol::new(&env, "can_admin");
+            let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
+            if !can_admin {
+                panic!("Only owner or admin can change private status");
+            }
+        }
+
+        let mut config: BoardConfig = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Config)
+            .expect("Not initialized");
+        config.is_private = is_private;
         env.storage().instance().set(&BoardKey::Config, &config);
     }
 
@@ -3393,35 +3529,31 @@ impl BoardsBoard {
     fn get_board_community(env: &Env, board_id: u64) -> Option<CommunityInfo> {
         let registry: Address = env.storage().instance().get(&BoardKey::Registry)?;
 
-        // Query registry for board's community ID
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let community_id_opt: Option<u64> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_community"),
-            args,
-        );
-
-        let community_id = community_id_opt?;
-
         // Get community contract address from registry
         let comm_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "community").into_val(env)]);
-        let community_contract: Option<Address> = env.invoke_contract(
+        let community_contract: Address = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
             &registry,
             &Symbol::new(env, "get_contract"),
             comm_args,
-        );
+        ).ok()?.ok()??;
 
-        let community_addr = community_contract?;
+        // Query community contract for board's community ID
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        let community_id: u64 = env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+            &community_contract,
+            &Symbol::new(env, "get_board_community"),
+            args,
+        ).ok()?.ok()??;
 
         // Fetch community metadata
         let meta_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
-        let community_meta: Option<CommunityInfo> = env.invoke_contract(
-            &community_addr,
+        let community_meta: CommunityInfo = env.try_invoke_contract::<Option<CommunityInfo>, soroban_sdk::Error>(
+            &community_contract,
             &Symbol::new(env, "get_community_info"),
             meta_args,
-        );
+        ).ok()?.ok()??;
 
-        community_meta
+        Some(community_meta)
     }
 
     /// Render author info (username link or truncated address)
@@ -3632,7 +3764,7 @@ mod test {
         let desc = String::from_str(&env, "General discussion");
 
         // Pass None for permissions, content, theme to skip checks in tests
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         assert_eq!(client.get_board_id(), 0);
         assert_eq!(client.thread_count(), 0);
@@ -3662,7 +3794,7 @@ mod test {
         let desc = String::from_str(&env, "General discussion");
 
         // Pass None for permissions, content, theme to skip checks in tests
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
@@ -3696,7 +3828,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
@@ -3727,7 +3859,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Original Title");
@@ -3754,7 +3886,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
 
@@ -3788,7 +3920,7 @@ mod test {
         let name = String::from_str(&env, "Private Board");
         let desc = String::from_str(&env, "Secret discussions");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &true);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &true, &None, &None);
 
         let config = client.get_config();
         assert_eq!(config.name, name);
@@ -3810,7 +3942,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         // Get thread that doesn't exist
         let thread = client.get_thread(&999);
@@ -3829,7 +3961,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Test Thread");
@@ -3858,7 +3990,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
@@ -3888,7 +4020,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
@@ -3916,7 +4048,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
@@ -3951,7 +4083,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread");
@@ -3980,7 +4112,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         // No pinned threads initially
         let pinned = client.get_pinned_threads();
@@ -3999,7 +4131,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "New Thread");
@@ -4027,7 +4159,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread to Delete");
@@ -4055,7 +4187,7 @@ mod test {
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "Discussion");
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false);
+        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Test Thread");

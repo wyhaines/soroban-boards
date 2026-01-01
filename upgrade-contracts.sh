@@ -267,14 +267,15 @@ if [ "$UPGRADE_COMMUNITY" = true ]; then
             --theme "$THEME_ID" 2>&1 | grep -v "^ℹ" || true
         echo -e "${GREEN}Community initialized${NC}"
 
-        # Register with registry
+        # Register with registry using generic set_contract
         echo -e "${YELLOW}Registering Community with Registry...${NC}"
         stellar contract invoke \
             --id "$REGISTRY_ID" \
             --source $DEPLOYER \
             --network $NETWORK \
-            -- set_community_contract \
-            --community "$COMMUNITY_ID" \
+            -- set_contract \
+            --alias community \
+            --address "$COMMUNITY_ID" \
             --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
         echo -e "${GREEN}Community registered${NC}"
 
@@ -320,14 +321,15 @@ if [ "$UPGRADE_VOTING" = true ]; then
             --permissions "$PERMISSIONS_ID" 2>&1 | grep -v "^ℹ" || true
         echo -e "${GREEN}Voting initialized${NC}"
 
-        # Register with registry
+        # Register with registry using generic set_contract
         echo -e "${YELLOW}Registering Voting with Registry...${NC}"
         stellar contract invoke \
             --id "$REGISTRY_ID" \
             --source $DEPLOYER \
             --network $NETWORK \
-            -- set_voting_contract \
-            --voting "$VOTING_ID" \
+            -- set_contract \
+            --alias voting \
+            --address "$VOTING_ID" \
             --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
         echo -e "${GREEN}Voting registered${NC}"
 
@@ -464,7 +466,7 @@ if [ "$UPGRADE_BOARDS" = true ]; then
         --id "$REGISTRY_ID" \
         --source $DEPLOYER \
         --network $NETWORK \
-        -- board_count 2>&1)
+        -- board_contract_count 2>&1)
     BOARD_COUNT=$(echo "$BOARD_COUNT_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
     if [ -z "$BOARD_COUNT" ] || [ "$BOARD_COUNT" -eq 0 ]; then
