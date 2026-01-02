@@ -1466,40 +1466,45 @@ impl BoardsAdmin {
                     .number(flair.id)
                     .raw_str("/edit)");
 
-                // Disable button (only for enabled flairs)
+                // Disable button (only for enabled flairs) - wrapped in data-form to isolate inputs
                 if flair.enabled {
                     md = md.text(" | ")
+                        .raw_str("<div data-form>\n")
                         .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                         .number(board_id as u32)
                         .raw_str("\" />\n")
                         .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
                         .number(flair.id)
                         .raw_str("\" />\n")
-                        .form_link_to("Disable", "admin", "disable_flair");
+                        .form_link_to("Disable", "admin", "disable_flair")
+                        .raw_str("</div>\n");
                 }
 
                 md = md.newline();
             }
         }
 
-        // Create new flair form
+        // Create new flair form - wrapped in data-form to isolate from disable buttons
+        // Pre-fill color fields with defaults to ensure they're never empty
         md = md.hr()
             .h2("Create New Flair")
+            .raw_str("<div data-form>\n")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
             .raw_str("\" />\n")
             .input("name", "Flair name (max 32 chars)")
             .newline()
-            .input("color", "Text color (e.g., #ffffff)")
+            .input_with_value("color", "Text color", "#ffffff")
             .newline()
-            .input("bg_color", "Background color (e.g., #ff4500)")
+            .input_with_value("bg_color", "Background color", "#808080")
             .newline()
             // Hidden inputs provide default "false" when checkbox is unchecked
             .raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n")
             .raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n")
             .raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n")
             .raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n")
-            .form_link_to("Create Flair", "admin", "create_flair");
+            .form_link_to("Create Flair", "admin", "create_flair")
+            .raw_str("</div>\n");
 
         Self::render_footer_into(env, md).build()
     }
@@ -3437,12 +3442,13 @@ impl BoardsAdmin {
     // ========================================================================
 
     /// Create a new flair (admin+)
+    /// Parameters are optional to handle form submissions where fields may be empty
     pub fn create_flair(
         env: Env,
         board_id: u64,
         name: String,
-        color: String,
-        bg_color: String,
+        color: Option<String>,
+        bg_color: Option<String>,
         required: Option<String>,
         mod_only: Option<String>,
         caller: Address,
@@ -3469,6 +3475,10 @@ impl BoardsAdmin {
         // Get board contract (single contract for all boards)
         let board_contract = Self::get_board_contract_address(&env);
 
+        // Provide defaults for optional color fields
+        let final_color = color.unwrap_or_else(|| String::from_str(&env, "#ffffff"));
+        let final_bg_color = bg_color.unwrap_or_else(|| String::from_str(&env, "#808080"));
+
         // Parse checkbox values (check for "true" string value)
         let is_required = required
             .map(|s| s == String::from_str(&env, "true"))
@@ -3481,8 +3491,8 @@ impl BoardsAdmin {
         let args: Vec<Val> = Vec::from_array(&env, [
             board_id.into_val(&env),
             name.into_val(&env),
-            color.into_val(&env),
-            bg_color.into_val(&env),
+            final_color.into_val(&env),
+            final_bg_color.into_val(&env),
             is_required.into_val(&env),
             is_mod_only.into_val(&env),
             caller.into_val(&env),
@@ -3597,8 +3607,9 @@ impl BoardsAdmin {
             enabled: is_enabled,
         };
 
-        // Update the flair
+        // Update the flair (board_id is required by boards-board.update_flair)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             flair_id_u32.into_val(&env),
             flair.into_val(&env),
             caller.into_val(&env),

@@ -59,11 +59,11 @@ if [ $# -gt 0 ]; then
             community)   UPGRADE_COMMUNITY=true ;;
             voting)      UPGRADE_VOTING=true ;;
             config)      UPGRADE_CONFIG=true ;;
-            boards)      UPGRADE_BOARDS=true ;;
+            board|boards) UPGRADE_BOARDS=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, config, boards, all"
+                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, config, board, all"
                 exit 1
                 ;;
         esac
@@ -442,56 +442,56 @@ if [ "$UPGRADE_CONFIG" = true ]; then
     echo ""
 fi
 
-# Upgrade Board contracts (need to iterate through all boards)
+# Upgrade Board contract (single contract storing all boards)
 if [ "$UPGRADE_BOARDS" = true ]; then
-    echo -e "${GREEN}=== Upgrading Board Contracts ===${NC}"
+    echo -e "${GREEN}=== Upgrading Board Contract ===${NC}"
 
-    # Install board WASM
-    BOARD_HASH=$(install_wasm "boards_board")
-    echo -e "WASM hash: ${BLUE}$BOARD_HASH${NC}"
-
-    # Also update the registry's stored WASM hash for future board deployments
-    echo -e "${YELLOW}Updating registry board WASM hash...${NC}"
-    stellar contract invoke \
-        --id "$REGISTRY_ID" \
-        --source $DEPLOYER \
-        --network $NETWORK \
-        -- set_board_wasm_hash \
-        --wasm_hash "$BOARD_HASH" \
-        --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
-    echo -e "${GREEN}Registry board WASM hash updated${NC}"
-
-    # Get board count
-    BOARD_COUNT_OUTPUT=$(stellar contract invoke \
-        --id "$REGISTRY_ID" \
-        --source $DEPLOYER \
-        --network $NETWORK \
-        -- board_contract_count 2>&1)
-    BOARD_COUNT=$(echo "$BOARD_COUNT_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
-
-    if [ -z "$BOARD_COUNT" ] || [ "$BOARD_COUNT" -eq 0 ]; then
-        echo -e "${YELLOW}No board contracts to upgrade${NC}"
+    # Check if BOARD_ID exists in env (new single-contract architecture)
+    if [ -n "$BOARD_ID" ]; then
+        echo -e "Upgrading single Board contract ($BOARD_ID)"
+        BOARD_HASH=$(install_wasm "boards_board")
+        echo -e "WASM hash: ${BLUE}$BOARD_HASH${NC}"
+        upgrade_contract_via_registry "Board" "$BOARD_ID" "$BOARD_HASH"
     else
-        echo -e "Found ${YELLOW}$BOARD_COUNT${NC} board(s) to upgrade"
+        # Fallback: old multi-contract architecture
+        echo -e "${YELLOW}No BOARD_ID found, checking for old multi-board architecture...${NC}"
 
-        for ((i=0; i<BOARD_COUNT; i++)); do
-            # Get board contract address
-            BOARD_CONTRACT_OUTPUT=$(stellar contract invoke \
-                --id "$REGISTRY_ID" \
-                --source $DEPLOYER \
-                --network $NETWORK \
-                -- get_board_contract \
-                --board_id $i 2>&1)
+        # Install board WASM
+        BOARD_HASH=$(install_wasm "boards_board")
+        echo -e "WASM hash: ${BLUE}$BOARD_HASH${NC}"
 
-            # Extract contract ID (may be quoted)
-            BOARD_CONTRACT=$(echo "$BOARD_CONTRACT_OUTPUT" | tr -d '"' | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+        # Get board count
+        BOARD_COUNT_OUTPUT=$(stellar contract invoke \
+            --id "$REGISTRY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- board_contract_count 2>&1)
+        BOARD_COUNT=$(echo "$BOARD_COUNT_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
-            if [ -n "$BOARD_CONTRACT" ]; then
-                upgrade_contract_via_registry "Board #$i" "$BOARD_CONTRACT" "$BOARD_HASH"
-            else
-                echo -e "${YELLOW}Board #$i has no contract (skipping)${NC}"
-            fi
-        done
+        if [ -z "$BOARD_COUNT" ] || [ "$BOARD_COUNT" -eq 0 ]; then
+            echo -e "${YELLOW}No board contracts to upgrade${NC}"
+        else
+            echo -e "Found ${YELLOW}$BOARD_COUNT${NC} board(s) to upgrade"
+
+            for ((i=0; i<BOARD_COUNT; i++)); do
+                # Get board contract address
+                BOARD_CONTRACT_OUTPUT=$(stellar contract invoke \
+                    --id "$REGISTRY_ID" \
+                    --source $DEPLOYER \
+                    --network $NETWORK \
+                    -- get_board_contract \
+                    --board_id $i 2>&1)
+
+                # Extract contract ID (may be quoted)
+                BOARD_CONTRACT=$(echo "$BOARD_CONTRACT_OUTPUT" | tr -d '"' | grep -E '^C[A-Z0-9]{55}$' | tail -1)
+
+                if [ -n "$BOARD_CONTRACT" ]; then
+                    upgrade_contract_via_registry "Board #$i" "$BOARD_CONTRACT" "$BOARD_HASH"
+                else
+                    echo -e "${YELLOW}Board #$i has no contract (skipping)${NC}"
+                fi
+            done
+        fi
     fi
     echo ""
 fi
@@ -505,6 +505,9 @@ echo "  Permissions:  $PERMISSIONS_ID"
 echo "  Content:      $CONTENT_ID"
 echo "  Theme:        $THEME_ID"
 echo "  Admin:        $ADMIN_CONTRACT_ID"
+if [ -n "$BOARD_ID" ]; then
+    echo "  Board:        $BOARD_ID"
+fi
 if [ -n "$COMMUNITY_ID" ]; then
     echo "  Community:    $COMMUNITY_ID"
 fi

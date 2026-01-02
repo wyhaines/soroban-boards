@@ -22,6 +22,8 @@ pub enum ContentError {
     NotInitialized = 5,
     /// Already flagged by this user
     AlreadyFlagged = 6,
+    /// A flair is required but none was selected
+    FlairRequired = 7,
 }
 
 /// Storage keys for the content contract
@@ -184,10 +186,12 @@ impl BoardsContent {
     /// 1. Calls the Board contract to create thread metadata
     /// 2. Stores the thread body content
     /// Returns the thread ID, or an error if the board is read-only
+    /// Note: Parameter order matches form field order (board_id, title, flair_id, body, caller)
     pub fn create_thread(
         env: Env,
         board_id: u64,
         title: String,
+        flair_id: Option<String>,
         body: String,
         caller: Address,
     ) -> Result<u64, ContentError> {
@@ -206,10 +210,38 @@ impl BoardsContent {
         // Get the board contract (single contract for all boards)
         let board_contract = Self::get_board_contract_address(&env);
 
+        // Check if flair is required but none selected
+        let flair_is_none = match &flair_id {
+            None => true,
+            Some(s) => {
+                let none_str = String::from_str(&env, "none");
+                s.len() == 0 || s == &none_str
+            }
+        };
+
+        if flair_is_none {
+            // Check if board requires a flair
+            let check_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+            let flair_required: bool = env.invoke_contract(
+                &board_contract,
+                &Symbol::new(&env, "is_flair_required"),
+                check_args,
+            );
+            if flair_required {
+                return Err(ContentError::FlairRequired);
+            }
+        }
+
         // Create the thread in the board contract (this creates metadata - now requires board_id)
+        // flair_id is passed as Option<String> - board contract parses it
         let create_args: Vec<Val> = Vec::from_array(
             &env,
-            [board_id.into_val(&env), title.into_val(&env), caller.clone().into_val(&env)],
+            [
+                board_id.into_val(&env),
+                title.into_val(&env),
+                flair_id.into_val(&env),
+                caller.clone().into_val(&env),
+            ],
         );
         let thread_id: u64 = env.invoke_contract(
             &board_contract,

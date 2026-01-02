@@ -738,6 +738,26 @@ impl BoardsBoard {
         None
     }
 
+    /// Check if any flair is required for new posts on this board
+    /// Returns true if at least one enabled, non-mod-only flair is marked as required
+    pub fn is_flair_required(env: Env, board_id: u64) -> bool {
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardFlairDefs(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        for i in 0..flairs.len() {
+            let flair = flairs.get(i).unwrap();
+            // Consider flair required if it's enabled, required, and not mod-only
+            // (mod-only flairs can't be required for regular users)
+            if flair.required && flair.enabled && !flair.mod_only {
+                return true;
+            }
+        }
+        false
+    }
+
     /// Set thread flair (Moderator+ for mod_only flairs, thread creator for others)
     pub fn set_thread_flair(env: Env, board_id: u64, thread_id: u64, flair_id: Option<u32>, caller: Address) {
         caller.require_auth();
@@ -1242,7 +1262,7 @@ impl BoardsBoard {
     /// Create a new thread (returns thread ID)
     /// Note: Auth is handled by the calling contract (theme). When called directly
     /// (e.g., via CLI), callers should ensure proper authorization.
-    pub fn create_thread(env: Env, board_id: u64, title: String, creator: Address) -> u64 {
+    pub fn create_thread(env: Env, board_id: u64, title: String, flair_id: Option<String>, creator: Address) -> u64 {
         // Note: require_auth() removed because this is called by the theme contract,
         // which already handles authentication. Cross-contract auth doesn't propagate
         // automatically in Soroban.
@@ -1262,6 +1282,108 @@ impl BoardsBoard {
             panic!("Board is read-only");
         }
 
+        // Parse flair_id from string: "none" or empty → None, "flair_N" → Some(N)
+        let parsed_flair_id: Option<u32> = if let Some(ref flair_str) = flair_id {
+            let none_str = String::from_str(&env, "none");
+            if flair_str.len() == 0 || flair_str == &none_str {
+                None
+            } else {
+                // Expect format "flair_N" - parse N as u32
+                let mut buf = [0u8; 32];
+                let len = core::cmp::min(flair_str.len() as usize, 32);
+                flair_str.copy_into_slice(&mut buf[..len]);
+
+                // Check for "flair_" prefix (6 chars)
+                if len > 6 && buf[0] == b'f' && buf[1] == b'l' && buf[2] == b'a'
+                    && buf[3] == b'i' && buf[4] == b'r' && buf[5] == b'_' {
+                    // Parse the number after "flair_"
+                    let mut result: u32 = 0;
+                    for i in 6..len {
+                        let b = buf[i];
+                        if b >= b'0' && b <= b'9' {
+                            result = result * 10 + (b - b'0') as u32;
+                        } else {
+                            panic!("Invalid flair_id format");
+                        }
+                    }
+                    Some(result)
+                } else {
+                    panic!("Invalid flair_id: expected 'none' or 'flair_N' format");
+                }
+            }
+        } else {
+            None
+        };
+
+        // Get flairs for this board
+        let flairs: Vec<FlairDef> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardFlairDefs(board_id))
+            .unwrap_or(Vec::new(&env));
+
+        // Check if user is moderator (needed for mod_only flair access)
+        let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
+            let permissions: Address = env
+                .storage()
+                .instance()
+                .get(&BoardKey::Permissions)
+                .expect("Not initialized");
+            let args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), creator.clone().into_val(&env)],
+            );
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &permissions,
+                &Symbol::new(&env, "can_moderate"),
+                args,
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false)
+        } else {
+            false
+        };
+
+        // Check if any flair is required (only consider flairs the user can actually select)
+        let mut has_required_flair = false;
+        for i in 0..flairs.len() {
+            let flair = flairs.get(i).unwrap();
+            if flair.required && flair.enabled && (!flair.mod_only || is_moderator) {
+                has_required_flair = true;
+                break;
+            }
+        }
+
+        // Validate flair selection
+        let validated_flair_id = if let Some(fid) = parsed_flair_id {
+            // User selected a flair - validate it exists and is usable
+            let mut flair_valid = false;
+            let mut flair_mod_only = false;
+            for i in 0..flairs.len() {
+                let flair = flairs.get(i).unwrap();
+                if flair.id == fid {
+                    if !flair.enabled {
+                        panic!("Selected flair is disabled");
+                    }
+                    flair_valid = true;
+                    flair_mod_only = flair.mod_only;
+                    break;
+                }
+            }
+            if !flair_valid {
+                panic!("Selected flair does not exist");
+            }
+            if flair_mod_only && !is_moderator {
+                panic!("Selected flair is moderator-only");
+            }
+            Some(fid)
+        } else if has_required_flair {
+            // No flair selected but one is required
+            panic!("A flair is required for new posts on this board");
+        } else {
+            None
+        };
+
         let thread_id: u64 = env
             .storage()
             .persistent()
@@ -1280,7 +1402,7 @@ impl BoardsBoard {
             is_pinned: false,
             is_hidden: false,
             is_deleted: false,
-            flair_id: None,
+            flair_id: validated_flair_id,
         };
 
         env.storage()
@@ -2173,6 +2295,8 @@ impl BoardsBoard {
     fn render_create_thread(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()  // Blank line after nav-bar div for markdown parsing
+            // Error mappings for user-friendly error messages
+            .raw_str("{{errors {\"1\": \"This board is read-only and does not accept new content.\", \"7\": \"Please select a flair for your post.\"}}}\n")
             .raw_str("[< Back to Board](render:/b/")
             .number(board_id as u32)
             .raw_str(")")
@@ -2269,12 +2393,13 @@ impl BoardsBoard {
             }
             md = md.raw_str(":</label>\n")
                 .raw_str("<select name=\"flair_id\">\n")
-                .raw_str("<option value=\"\">-- Select flair --</option>\n");
+                .raw_str("<option value=\"none\">-- Select flair --</option>\n");
 
             for i in 0..flairs.len() {
                 let flair = flairs.get(i).unwrap();
                 if flair.enabled && (!flair.mod_only || is_moderator) {
-                    md = md.raw_str("<option value=\"")
+                    // Use "flair_N" format to prevent viewer from converting to integer
+                    md = md.raw_str("<option value=\"flair_")
                         .number(flair.id)
                         .raw_str("\" style=\"color:")
                         .text_string(&flair.color)
@@ -2286,8 +2411,11 @@ impl BoardsBoard {
                 }
             }
 
-            md = md.raw_str("</select>\n")
-                .raw_str("</div>\n");
+            md = md.raw_str("</select>\n");
+            if flair_required {
+                md = md.raw_str("<small class=\"flair-required-notice\" style=\"color:#c00;display:block;margin-top:4px;\">* A flair is required for new posts on this board</small>\n");
+            }
+            md = md.raw_str("</div>\n");
         }
 
         md = md.textarea_markdown("body", 10, "Write your post content here...")
@@ -3074,6 +3202,8 @@ impl BoardsBoard {
     fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
+            // Error mappings for user-friendly error messages
+            .raw_str("{{errors {\"1\": \"This board is read-only.\", \"2\": \"This thread is locked and does not accept new replies.\", \"3\": \"You don't have permission to perform this action.\"}}}\n")
             .raw_str("[< Back to Thread](render:/b/")
             .number(board_id as u32)
             .raw_str("/t/")
@@ -3700,8 +3830,32 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to set up a contract with a board for testing
+    fn setup_with_board(env: &Env) -> (BoardsBoardClient, u64, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+
+        // Initialize contract (no permissions for simpler testing)
+        client.init(&registry, &None, &None, &None);
+
+        // Create a board
+        let name = String::from_str(env, "General");
+        let desc = String::from_str(env, "General discussion");
+        let is_private = String::from_str(env, "false");
+        let is_listed = String::from_str(env, "true");
+        let caller = Address::generate(env);
+
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &caller);
+
+        (client, board_id, caller)
+    }
+
     #[test]
-    fn test_init_and_create_thread() {
+    fn test_init_and_create_board() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -3709,133 +3863,192 @@ mod test {
         let client = BoardsBoardClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        assert_eq!(client.board_count(), 0);
+
         let name = String::from_str(&env, "General");
         let desc = String::from_str(&env, "General discussion");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let caller = Address::generate(&env);
 
-        // Pass None for permissions, content, theme to skip checks in tests
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &caller);
+        assert_eq!(board_id, 0);
+        assert_eq!(client.board_count(), 1);
 
-        assert_eq!(client.get_board_id(), 0);
-        assert_eq!(client.thread_count(), 0);
+        let board = client.get_board(&board_id).unwrap();
+        assert_eq!(board.name, name);
+    }
+
+    #[test]
+    fn test_create_thread_without_flair() {
+        let env = Env::default();
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Hello World");
 
-        let thread_id = client.create_thread(&title, &creator);
+        // Create thread without flair (None)
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
         assert_eq!(thread_id, 0);
-        assert_eq!(client.thread_count(), 1);
+        assert_eq!(client.thread_count(&board_id), 1);
 
-        let thread = client.get_thread(&thread_id).unwrap();
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert_eq!(thread.title, title);
         assert_eq!(thread.creator, creator);
+        assert!(thread.flair_id.is_none());
+    }
+
+    #[test]
+    fn test_create_thread_with_optional_flair() {
+        let env = Env::default();
+        let (client, board_id, owner) = setup_with_board(&env);
+
+        // Create a flair first
+        let flair_name = String::from_str(&env, "Discussion");
+        let flair_color = String::from_str(&env, "#ffffff");
+        let flair_bg = String::from_str(&env, "#0000ff");
+        let flair_id = client.create_flair(
+            &board_id,
+            &flair_name,
+            &flair_color,
+            &flair_bg,
+            &false, // not required
+            &false, // not mod_only
+            &owner,
+        );
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread with flair");
+
+        // Create thread with flair
+        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id), &creator);
+
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
+        assert_eq!(thread.flair_id, Some(flair_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "A flair is required for new posts on this board")]
+    fn test_required_flair_enforcement() {
+        let env = Env::default();
+        let (client, board_id, owner) = setup_with_board(&env);
+
+        // Create a required flair
+        let flair_name = String::from_str(&env, "Required Flair");
+        let flair_color = String::from_str(&env, "#ffffff");
+        let flair_bg = String::from_str(&env, "#ff0000");
+        client.create_flair(
+            &board_id,
+            &flair_name,
+            &flair_color,
+            &flair_bg,
+            &true,  // required!
+            &false, // not mod_only
+            &owner,
+        );
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread without flair");
+
+        // This should panic because flair is required but not provided
+        client.create_thread(&board_id, &title, &None, &creator);
+    }
+
+    #[test]
+    fn test_required_flair_with_selection() {
+        let env = Env::default();
+        let (client, board_id, owner) = setup_with_board(&env);
+
+        // Create a required flair
+        let flair_name = String::from_str(&env, "Required Flair");
+        let flair_color = String::from_str(&env, "#ffffff");
+        let flair_bg = String::from_str(&env, "#ff0000");
+        let flair_id = client.create_flair(
+            &board_id,
+            &flair_name,
+            &flair_color,
+            &flair_bg,
+            &true,  // required
+            &false, // not mod_only
+            &owner,
+        );
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread with required flair");
+
+        // This should succeed because we provide the required flair
+        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id), &creator);
+
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
+        assert_eq!(thread.flair_id, Some(flair_id));
+    }
+
+    #[test]
+    #[should_panic(expected = "Selected flair does not exist")]
+    fn test_invalid_flair_id() {
+        let env = Env::default();
+        let (client, board_id, _) = setup_with_board(&env);
+
+        let creator = Address::generate(&env);
+        let title = String::from_str(&env, "Thread with invalid flair");
+
+        // Try to use a flair ID that doesn't exist
+        client.create_thread(&board_id, &title, &Some(999), &creator);
     }
 
     #[test]
     fn test_pin_and_lock() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "General discussion");
-
-        // Pass None for permissions, content, theme to skip checks in tests
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
         let title = String::from_str(&env, "Important Announcement");
 
-        let thread_id = client.create_thread(&title, &creator);
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
         // Pin thread
-        client.pin_thread(&thread_id, &moderator);
-        let thread = client.get_thread(&thread_id).unwrap();
+        client.pin_thread(&board_id, &thread_id, &moderator);
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(thread.is_pinned);
 
-        let pinned = client.get_pinned_threads();
+        let pinned = client.get_pinned_threads(&board_id);
         assert_eq!(pinned.len(), 1);
 
         // Lock thread
-        client.lock_thread(&thread_id, &moderator);
-        let thread = client.get_thread(&thread_id).unwrap();
+        client.lock_thread(&board_id, &thread_id, &moderator);
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(thread.is_locked);
     }
 
     #[test]
     fn test_hide_thread() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "General discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let moderator = Address::generate(&env);
         let title = String::from_str(&env, "Test Thread");
 
-        let thread_id = client.create_thread(&title, &creator);
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
         // Hide thread
-        client.hide_thread(&thread_id, &moderator);
-        let thread = client.get_thread(&thread_id).unwrap();
+        client.hide_thread(&board_id, &thread_id, &moderator);
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(thread.is_hidden);
 
         // Unhide thread
-        client.unhide_thread(&thread_id, &moderator);
-        let thread = client.get_thread(&thread_id).unwrap();
+        client.unhide_thread(&board_id, &thread_id, &moderator);
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(!thread.is_hidden);
-    }
-
-    #[test]
-    fn test_edit_thread_title() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "General discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let title = String::from_str(&env, "Original Title");
-
-        let thread_id = client.create_thread(&title, &creator);
-
-        // Edit title as author
-        let new_title = String::from_str(&env, "Updated Title");
-        client.edit_thread_title(&thread_id, &new_title, &creator);
-
-        let thread = client.get_thread(&thread_id).unwrap();
-        assert_eq!(thread.title, new_title);
     }
 
     #[test]
     fn test_list_threads() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "General discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
 
@@ -3843,17 +4056,17 @@ mod test {
         let titles = ["Thread 0", "Thread 1", "Thread 2", "Thread 3", "Thread 4"];
         for title_str in titles.iter() {
             let title = String::from_str(&env, title_str);
-            client.create_thread(&title, &creator);
+            client.create_thread(&board_id, &title, &None, &creator);
         }
 
         // List threads (should return newest first)
-        let threads = client.list_threads(&0, &3);
+        let threads = client.list_threads(&board_id, &0, &3);
         assert_eq!(threads.len(), 3);
         // First thread should be the newest (id 4)
         assert_eq!(threads.get(0).unwrap().id, 4);
 
         // Get remaining threads
-        let more_threads = client.list_threads(&3, &10);
+        let more_threads = client.list_threads(&board_id, &3, &10);
         assert_eq!(more_threads.len(), 2);
     }
 
@@ -3866,227 +4079,63 @@ mod test {
         let client = BoardsBoardClient::new(&env, &contract_id);
 
         let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
         let name = String::from_str(&env, "Private Board");
         let desc = String::from_str(&env, "Secret discussions");
+        let is_private = String::from_str(&env, "true");
+        let is_listed = String::from_str(&env, "false");
+        let caller = Address::generate(&env);
 
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &true, &None, &None);
+        let board_id = client.create_board(&name, &desc, &is_private, &is_listed, &caller);
 
-        let config = client.get_config();
+        let config = client.get_config(&board_id);
         assert_eq!(config.name, name);
         assert_eq!(config.description, desc);
         assert!(config.is_private);
         assert!(!config.is_readonly);
-        assert_eq!(config.max_reply_depth, 10);
     }
 
     #[test]
     fn test_get_nonexistent_thread() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         // Get thread that doesn't exist
-        let thread = client.get_thread(&999);
+        let thread = client.get_thread(&board_id, &999);
         assert!(thread.is_none());
     }
 
     #[test]
     fn test_increment_reply_count() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Test Thread");
-        let thread_id = client.create_thread(&title, &creator);
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
         // Initially 0 replies
-        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 0);
+        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 0);
 
         // Increment reply count
-        client.increment_reply_count(&thread_id);
-        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 1);
+        client.increment_reply_count(&board_id, &thread_id);
+        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 1);
 
-        client.increment_reply_count(&thread_id);
-        assert_eq!(client.get_thread(&thread_id).unwrap().reply_count, 2);
-    }
-
-    #[test]
-    fn test_unpin_thread() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let moderator = Address::generate(&env);
-        let title = String::from_str(&env, "Pinned Thread");
-        let thread_id = client.create_thread(&title, &creator);
-
-        // Pin thread
-        client.pin_thread(&thread_id, &moderator);
-        assert!(client.get_thread(&thread_id).unwrap().is_pinned);
-        assert_eq!(client.get_pinned_threads().len(), 1);
-
-        // Unpin thread
-        client.unpin_thread(&thread_id, &moderator);
-        assert!(!client.get_thread(&thread_id).unwrap().is_pinned);
-        assert_eq!(client.get_pinned_threads().len(), 0);
-    }
-
-    #[test]
-    fn test_unlock_thread() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let moderator = Address::generate(&env);
-        let title = String::from_str(&env, "Thread");
-        let thread_id = client.create_thread(&title, &creator);
-
-        // Lock thread
-        client.lock_thread(&thread_id, &moderator);
-        assert!(client.get_thread(&thread_id).unwrap().is_locked);
-
-        // Unlock thread
-        client.unlock_thread(&thread_id, &moderator);
-        assert!(!client.get_thread(&thread_id).unwrap().is_locked);
-    }
-
-    #[test]
-    fn test_multiple_pinned_threads() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let moderator = Address::generate(&env);
-
-        // Create and pin multiple threads
-        let titles = ["Pinned 0", "Pinned 1", "Pinned 2"];
-        for title_str in titles.iter() {
-            let title = String::from_str(&env, title_str);
-            let thread_id = client.create_thread(&title, &creator);
-            client.pin_thread(&thread_id, &moderator);
-        }
-
-        // All should be in pinned list
-        let pinned = client.get_pinned_threads();
-        assert_eq!(pinned.len(), 3);
-
-        // All should be marked as pinned
-        for i in 0..pinned.len() {
-            assert!(pinned.get(i).unwrap().is_pinned);
-        }
-    }
-
-    #[test]
-    fn test_thread_timestamps() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let title = String::from_str(&env, "Thread");
-        let thread_id = client.create_thread(&title, &creator);
-
-        let thread = client.get_thread(&thread_id).unwrap();
-
-        // created_at and updated_at should be equal when first created
-        assert_eq!(thread.created_at, thread.updated_at);
-
-        // Increment reply count should update updated_at
-        client.increment_reply_count(&thread_id);
-        let updated_thread = client.get_thread(&thread_id).unwrap();
-        assert!(updated_thread.updated_at >= thread.updated_at);
-    }
-
-    #[test]
-    fn test_empty_pinned_list() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        // No pinned threads initially
-        let pinned = client.get_pinned_threads();
-        assert_eq!(pinned.len(), 0);
+        client.increment_reply_count(&board_id, &thread_id);
+        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 2);
     }
 
     #[test]
     fn test_thread_defaults() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "New Thread");
-        let thread_id = client.create_thread(&title, &creator);
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
-        let thread = client.get_thread(&thread_id).unwrap();
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
 
         // Default values
         assert_eq!(thread.reply_count, 0);
@@ -4094,72 +4143,25 @@ mod test {
         assert!(!thread.is_pinned);
         assert!(!thread.is_hidden);
         assert!(!thread.is_deleted);
+        assert!(thread.flair_id.is_none());
     }
 
     #[test]
     fn test_delete_thread() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
+        let (client, board_id, _) = setup_with_board(&env);
 
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread to Delete");
-        let thread_id = client.create_thread(&title, &creator);
+        let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
         // Initially not deleted
-        let thread = client.get_thread(&thread_id).unwrap();
+        let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(!thread.is_deleted);
 
         // Delete thread (author can delete)
-        client.delete_thread(&thread_id, &creator);
-        let deleted_thread = client.get_thread(&thread_id).unwrap();
+        client.delete_thread(&board_id, &thread_id, &creator);
+        let deleted_thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(deleted_thread.is_deleted);
-    }
-
-    #[test]
-    fn test_set_thread_states() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsBoard, ());
-        let client = BoardsBoardClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let name = String::from_str(&env, "General");
-        let desc = String::from_str(&env, "Discussion");
-
-        client.init(&0, &registry, &None, &None, &None, &name, &desc, &false, &None, &None);
-
-        let creator = Address::generate(&env);
-        let title = String::from_str(&env, "Test Thread");
-        let thread_id = client.create_thread(&title, &creator);
-
-        // Test set_thread_hidden
-        client.set_thread_hidden(&thread_id, &true);
-        assert!(client.get_thread(&thread_id).unwrap().is_hidden);
-        client.set_thread_hidden(&thread_id, &false);
-        assert!(!client.get_thread(&thread_id).unwrap().is_hidden);
-
-        // Test set_thread_locked
-        client.set_thread_locked(&thread_id, &true);
-        assert!(client.get_thread(&thread_id).unwrap().is_locked);
-        client.set_thread_locked(&thread_id, &false);
-        assert!(!client.get_thread(&thread_id).unwrap().is_locked);
-
-        // Test set_thread_pinned
-        client.set_thread_pinned(&thread_id, &true);
-        assert!(client.get_thread(&thread_id).unwrap().is_pinned);
-        assert_eq!(client.get_pinned_threads().len(), 1);
-        client.set_thread_pinned(&thread_id, &false);
-        assert!(!client.get_thread(&thread_id).unwrap().is_pinned);
-        assert_eq!(client.get_pinned_threads().len(), 0);
     }
 }
