@@ -167,6 +167,18 @@ impl BoardsContent {
             .expect("Not initialized")
     }
 
+    /// Get board contract address from registry (single contract for all boards)
+    fn get_board_contract_address(env: &Env) -> Address {
+        let registry: Address = env.storage().instance().get(&ContentKey::Registry).expect("Not initialized");
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        );
+        board_contract.expect("Board contract not registered")
+    }
+
     /// Create a thread (entry point for thread creation)
     /// This function:
     /// 1. Calls the Board contract to create thread metadata
@@ -191,20 +203,13 @@ impl BoardsContent {
         // Check board is not readonly
         Self::check_board_not_readonly(&env, &registry, board_id)?;
 
-        // Get the board contract address from registry
-        let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                args,
-            )
-            .expect("Board contract not found");
+        // Get the board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Create the thread in the board contract (this creates metadata)
+        // Create the thread in the board contract (this creates metadata - now requires board_id)
         let create_args: Vec<Val> = Vec::from_array(
             &env,
-            [title.into_val(&env), caller.clone().into_val(&env)],
+            [board_id.into_val(&env), title.into_val(&env), caller.clone().into_val(&env)],
         );
         let thread_id: u64 = env.invoke_contract(
             &board_contract,
@@ -231,11 +236,11 @@ impl BoardsContent {
         let chonk = Chonk::open(&env, key);
         chonk.write_chunked(body_bytes, 4096);
 
-        // Increment thread count in board contract
+        // Increment thread count in board contract (now requires board_id)
         let _ = env.try_invoke_contract::<u64, soroban_sdk::Error>(
             &board_contract,
             &Symbol::new(&env, "increment_thread_count"),
-            Vec::new(&env),
+            Vec::from_array(&env, [board_id.into_val(&env)]),
         );
 
         // Record first-seen timestamp for the user (for account age tracking)
@@ -267,61 +272,46 @@ impl BoardsContent {
 
     /// Check if board is readonly - returns error if so
     /// Queries the board contract directly for its readonly status
-    fn check_board_not_readonly(env: &Env, registry: &Address, board_id: u64) -> Result<(), ContentError> {
-        // Get board contract address from registry
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_contract_result = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            registry,
-            &Symbol::new(env, "get_board_contract"),
-            args,
-        );
+    fn check_board_not_readonly(env: &Env, _registry: &Address, board_id: u64) -> Result<(), ContentError> {
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
 
-        if let Ok(Ok(Some(board_contract))) = board_contract_result {
-            // Query the board contract's is_readonly function (no args needed)
-            let is_readonly: bool = env
-                .try_invoke_contract::<bool, soroban_sdk::Error>(
-                    &board_contract,
-                    &Symbol::new(env, "is_readonly"),
-                    Vec::new(env),
-                )
-                .unwrap_or(Ok(false))
-                .unwrap_or(false);
+        // Query the board contract's is_readonly function (now requires board_id)
+        let is_readonly: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "is_readonly"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false);
 
-            if is_readonly {
-                return Err(ContentError::BoardReadOnly);
-            }
+        if is_readonly {
+            return Err(ContentError::BoardReadOnly);
         }
-        // If board contract not found, allow the operation (backwards compatibility)
         Ok(())
     }
 
     /// Check if thread is locked - returns error if so
     /// Gracefully handles missing function for backwards compatibility
-    fn check_thread_not_locked(env: &Env, registry: &Address, board_id: u64, thread_id: u64) -> Result<(), ContentError> {
-        // Get board contract (gracefully handle missing function)
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let board_contract_result = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            registry,
-            &Symbol::new(env, "get_board_contract"),
-            args,
-        );
+    fn check_thread_not_locked(env: &Env, _registry: &Address, board_id: u64, thread_id: u64) -> Result<(), ContentError> {
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
 
-        if let Ok(Ok(Some(board_contract))) = board_contract_result {
-            let thread_args: Vec<Val> = Vec::from_array(env, [thread_id.into_val(env)]);
-            let is_locked: bool = env
-                .try_invoke_contract::<bool, soroban_sdk::Error>(
-                    &board_contract,
-                    &Symbol::new(env, "is_thread_locked"),
-                    thread_args,
-                )
-                .unwrap_or(Ok(false))
-                .unwrap_or(false);
+        // Query the board contract's is_thread_locked function (now requires board_id)
+        let thread_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let is_locked: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "is_thread_locked"),
+                thread_args,
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false);
 
-            if is_locked {
-                return Err(ContentError::ThreadLocked);
-            }
+        if is_locked {
+            return Err(ContentError::ThreadLocked);
         }
-        // If board contract not found, allow the operation (backwards compatibility)
         Ok(())
     }
 
@@ -454,20 +444,14 @@ impl BoardsContent {
         // Check thread is not locked
         Self::check_thread_not_locked(&env, &registry, board_id, thread_id)?;
 
-        // Get the board contract address from registry
-        let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                args,
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Update the thread title in the board contract
+        // Update the thread title in the board contract (now requires board_id)
         let title_args: Vec<Val> = Vec::from_array(
             &env,
             [
+                board_id.into_val(&env),
                 thread_id.into_val(&env),
                 new_title.into_val(&env),
                 caller.clone().into_val(&env),
@@ -608,19 +592,15 @@ impl BoardsContent {
             .set(&ContentKey::NextReplyId(board_id, thread_id), &(reply_id + 1));
 
         // Increment reply count in board contract (for ThreadMeta.reply_count)
-        let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-        if let Ok(Ok(Some(board_contract))) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            board_args,
-        ) {
-            let incr_args: Vec<Val> = Vec::from_array(&env, [thread_id.into_val(&env)]);
-            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
-                &board_contract,
-                &Symbol::new(&env, "increment_reply_count"),
-                incr_args,
-            );
-        }
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
+        // Call increment_reply_count with board_id
+        let incr_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env), thread_id.into_val(&env)]);
+        let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(&env, "increment_reply_count"),
+            incr_args,
+        );
 
         // Record first-seen timestamp for the user (for account age tracking)
         // and increment post count
@@ -1379,21 +1359,14 @@ impl BoardsContent {
         // Check target board is not readonly
         Self::check_board_not_readonly(&env, &registry, target_board_id)?;
 
-        // Get original board contract to fetch thread metadata
-        let orig_args: Vec<Val> = Vec::from_array(&env, [original_board_id.into_val(&env)]);
-        let original_board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                orig_args,
-            )
-            .expect("Original board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Get original thread metadata
-        let thread_args: Vec<Val> = Vec::from_array(&env, [original_thread_id.into_val(&env)]);
+        // Get original thread metadata (now requires board_id)
+        let thread_args: Vec<Val> = Vec::from_array(&env, [original_board_id.into_val(&env), original_thread_id.into_val(&env)]);
         let original_thread: Option<(String, Address)> = env
             .try_invoke_contract::<Option<(String, Address)>, soroban_sdk::Error>(
-                &original_board_contract,
+                &board_contract,
                 &Symbol::new(&env, "get_thread_title_and_author"),
                 thread_args,
             )
@@ -1402,16 +1375,6 @@ impl BoardsContent {
             .flatten();
 
         let (original_title, original_author) = original_thread.expect("Original thread not found");
-
-        // Get target board contract
-        let target_args: Vec<Val> = Vec::from_array(&env, [target_board_id.into_val(&env)]);
-        let target_board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                target_args,
-            )
-            .expect("Target board contract not found");
 
         // Create title with crosspost indicator
         let mut title_buf = [0u8; 256];
@@ -1423,13 +1386,13 @@ impl BoardsContent {
         // Just use original title with prefix for simplicity
         let _ = crosspost_title; // Prefix would go here in more complex impl
 
-        // Create thread in target board
+        // Create thread in target board (now requires board_id)
         let create_args: Vec<Val> = Vec::from_array(
             &env,
-            [original_title.clone().into_val(&env), caller.clone().into_val(&env)],
+            [target_board_id.into_val(&env), original_title.clone().into_val(&env), caller.clone().into_val(&env)],
         );
         let new_thread_id: u64 = env.invoke_contract(
-            &target_board_contract,
+            &board_contract,
             &Symbol::new(&env, "create_thread"),
             create_args,
         );
@@ -1489,11 +1452,11 @@ impl BoardsContent {
             .persistent()
             .set(&ContentKey::CrosspostList(original_board_id, original_thread_id), &crosspost_list);
 
-        // Increment thread count in target board contract
+        // Increment thread count in target board contract (now requires board_id)
         let _ = env.try_invoke_contract::<u64, soroban_sdk::Error>(
-            &target_board_contract,
+            &board_contract,
             &Symbol::new(&env, "increment_thread_count"),
-            Vec::new(&env),
+            Vec::from_array(&env, [target_board_id.into_val(&env)]),
         );
 
         Ok(new_thread_id)

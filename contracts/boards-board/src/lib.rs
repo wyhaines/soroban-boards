@@ -6,12 +6,11 @@ use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, 
 // Declare render capabilities
 soroban_render!(markdown, styles);
 
-/// Storage keys for a board contract
+/// Storage keys for boards contract (supports multiple boards)
 #[contracttype]
 #[derive(Clone)]
 pub enum BoardKey {
-    /// Board ID (assigned by registry)
-    BoardId,
+    // === Instance storage (global) ===
     /// Registry contract address
     Registry,
     /// Permissions contract address
@@ -22,28 +21,51 @@ pub enum BoardKey {
     Theme,
     /// Voting contract address
     Voting,
-    /// Thread count
-    ThreadCount,
-    /// Thread metadata by ID
-    Thread(u64),
-    /// Pinned thread IDs
-    PinnedThreads,
-    /// Board configuration
-    Config,
-    /// Edit window in seconds (stored separately for backwards compatibility)
-    EditWindow,
-    /// Flair definitions
-    FlairDefs,
-    /// Next flair ID counter
-    NextFlairId,
-    /// Board rules (markdown text)
-    Rules,
+    /// Total number of boards (auto-increment counter)
+    BoardCount,
+
+    // === Persistent storage (per-board, namespaced by board_id) ===
+    /// Board metadata by ID
+    Board(u64),
+    /// Board configuration by ID
+    BoardConfig(u64),
+    /// Thread count per board
+    BoardThreadCount(u64),
+    /// Thread metadata: (board_id, thread_id) -> ThreadMeta
+    BoardThread(u64, u64),
+    /// Pinned thread IDs per board
+    BoardPinnedThreads(u64),
+    /// Edit window in seconds per board
+    BoardEditWindow(u64),
+    /// Flair definitions per board
+    BoardFlairDefs(u64),
+    /// Next flair ID counter per board
+    BoardNextFlairId(u64),
+    /// Board rules (markdown text) per board
+    BoardRules(u64),
     /// Whether board is listed publicly (for home page)
-    BoardListed,
+    BoardListed(u64),
     /// Board creator address
-    Creator,
+    BoardCreator(u64),
     /// Board creation timestamp
-    CreatedAt,
+    BoardCreatedAt(u64),
+    /// Count of boards created by a user (for threshold limits)
+    UserBoardCount(Address),
+}
+
+/// Board metadata (stored per-board)
+#[contracttype]
+#[derive(Clone)]
+pub struct BoardMeta {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub creator: Address,
+    pub created_at: u64,
+    pub thread_count: u64,
+    pub is_readonly: bool,
+    pub is_private: bool,
+    pub is_listed: bool,
 }
 
 /// Thread metadata
@@ -165,28 +187,19 @@ pub struct BoardsBoard;
 
 #[contractimpl]
 impl BoardsBoard {
-    /// Initialize a board contract (called by registry after deployment)
-    /// permissions is optional - if None, permission checks are skipped (useful for testing)
-    /// creator is optional - if None, no creator is recorded (for legacy boards)
-    /// is_listed defaults to true if not specified
+    /// Initialize the boards contract globally (called once during deployment).
+    /// This sets up the contract to store multiple boards.
     pub fn init(
         env: Env,
-        board_id: u64,
         registry: Address,
         permissions: Option<Address>,
         content: Option<Address>,
         theme: Option<Address>,
-        name: String,
-        description: String,
-        is_private: bool,
-        creator: Option<Address>,
-        is_listed: Option<bool>,
     ) {
-        if env.storage().instance().has(&BoardKey::BoardId) {
+        if env.storage().instance().has(&BoardKey::Registry) {
             panic!("Already initialized");
         }
 
-        env.storage().instance().set(&BoardKey::BoardId, &board_id);
         env.storage().instance().set(&BoardKey::Registry, &registry);
 
         // Only set permissions if provided
@@ -204,35 +217,8 @@ impl BoardsBoard {
             env.storage().instance().set(&BoardKey::Theme, &theme_addr);
         }
 
-        env.storage().instance().set(&BoardKey::ThreadCount, &0u64);
-        env.storage()
-            .instance()
-            .set(&BoardKey::PinnedThreads, &Vec::<u64>::new(&env));
-        env.storage().instance().set(
-            &BoardKey::Config,
-            &BoardConfig {
-                name,
-                description,
-                is_private,
-                is_readonly: false,
-                max_reply_depth: 10,
-                reply_chunk_size: 6,  // Default: 6 replies per chunk
-            },
-        );
-
-        // Set default edit window (24 hours)
-        env.storage().instance().set(&BoardKey::EditWindow, &86400u64);
-
-        // Store creator if provided
-        if let Some(creator_addr) = creator {
-            env.storage().instance().set(&BoardKey::Creator, &creator_addr);
-        }
-
-        // Store creation timestamp
-        env.storage().instance().set(&BoardKey::CreatedAt, &env.ledger().timestamp());
-
-        // Store listed status (default to true)
-        env.storage().instance().set(&BoardKey::BoardListed, &is_listed.unwrap_or(true));
+        // Initialize board count to 0
+        env.storage().instance().set(&BoardKey::BoardCount, &0u64);
     }
 
     /// Set content contract address (for boards created before this was added)
@@ -279,20 +265,13 @@ impl BoardsBoard {
         env.storage().instance().set(&BoardKey::Voting, &voting);
     }
 
-    /// Create a new board using this board contract.
+    /// Create a new board in this contract.
     ///
-    /// This is the primary way to create boards. It handles:
-    /// - Site admin bypass (admins skip all threshold checks)
-    /// - Creation threshold checks via config contract
-    /// - Registration with the registry
-    /// - Local board initialization
-    /// - User board count tracking
-    ///
-    /// Note: The board contract must already be initialized with registry and permissions
-    /// addresses before calling this function.
+    /// This creates a new board entry with an auto-incrementing ID.
+    /// Handles site admin bypass, creation threshold checks, and sets board owner.
     ///
     /// Parameters:
-    /// - name: Board name (3-50 chars, alphanumeric + underscore + hyphen)
+    /// - name: Board name
     /// - description: Board description
     /// - is_private: String "true" or "false" from form input
     /// - is_listed: String "true" or "false" from form input
@@ -314,27 +293,15 @@ impl BoardsBoard {
             .storage()
             .instance()
             .get(&BoardKey::Registry)
-            .expect("Board contract not initialized with registry");
+            .expect("Contract not initialized");
 
         let permissions: Option<Address> = env.storage().instance().get(&BoardKey::Permissions);
 
         // Parse is_private string to bool
-        let is_private_bool = is_private.len() == 4 && {
-            let mut buf = [0u8; 4];
-            is_private.copy_into_slice(&mut buf);
-            &buf == b"true"
-        };
+        let is_private_bool = is_private == String::from_str(&env, "true");
 
         // Parse is_listed string to bool (default to listed)
-        let is_listed_bool = if is_listed.len() == 0 {
-            true
-        } else if is_listed.len() == 5 {
-            let mut buf = [0u8; 5];
-            is_listed.copy_into_slice(&mut buf);
-            &buf != b"false"
-        } else {
-            true
-        };
+        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
 
         // Check if caller is site admin (bypass all threshold checks)
         let is_site_admin = if let Some(ref perms) = permissions {
@@ -354,11 +321,12 @@ impl BoardsBoard {
         // If not site admin, check creation thresholds
         if !is_site_admin {
             // Get config contract from registry
-            let config_args: Vec<Val> = Vec::new(&env);
+            let config_alias = Symbol::new(&env, "config");
+            let config_args: Vec<Val> = Vec::from_array(&env, [config_alias.into_val(&env)]);
             let config: Option<Address> = env
                 .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                     &registry,
-                    &Symbol::new(&env, "get_config_contract"),
+                    &Symbol::new(&env, "get_contract_by_alias"),
                     config_args,
                 )
                 .ok()
@@ -366,21 +334,12 @@ impl BoardsBoard {
                 .flatten();
 
             if let Some(config_addr) = config {
-                // Get user's board count from permissions
-                let user_board_count = if let Some(ref perms) = permissions {
-                    let count_args: Vec<Val> =
-                        Vec::from_array(&env, [caller.clone().into_val(&env)]);
-                    env.try_invoke_contract::<u32, soroban_sdk::Error>(
-                        perms,
-                        &Symbol::new(&env, "get_user_board_count"),
-                        count_args,
-                    )
-                    .ok()
-                    .and_then(|r| r.ok())
-                    .unwrap_or(0)
-                } else {
-                    0
-                };
+                // Get user's board count (local tracking)
+                let user_board_count: u32 = env
+                    .storage()
+                    .persistent()
+                    .get(&BoardKey::UserBoardCount(caller.clone()))
+                    .unwrap_or(0);
 
                 // Get user's account age from permissions
                 let user_account_age = if let Some(ref perms) = permissions {
@@ -419,7 +378,6 @@ impl BoardsBoard {
                 );
 
                 if !result.0 {
-                    // Convert reason to panic message
                     let mut buf = [0u8; 64];
                     let len = core::cmp::min(result.1.len() as usize, 64);
                     result.1.copy_into_slice(&mut buf[..len]);
@@ -430,59 +388,178 @@ impl BoardsBoard {
             }
         }
 
-        // Get board ID - if already initialized via init(), use that ID
-        // Otherwise, we'll generate based on our own counter or expect init to be called first
+        // Get next board ID from counter
         let board_id: u64 = env
             .storage()
             .instance()
-            .get(&BoardKey::BoardId)
+            .get(&BoardKey::BoardCount)
             .unwrap_or(0);
 
-        // Initialize board config
-        env.storage().instance().set(&BoardKey::ThreadCount, &0u64);
+        // Create and store BoardMeta
+        let board_meta = BoardMeta {
+            id: board_id,
+            name: name.clone(),
+            description: description.clone(),
+            creator: caller.clone(),
+            created_at: env.ledger().timestamp(),
+            thread_count: 0,
+            is_readonly: false,
+            is_private: is_private_bool,
+            is_listed: is_listed_bool,
+        };
+        env.storage()
+            .persistent()
+            .set(&BoardKey::Board(board_id), &board_meta);
+
+        // Create and store BoardConfig
+        let config = BoardConfig {
+            name,
+            description,
+            is_private: is_private_bool,
+            is_readonly: false,
+            max_reply_depth: 10,
+            reply_chunk_size: 6,
+        };
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardConfig(board_id), &config);
+
+        // Initialize per-board storage with namespaced keys
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardThreadCount(board_id), &0u64);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardPinnedThreads(board_id), &Vec::<u64>::new(&env));
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardEditWindow(board_id), &86400u64);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardListed(board_id), &is_listed_bool);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardCreator(board_id), &caller.clone());
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardCreatedAt(board_id), &env.ledger().timestamp());
+
+        // Increment board count
         env.storage()
             .instance()
-            .set(&BoardKey::PinnedThreads, &Vec::<u64>::new(&env));
-        env.storage().instance().set(
-            &BoardKey::Config,
-            &BoardConfig {
-                name,
-                description,
-                is_private: is_private_bool,
-                is_readonly: false,
-                max_reply_depth: 10,
-                reply_chunk_size: 6,
-            },
-        );
+            .set(&BoardKey::BoardCount, &(board_id + 1));
 
-        // Set default edit window (24 hours)
+        // Increment user's board count (local tracking)
+        let user_count: u32 = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::UserBoardCount(caller.clone()))
+            .unwrap_or(0);
         env.storage()
-            .instance()
-            .set(&BoardKey::EditWindow, &86400u64);
+            .persistent()
+            .set(&BoardKey::UserBoardCount(caller.clone()), &(user_count + 1));
 
-        // Store creator, created_at, and listed status
-        env.storage().instance().set(&BoardKey::Creator, &caller);
-        env.storage().instance().set(&BoardKey::CreatedAt, &env.ledger().timestamp());
-        env.storage().instance().set(&BoardKey::BoardListed, &is_listed_bool);
-
-        // Increment user's board count in permissions
+        // Set caller as board owner in permissions
         if let Some(ref perms) = permissions {
-            let inc_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+            let owner_args: Vec<Val> = Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.into_val(&env)],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 perms,
-                &Symbol::new(&env, "increment_user_board_count"),
-                inc_args,
+                &Symbol::new(&env, "set_board_owner"),
+                owner_args,
             );
         }
 
         board_id
     }
 
-    // Flair management functions
+    // =========================================================================
+    // Board Query Functions
+    // =========================================================================
+
+    /// Get board metadata by ID
+    pub fn get_board(env: Env, board_id: u64) -> Option<BoardMeta> {
+        env.storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+    }
+
+    /// List boards with pagination
+    pub fn list_boards(env: Env, start: u64, limit: u64) -> Vec<BoardMeta> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardCount)
+            .unwrap_or(0);
+
+        let mut boards = Vec::new(&env);
+        let end = core::cmp::min(start + limit, count);
+
+        for i in start..end {
+            if let Some(board) = env.storage().persistent().get(&BoardKey::Board(i)) {
+                boards.push_back(board);
+            }
+        }
+
+        boards
+    }
+
+    /// List only publicly listed boards with pagination
+    pub fn list_listed_boards(env: Env, start: u64, limit: u64) -> Vec<BoardMeta> {
+        let count: u64 = env
+            .storage()
+            .instance()
+            .get(&BoardKey::BoardCount)
+            .unwrap_or(0);
+
+        let mut boards = Vec::new(&env);
+        let mut found = 0u64;
+        let mut skipped = 0u64;
+
+        for i in 0..count {
+            if let Some(board) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(i)) {
+                if board.is_listed {
+                    if skipped < start {
+                        skipped += 1;
+                    } else if found < limit {
+                        boards.push_back(board);
+                        found += 1;
+                    } else {
+                        break;
+                    }
+                }
+            }
+        }
+
+        boards
+    }
+
+    /// Get total board count
+    pub fn board_count(env: Env) -> u64 {
+        env.storage()
+            .instance()
+            .get(&BoardKey::BoardCount)
+            .unwrap_or(0)
+    }
+
+    /// Count boards created by a user
+    pub fn count_user_boards(env: Env, user: Address) -> u32 {
+        env.storage()
+            .persistent()
+            .get(&BoardKey::UserBoardCount(user))
+            .unwrap_or(0)
+    }
+
+    // =========================================================================
+    // Flair Management Functions
+    // =========================================================================
 
     /// Create a new flair (Admin+ only)
     pub fn create_flair(
         env: Env,
+        board_id: u64,
         name: String,
         color: String,
         bg_color: String,
@@ -491,12 +568,6 @@ impl BoardsBoard {
         caller: Address,
     ) -> u32 {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -519,8 +590,8 @@ impl BoardsBoard {
         // Get next flair ID
         let flair_id: u32 = env
             .storage()
-            .instance()
-            .get(&BoardKey::NextFlairId)
+            .persistent()
+            .get(&BoardKey::BoardNextFlairId(board_id))
             .unwrap_or(0);
 
         let flair = FlairDef {
@@ -537,25 +608,19 @@ impl BoardsBoard {
         let mut flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(&env));
 
         flairs.push_back(flair);
-        env.storage().persistent().set(&BoardKey::FlairDefs, &flairs);
-        env.storage().instance().set(&BoardKey::NextFlairId, &(flair_id + 1));
+        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &flairs);
+        env.storage().persistent().set(&BoardKey::BoardNextFlairId(board_id), &(flair_id + 1));
 
         flair_id
     }
 
     /// Update an existing flair (Admin+ only)
-    pub fn update_flair(env: Env, flair_id: u32, flair: FlairDef, caller: Address) {
+    pub fn update_flair(env: Env, board_id: u64, flair_id: u32, flair: FlairDef, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -578,7 +643,7 @@ impl BoardsBoard {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .expect("No flairs defined");
 
         // Find and update the flair
@@ -598,18 +663,12 @@ impl BoardsBoard {
             panic!("Flair not found");
         }
 
-        env.storage().persistent().set(&BoardKey::FlairDefs, &new_flairs);
+        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
     }
 
     /// Disable a flair (Admin+ only)
-    pub fn disable_flair(env: Env, flair_id: u32, caller: Address) {
+    pub fn disable_flair(env: Env, board_id: u64, flair_id: u32, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -632,7 +691,7 @@ impl BoardsBoard {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .expect("No flairs defined");
 
         // Find and disable the flair
@@ -651,23 +710,23 @@ impl BoardsBoard {
             panic!("Flair not found");
         }
 
-        env.storage().persistent().set(&BoardKey::FlairDefs, &new_flairs);
+        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
     }
 
-    /// List all flairs
-    pub fn list_flairs(env: Env) -> Vec<FlairDef> {
+    /// List all flairs for a board
+    pub fn list_flairs(env: Env, board_id: u64) -> Vec<FlairDef> {
         env.storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(&env))
     }
 
     /// Get a specific flair by ID
-    pub fn get_flair(env: Env, flair_id: u32) -> Option<FlairDef> {
+    pub fn get_flair(env: Env, board_id: u64, flair_id: u32) -> Option<FlairDef> {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(&env));
 
         for i in 0..flairs.len() {
@@ -680,20 +739,14 @@ impl BoardsBoard {
     }
 
     /// Set thread flair (Moderator+ for mod_only flairs, thread creator for others)
-    pub fn set_thread_flair(env: Env, thread_id: u64, flair_id: Option<u32>, caller: Address) {
+    pub fn set_thread_flair(env: Env, board_id: u64, thread_id: u64, flair_id: Option<u32>, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Get thread
         let mut thread: ThreadMeta = env
             .storage()
             .persistent()
-            .get(&BoardKey::Thread(thread_id))
+            .get(&BoardKey::BoardThread(board_id, thread_id))
             .expect("Thread not found");
 
         // Check if flair exists and get its properties
@@ -701,7 +754,7 @@ impl BoardsBoard {
             let flairs: Vec<FlairDef> = env
                 .storage()
                 .persistent()
-                .get(&BoardKey::FlairDefs)
+                .get(&BoardKey::BoardFlairDefs(board_id))
                 .expect("No flairs defined");
 
             let mut flair_found = false;
@@ -766,7 +819,7 @@ impl BoardsBoard {
         thread.updated_at = env.ledger().timestamp();
         env.storage()
             .persistent()
-            .set(&BoardKey::Thread(thread_id), &thread);
+            .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
     }
 
     // Permission check helpers
@@ -811,39 +864,25 @@ impl BoardsBoard {
         }
     }
 
-    /// Get board ID
-    pub fn get_board_id(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized")
-    }
-
     /// Get board configuration
-    pub fn get_config(env: Env) -> BoardConfig {
+    pub fn get_config(env: Env, board_id: u64) -> BoardConfig {
         env.storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized")
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found")
     }
 
     /// Get whether board is listed publicly (for home page)
-    pub fn get_board_listed(env: Env) -> bool {
+    pub fn get_board_listed(env: Env, board_id: u64) -> bool {
         env.storage()
-            .instance()
-            .get(&BoardKey::BoardListed)
+            .persistent()
+            .get(&BoardKey::BoardListed(board_id))
             .unwrap_or(true) // Default to listed for backward compatibility
     }
 
     /// Set whether board is listed publicly (owner/admin only)
-    pub fn set_board_listed(env: Env, is_listed: bool, caller: Address) {
+    pub fn set_board_listed(env: Env, board_id: u64, is_listed: bool, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -863,42 +902,55 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().instance().set(&BoardKey::BoardListed, &is_listed);
+        env.storage().persistent().set(&BoardKey::BoardListed(board_id), &is_listed);
+
+        // Update BoardMeta too
+        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+            meta.is_listed = is_listed;
+            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+        }
     }
 
     /// Get board creator address
-    pub fn get_creator(env: Env) -> Option<Address> {
-        env.storage().instance().get(&BoardKey::Creator)
+    pub fn get_creator(env: Env, board_id: u64) -> Option<Address> {
+        env.storage().persistent().get(&BoardKey::BoardCreator(board_id))
     }
 
     /// Get board creation timestamp
-    pub fn get_created_at(env: Env) -> u64 {
+    pub fn get_created_at(env: Env, board_id: u64) -> u64 {
         env.storage()
-            .instance()
-            .get(&BoardKey::CreatedAt)
+            .persistent()
+            .get(&BoardKey::BoardCreatedAt(board_id))
             .unwrap_or(0) // Default to 0 for legacy boards
     }
 
     /// Increment thread count (called by content contract when creating threads)
     /// This is separate from create_thread to allow external contracts to track thread counts
-    pub fn increment_thread_count(env: Env) -> u64 {
+    pub fn increment_thread_count(env: Env, board_id: u64) -> u64 {
         let count: u64 = env
             .storage()
-            .instance()
-            .get(&BoardKey::ThreadCount)
+            .persistent()
+            .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0);
         let new_count = count + 1;
-        env.storage().instance().set(&BoardKey::ThreadCount, &new_count);
+        env.storage().persistent().set(&BoardKey::BoardThreadCount(board_id), &new_count);
+
+        // Update BoardMeta too
+        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+            meta.thread_count = new_count;
+            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+        }
+
         new_count
     }
 
     /// Get reply chunk size for waterfall loading
-    pub fn get_chunk_size(env: Env) -> u32 {
+    pub fn get_chunk_size(env: Env, board_id: u64) -> u32 {
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         // Handle old configs that don't have this field (default to 6)
         if config.reply_chunk_size == 0 {
             6
@@ -908,18 +960,12 @@ impl BoardsBoard {
     }
 
     /// Set reply chunk size (must be >= 1, owner/admin only)
-    pub fn set_chunk_size(env: Env, size: u32, caller: Address) {
+    pub fn set_chunk_size(env: Env, board_id: u64, size: u32, caller: Address) {
         caller.require_auth();
 
         if size < 1 {
             panic!("Chunk size must be at least 1");
         }
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -941,36 +987,30 @@ impl BoardsBoard {
 
         let mut config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         config.reply_chunk_size = size;
-        env.storage().instance().set(&BoardKey::Config, &config);
+        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
     }
 
     /// Get maximum reply depth for nested replies
-    pub fn get_max_reply_depth(env: Env) -> u32 {
+    pub fn get_max_reply_depth(env: Env, board_id: u64) -> u32 {
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         config.max_reply_depth
     }
 
     /// Set maximum reply depth (must be >= 1, owner/admin only)
-    pub fn set_max_reply_depth(env: Env, depth: u32, caller: Address) {
+    pub fn set_max_reply_depth(env: Env, board_id: u64, depth: u32, caller: Address) {
         caller.require_auth();
 
         if depth < 1 {
             panic!("Max reply depth must be at least 1");
         }
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -992,32 +1032,25 @@ impl BoardsBoard {
 
         let mut config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         config.max_reply_depth = depth;
-        env.storage().instance().set(&BoardKey::Config, &config);
+        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
     }
 
     /// Get edit window in seconds (0 = no limit)
-    pub fn get_edit_window(env: Env) -> u64 {
-        // Use separate storage key for backwards compatibility
+    pub fn get_edit_window(env: Env, board_id: u64) -> u64 {
         // Default to 86400 (24 hours) if not set
         env.storage()
-            .instance()
-            .get(&BoardKey::EditWindow)
+            .persistent()
+            .get(&BoardKey::BoardEditWindow(board_id))
             .unwrap_or(86400u64)
     }
 
     /// Set edit window in seconds (0 = no limit, owner/admin only)
-    pub fn set_edit_window(env: Env, seconds: u64, caller: Address) {
+    pub fn set_edit_window(env: Env, board_id: u64, seconds: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1037,28 +1070,21 @@ impl BoardsBoard {
             }
         }
 
-        // Store in separate key for backwards compatibility
-        env.storage().instance().set(&BoardKey::EditWindow, &seconds);
+        env.storage().persistent().set(&BoardKey::BoardEditWindow(board_id), &seconds);
     }
 
     /// Check if board is read-only
-    pub fn is_readonly(env: Env) -> bool {
+    pub fn is_readonly(env: Env, board_id: u64) -> bool {
         env.storage()
-            .instance()
-            .get::<_, BoardConfig>(&BoardKey::Config)
+            .persistent()
+            .get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id))
             .map(|c| c.is_readonly)
             .unwrap_or(false)
     }
 
     /// Set board read-only status (owner/admin only)
-    pub fn set_readonly(env: Env, is_readonly: bool, caller: Address) {
+    pub fn set_readonly(env: Env, board_id: u64, is_readonly: bool, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1080,31 +1106,31 @@ impl BoardsBoard {
 
         let mut config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         config.is_readonly = is_readonly;
-        env.storage().instance().set(&BoardKey::Config, &config);
+        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+
+        // Update BoardMeta too
+        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+            meta.is_readonly = is_readonly;
+            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+        }
     }
 
     /// Check if board is private (members only)
-    pub fn is_private(env: Env) -> bool {
+    pub fn is_private(env: Env, board_id: u64) -> bool {
         env.storage()
-            .instance()
-            .get::<_, BoardConfig>(&BoardKey::Config)
+            .persistent()
+            .get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id))
             .map(|c| c.is_private)
             .unwrap_or(false)
     }
 
     /// Set board private status (owner/admin only)
-    pub fn set_private(env: Env, is_private: bool, caller: Address) {
+    pub fn set_private(env: Env, board_id: u64, is_private: bool, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1126,23 +1152,23 @@ impl BoardsBoard {
 
         let mut config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         config.is_private = is_private;
-        env.storage().instance().set(&BoardKey::Config, &config);
+        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+
+        // Update BoardMeta too
+        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+            meta.is_private = is_private;
+            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+        }
     }
 
     /// Set board rules (markdown text, Admin+ only)
     /// Rules are displayed on the board page and when creating new posts
-    pub fn set_rules(env: Env, rules: String, caller: Address) {
+    pub fn set_rules(env: Env, board_id: u64, rules: String, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1162,23 +1188,17 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().set(&BoardKey::Rules, &rules);
+        env.storage().persistent().set(&BoardKey::BoardRules(board_id), &rules);
     }
 
     /// Get board rules (returns None if no rules are set)
-    pub fn get_rules(env: Env) -> Option<String> {
-        env.storage().persistent().get(&BoardKey::Rules)
+    pub fn get_rules(env: Env, board_id: u64) -> Option<String> {
+        env.storage().persistent().get(&BoardKey::BoardRules(board_id))
     }
 
     /// Clear board rules (Admin+ only)
-    pub fn clear_rules(env: Env, caller: Address) {
+    pub fn clear_rules(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check admin permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1198,17 +1218,16 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().remove(&BoardKey::Rules);
+        env.storage().persistent().remove(&BoardKey::BoardRules(board_id));
     }
 
     /// Check if content is within the edit window
     /// Returns true if content can be edited (within window or no limit)
-    fn is_within_edit_window(env: &Env, created_at: u64) -> bool {
-        // Use separate storage key, default to 86400 (24 hours)
+    fn is_within_edit_window(env: &Env, board_id: u64, created_at: u64) -> bool {
         let edit_window_seconds: u64 = env
             .storage()
-            .instance()
-            .get(&BoardKey::EditWindow)
+            .persistent()
+            .get(&BoardKey::BoardEditWindow(board_id))
             .unwrap_or(86400u64);
 
         // 0 = no time limit
@@ -1223,16 +1242,10 @@ impl BoardsBoard {
     /// Create a new thread (returns thread ID)
     /// Note: Auth is handled by the calling contract (theme). When called directly
     /// (e.g., via CLI), callers should ensure proper authorization.
-    pub fn create_thread(env: Env, title: String, creator: Address) -> u64 {
+    pub fn create_thread(env: Env, board_id: u64, title: String, creator: Address) -> u64 {
         // Note: require_auth() removed because this is called by the theme contract,
         // which already handles authentication. Cross-contract auth doesn't propagate
         // automatically in Soroban.
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1242,17 +1255,17 @@ impl BoardsBoard {
         // Check if board is readonly
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         if config.is_readonly {
             panic!("Board is read-only");
         }
 
         let thread_id: u64 = env
             .storage()
-            .instance()
-            .get(&BoardKey::ThreadCount)
+            .persistent()
+            .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0);
 
         let thread = ThreadMeta {
@@ -1272,33 +1285,39 @@ impl BoardsBoard {
 
         env.storage()
             .persistent()
-            .set(&BoardKey::Thread(thread_id), &thread);
+            .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         env.storage()
-            .instance()
-            .set(&BoardKey::ThreadCount, &(thread_id + 1));
+            .persistent()
+            .set(&BoardKey::BoardThreadCount(board_id), &(thread_id + 1));
+
+        // Update BoardMeta thread count
+        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+            meta.thread_count = thread_id + 1;
+            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+        }
 
         thread_id
     }
 
     /// Get thread metadata
-    pub fn get_thread(env: Env, thread_id: u64) -> Option<ThreadMeta> {
+    pub fn get_thread(env: Env, board_id: u64, thread_id: u64) -> Option<ThreadMeta> {
         env.storage()
             .persistent()
-            .get(&BoardKey::Thread(thread_id))
+            .get(&BoardKey::BoardThread(board_id, thread_id))
     }
 
     /// Get thread title and author (for crossposting)
-    pub fn get_thread_title_and_author(env: Env, thread_id: u64) -> Option<(String, Address)> {
-        let thread: Option<ThreadMeta> = env.storage().persistent().get(&BoardKey::Thread(thread_id));
+    pub fn get_thread_title_and_author(env: Env, board_id: u64, thread_id: u64) -> Option<(String, Address)> {
+        let thread: Option<ThreadMeta> = env.storage().persistent().get(&BoardKey::BoardThread(board_id, thread_id));
         thread.map(|t| (t.title, t.creator))
     }
 
     /// List threads with pagination
-    pub fn list_threads(env: Env, start: u64, limit: u64) -> Vec<ThreadMeta> {
+    pub fn list_threads(env: Env, board_id: u64, start: u64, limit: u64) -> Vec<ThreadMeta> {
         let count: u64 = env
             .storage()
-            .instance()
-            .get(&BoardKey::ThreadCount)
+            .persistent()
+            .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0);
 
         let mut threads = Vec::new(&env);
@@ -1311,7 +1330,7 @@ impl BoardsBoard {
                 break;
             }
             let idx = actual_start - i;
-            if let Some(thread) = env.storage().persistent().get(&BoardKey::Thread(idx)) {
+            if let Some(thread) = env.storage().persistent().get(&BoardKey::BoardThread(board_id, idx)) {
                 threads.push_back(thread);
             }
         }
@@ -1319,23 +1338,17 @@ impl BoardsBoard {
         threads
     }
 
-    /// Get thread count
-    pub fn thread_count(env: Env) -> u64 {
+    /// Get thread count for a board
+    pub fn thread_count(env: Env, board_id: u64) -> u64 {
         env.storage()
-            .instance()
-            .get(&BoardKey::ThreadCount)
+            .persistent()
+            .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0)
     }
 
     /// Lock a thread (no more replies)
-    pub fn lock_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn lock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1345,24 +1358,18 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_locked = true;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Unlock a thread
-    pub fn unlock_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn unlock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1372,24 +1379,18 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_locked = false;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Pin a thread
-    pub fn pin_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn pin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1399,34 +1400,28 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_pinned = true;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
 
             let mut pinned: Vec<u64> = env
                 .storage()
-                .instance()
-                .get(&BoardKey::PinnedThreads)
+                .persistent()
+                .get(&BoardKey::BoardPinnedThreads(board_id))
                 .unwrap_or(Vec::new(&env));
             pinned.push_back(thread_id);
             env.storage()
-                .instance()
-                .set(&BoardKey::PinnedThreads, &pinned);
+                .persistent()
+                .set(&BoardKey::BoardPinnedThreads(board_id), &pinned);
         }
     }
 
     /// Unpin a thread
-    pub fn unpin_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn unpin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1436,18 +1431,18 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_pinned = false;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
 
             // Remove from pinned list
             let pinned: Vec<u64> = env
                 .storage()
-                .instance()
-                .get(&BoardKey::PinnedThreads)
+                .persistent()
+                .get(&BoardKey::BoardPinnedThreads(board_id))
                 .unwrap_or(Vec::new(&env));
             let mut new_pinned = Vec::new(&env);
             for id in pinned.iter() {
@@ -1456,22 +1451,22 @@ impl BoardsBoard {
                 }
             }
             env.storage()
-                .instance()
-                .set(&BoardKey::PinnedThreads, &new_pinned);
+                .persistent()
+                .set(&BoardKey::BoardPinnedThreads(board_id), &new_pinned);
         }
     }
 
-    /// Get pinned threads
-    pub fn get_pinned_threads(env: Env) -> Vec<ThreadMeta> {
+    /// Get pinned threads for a board
+    pub fn get_pinned_threads(env: Env, board_id: u64) -> Vec<ThreadMeta> {
         let pinned_ids: Vec<u64> = env
             .storage()
-            .instance()
-            .get(&BoardKey::PinnedThreads)
+            .persistent()
+            .get(&BoardKey::BoardPinnedThreads(board_id))
             .unwrap_or(Vec::new(&env));
 
         let mut threads = Vec::new(&env);
         for id in pinned_ids.iter() {
-            if let Some(thread) = env.storage().persistent().get(&BoardKey::Thread(id)) {
+            if let Some(thread) = env.storage().persistent().get(&BoardKey::BoardThread(board_id, id)) {
                 threads.push_back(thread);
             }
         }
@@ -1479,14 +1474,8 @@ impl BoardsBoard {
     }
 
     /// Hide a thread (moderator action)
-    pub fn hide_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn hide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1496,24 +1485,18 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_hidden = true;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Unhide a thread (moderator action)
-    pub fn unhide_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn unhide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         // Check moderator permissions (only if permissions contract is set)
         if env.storage().instance().has(&BoardKey::Permissions) {
@@ -1523,54 +1506,54 @@ impl BoardsBoard {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_hidden = false;
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Set thread hidden state (called by admin contract)
-    pub fn set_thread_hidden(env: Env, thread_id: u64, hidden: bool) {
+    pub fn set_thread_hidden(env: Env, board_id: u64, thread_id: u64, hidden: bool) {
         // Note: Auth is handled by the calling admin contract
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_hidden = hidden;
             thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Set thread locked state (called by admin contract)
-    pub fn set_thread_locked(env: Env, thread_id: u64, locked: bool) {
+    pub fn set_thread_locked(env: Env, board_id: u64, thread_id: u64, locked: bool) {
         // Note: Auth is handled by the calling admin contract
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_locked = locked;
             thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Set thread pinned state (called by admin contract)
-    pub fn set_thread_pinned(env: Env, thread_id: u64, pinned: bool) {
+    pub fn set_thread_pinned(env: Env, board_id: u64, thread_id: u64, pinned: bool) {
         // Note: Auth is handled by the calling admin contract
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.is_pinned = pinned;
             thread.updated_at = env.ledger().timestamp();
@@ -1578,8 +1561,8 @@ impl BoardsBoard {
             // Update pinned list
             let mut pinned_list: Vec<u64> = env
                 .storage()
-                .instance()
-                .get(&BoardKey::PinnedThreads)
+                .persistent()
+                .get(&BoardKey::BoardPinnedThreads(board_id))
                 .unwrap_or(Vec::new(&env));
 
             if pinned {
@@ -1607,29 +1590,23 @@ impl BoardsBoard {
             }
 
             env.storage()
-                .instance()
-                .set(&BoardKey::PinnedThreads, &pinned_list);
+                .persistent()
+                .set(&BoardKey::BoardPinnedThreads(board_id), &pinned_list);
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Delete a thread (soft delete - sets is_deleted flag)
     /// Only author or moderator+ can delete
-    pub fn delete_thread(env: Env, thread_id: u64, caller: Address) {
+    pub fn delete_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
-
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
 
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             // Verify caller is author or moderator
             let is_author = thread.creator == caller;
@@ -1657,27 +1634,22 @@ impl BoardsBoard {
             thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Edit thread title (author or moderator)
-    pub fn edit_thread_title(env: Env, thread_id: u64, new_title: String, caller: Address) {
+    pub fn edit_thread_title(env: Env, board_id: u64, thread_id: u64, new_title: String, caller: Address) {
         caller.require_auth();
 
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             // Verify caller is author or moderator
             let is_author = thread.creator == caller;
             let is_moderator = if env.storage().instance().has(&BoardKey::Permissions) {
-                let board_id: u64 = env
-                    .storage()
-                    .instance()
-                    .get(&BoardKey::BoardId)
-                    .expect("Not initialized");
                 let permissions: Address = env
                     .storage()
                     .instance()
@@ -1701,22 +1673,22 @@ impl BoardsBoard {
             thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
     /// Increment reply count for a thread (called by content contract)
-    pub fn increment_reply_count(env: Env, thread_id: u64) {
+    pub fn increment_reply_count(env: Env, board_id: u64, thread_id: u64) {
         if let Some(mut thread) = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id))
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
         {
             thread.reply_count += 1;
             thread.updated_at = env.ledger().timestamp();
             env.storage()
                 .persistent()
-                .set(&BoardKey::Thread(thread_id), &thread);
+                .set(&BoardKey::BoardThread(board_id, thread_id), &thread);
         }
     }
 
@@ -1726,12 +1698,8 @@ impl BoardsBoard {
 
     /// Main render entry point for board routes
     /// Routes are relative to the board (e.g., "/" = board view, "/t/0" = thread 0)
-    pub fn render(env: Env, path: Option<String>, viewer: Option<Address>) -> Bytes {
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&BoardKey::BoardId)
-            .expect("Not initialized");
+    /// board_id is now passed as a parameter
+    pub fn render(env: Env, board_id: u64, path: Option<String>, viewer: Option<Address>) -> Bytes {
 
         Router::new(&env, path.clone())
             // Board view (thread list)
@@ -1793,7 +1761,7 @@ impl BoardsBoard {
         if let Some(profile_addr) = Self::get_profile_contract(env) {
             // Build return path to current board: @main:/b/{board_id}
             let mut return_path = Bytes::from_slice(env, b"@main:/b/");
-            return_path.append(&Self::u64_to_bytes(env, board_id));
+            return_path.append(&u64_to_bytes(env, board_id));
 
             let args: Vec<Val> = Vec::from_array(env, [
                 viewer.into_val(env),
@@ -1808,7 +1776,7 @@ impl BoardsBoard {
         } else if viewer.is_some() {
             // No profile contract registered - show a placeholder link
             let mut return_path = Bytes::from_slice(env, b"@main:/b/");
-            return_path.append(&Self::u64_to_bytes(env, board_id));
+            return_path.append(&u64_to_bytes(env, board_id));
 
             md = md
                 .raw_str("<a href=\"render:@profile:/register/from/")
@@ -1944,9 +1912,9 @@ impl BoardsBoard {
     fn render_board(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
 
         // Get viewer role (needed for private board check, admin button, and hidden thread filtering)
         let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
@@ -1969,7 +1937,7 @@ impl BoardsBoard {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(env));
 
         // Check permissions for private boards
@@ -2003,7 +1971,7 @@ impl BoardsBoard {
         }
 
         // Show board rules if set
-        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::Rules) {
+        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::BoardRules(board_id)) {
             if rules.len() > 0 {
                 md = md.div_start("board-rules")
                     .raw_str("<details><summary><strong>Board Rules</strong></summary>")
@@ -2061,8 +2029,8 @@ impl BoardsBoard {
         // Fetch threads
         let thread_count: u64 = env
             .storage()
-            .instance()
-            .get(&BoardKey::ThreadCount)
+            .persistent()
+            .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0);
 
         if thread_count == 0 {
@@ -2072,8 +2040,8 @@ impl BoardsBoard {
             // Get pinned threads list
             let pinned_threads: Vec<u64> = env
                 .storage()
-                .instance()
-                .get(&BoardKey::PinnedThreads)
+                .persistent()
+                .get(&BoardKey::BoardPinnedThreads(board_id))
                 .unwrap_or(Vec::new(env));
 
             let limit = 20u64;
@@ -2085,7 +2053,7 @@ impl BoardsBoard {
                     break;
                 }
                 let thread_id = pinned_threads.get(i).unwrap();
-                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
                     // Skip hidden threads for non-moderators
                     if thread.is_hidden && !viewer_can_moderate {
                         continue;
@@ -2099,7 +2067,7 @@ impl BoardsBoard {
             let start_idx = thread_count - 1;
             let mut idx = start_idx;
             while shown < limit && idx < thread_count {
-                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(idx)) {
+                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, idx)) {
                     // Skip pinned threads (already shown above)
                     if thread.is_pinned {
                         if idx > 0 {
@@ -2213,7 +2181,7 @@ impl BoardsBoard {
             .h1("New Thread");
 
         // Show rules reminder if rules are set
-        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::Rules) {
+        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::BoardRules(board_id)) {
             if rules.len() > 0 {
                 md = md.div_start("rules-reminder")
                     .raw_str("<details open><summary><strong>Before posting, please read the board rules:</strong></summary>")
@@ -2226,7 +2194,7 @@ impl BoardsBoard {
         }
 
         // Check if board is read-only
-        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. New threads cannot be created.");
                 return Self::render_footer_into(md).build();
@@ -2260,7 +2228,7 @@ impl BoardsBoard {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(env));
 
         // Check if any flair is required
@@ -2322,7 +2290,7 @@ impl BoardsBoard {
                 .raw_str("</div>\n");
         }
 
-        md = md.textarea("body", 10, "Write your post content here...")
+        md = md.textarea_markdown("body", 10, "Write your post content here...")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -2352,15 +2320,15 @@ impl BoardsBoard {
         // Get board config for readonly check
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
 
         // Get thread metadata
         let thread = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id));
 
         // Get viewer role for hidden thread check and moderator controls
         let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
@@ -2399,7 +2367,7 @@ impl BoardsBoard {
         let flairs: Vec<FlairDef> = env
             .storage()
             .persistent()
-            .get(&BoardKey::FlairDefs)
+            .get(&BoardKey::BoardFlairDefs(board_id))
             .unwrap_or(Vec::new(env));
 
         // Show thread title if available
@@ -2600,7 +2568,7 @@ impl BoardsBoard {
             // Show edit button if user can edit
             if let Some(ref t) = thread {
                 let (is_author, is_moderator) = Self::can_edit(env, board_id, &t.creator, viewer);
-                let can_edit_time = is_moderator || Self::is_within_edit_window(env, t.created_at);
+                let can_edit_time = is_moderator || Self::is_within_edit_window(env, board_id, t.created_at);
 
                 if (is_author || is_moderator) && can_edit_time {
                     md = md.text(" ")
@@ -2729,9 +2697,9 @@ impl BoardsBoard {
 
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
         // Get viewer role for permission check
@@ -2751,7 +2719,7 @@ impl BoardsBoard {
         let thread = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id));
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
         let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
         let can_post = !config.is_readonly && !is_locked && viewer_can_post;
@@ -2816,9 +2784,9 @@ impl BoardsBoard {
 
         let config: BoardConfig = env
             .storage()
-            .instance()
-            .get(&BoardKey::Config)
-            .expect("Not initialized");
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
         let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
 
         // Get viewer role for permission check
@@ -2838,7 +2806,7 @@ impl BoardsBoard {
         let thread = env
             .storage()
             .persistent()
-            .get::<_, ThreadMeta>(&BoardKey::Thread(thread_id));
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id));
         let is_locked = thread.as_ref().map(|t| t.is_locked).unwrap_or(false);
         let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
         let can_post = !config.is_readonly && !is_locked && viewer_can_post;
@@ -3046,7 +3014,7 @@ impl BoardsBoard {
             // Show edit button if user can edit (and reply is not deleted)
             if !reply.is_deleted {
                 let (is_author, is_moderator) = Self::can_edit(env, board_id, &reply.creator, viewer);
-                let can_edit_time = is_moderator || Self::is_within_edit_window(env, reply.created_at);
+                let can_edit_time = is_moderator || Self::is_within_edit_window(env, board_id, reply.created_at);
 
                 if (is_author || is_moderator) && can_edit_time {
                     md = md.text(" ")
@@ -3121,7 +3089,7 @@ impl BoardsBoard {
         }
 
         // Check if board is read-only
-        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Replies cannot be posted.");
                 return Self::render_footer_into(md).build();
@@ -3129,7 +3097,7 @@ impl BoardsBoard {
         }
 
         // Check if thread is locked
-        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be posted.");
                 return Self::render_footer_into(md).build();
@@ -3198,7 +3166,7 @@ impl BoardsBoard {
             .raw_str("<input type=\"hidden\" name=\"depth\" value=\"")
             .number(depth)
             .raw_str("\" />\n")
-            .textarea("content_str", 6, "Write your reply...")
+            .textarea_markdown("content_str", 6, "Write your reply...")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -3266,7 +3234,7 @@ impl BoardsBoard {
             .h1("Edit Thread");
 
         // Check if board is read-only
-        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Threads cannot be edited.");
                 return Self::render_footer_into(md).build();
@@ -3279,7 +3247,7 @@ impl BoardsBoard {
         }
 
         // Get thread metadata
-        let thread = match env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+        let thread = match env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
             Some(t) => t,
             None => {
                 md = md.warning("Thread not found.");
@@ -3302,7 +3270,7 @@ impl BoardsBoard {
         }
 
         // Check edit window (only applies to non-moderators)
-        if is_author && !is_moderator && !Self::is_within_edit_window(env, thread.created_at) {
+        if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, thread.created_at) {
             md = md.warning("The edit window has expired for this thread.");
             return Self::render_footer_into(md).build();
         }
@@ -3337,7 +3305,7 @@ impl BoardsBoard {
             .raw_str("\" />\n")
             .newline()
             .raw_str("<label>Content</label>\n")
-            .raw_str("<textarea name=\"new_body\" rows=\"10\">");
+            .raw_str("<textarea name=\"new_body\" data-editor=\"markdown\" rows=\"10\">");
 
         // Include the current body content in the textarea
         if body.len() > 0 {
@@ -3382,7 +3350,7 @@ impl BoardsBoard {
             .h1("Edit Reply");
 
         // Check if board is read-only
-        if let Some(config) = env.storage().instance().get::<_, BoardConfig>(&BoardKey::Config) {
+        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Replies cannot be edited.");
                 return Self::render_footer_into(md).build();
@@ -3390,7 +3358,7 @@ impl BoardsBoard {
         }
 
         // Check if thread is locked
-        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::Thread(thread_id)) {
+        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be edited.");
                 return Self::render_footer_into(md).build();
@@ -3437,7 +3405,7 @@ impl BoardsBoard {
         }
 
         // Check edit window (only applies to non-moderators)
-        if is_author && !is_moderator && !Self::is_within_edit_window(env, reply.created_at) {
+        if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, reply.created_at) {
             md = md.warning("The edit window has expired for this reply.");
             return Self::render_footer_into(md).build();
         }
@@ -3465,7 +3433,7 @@ impl BoardsBoard {
             .number(reply_id as u32)
             .raw_str("\" />\n")
             .raw_str("<label>Content</label>\n")
-            .raw_str("<textarea name=\"content\" rows=\"6\">");
+            .raw_str("<textarea name=\"content\" data-editor=\"markdown\" rows=\"6\">");
 
         // Include the current content in the textarea
         if reply_content.len() > 0 {
@@ -3654,7 +3622,7 @@ impl BoardsBoard {
         if timestamp < 1_000_000_000 {
             // This is likely a ledger sequence, not a timestamp
             let mut result = Bytes::from_slice(env, b"Ledger ");
-            result.append(&Self::u64_to_bytes(env, timestamp));
+            result.append(&u64_to_bytes(env, timestamp));
             return result;
         }
 
@@ -3723,25 +3691,6 @@ impl BoardsBoard {
         let year = if m <= 2 { y + 1 } else { y };
 
         (year as i32, m as u8, d as u8)
-    }
-
-    /// Convert u64 to Bytes for display.
-    fn u64_to_bytes(env: &Env, n: u64) -> Bytes {
-        if n == 0 {
-            return Bytes::from_slice(env, b"0");
-        }
-
-        let mut buffer = [0u8; 20];
-        let mut idx = 20;
-        let mut num = n;
-
-        while num > 0 {
-            idx -= 1;
-            buffer[idx] = b'0' + (num % 10) as u8;
-            num /= 10;
-        }
-
-        Bytes::from_slice(env, &buffer[idx..])
     }
 }
 

@@ -87,6 +87,7 @@ COMMUNITY_ID=$(deploy_contract "boards_community")
 VOTING_ID=$(deploy_contract "boards_voting")
 CONFIG_ID=$(deploy_contract "boards_config")
 MAIN_ID=$(deploy_contract "boards_main")
+BOARD_ID=$(deploy_contract "boards_board")
 
 # Save contract IDs to file (board contracts are auto-deployed)
 echo ""
@@ -112,9 +113,7 @@ ADMIN_CONTRACT_ID=$ADMIN_CONTRACT_ID
 COMMUNITY_ID=$COMMUNITY_ID
 VOTING_ID=$VOTING_ID
 CONFIG_ID=$CONFIG_ID
-
-# Note: Board contracts are auto-deployed when boards are created.
-# Use: stellar contract invoke --id \$REGISTRY_ID ... -- get_board_contract --board_id <id>
+BOARD_ID=$BOARD_ID
 EOF
 
 echo -e "${GREEN}Contract IDs saved to .deployed-contracts.env${NC}"
@@ -122,18 +121,19 @@ echo -e "${GREEN}Contract IDs saved to .deployed-contracts.env${NC}"
 # Initialize Registry
 echo ""
 echo -e "${GREEN}=== Initializing Registry ===${NC}"
+# Include MAIN_ID as admin so it can register boards
 stellar contract invoke \
     --id $REGISTRY_ID \
     --source $DEPLOYER \
     --network $NETWORK \
     -- init \
-    --admins "[\"$DEPLOYER_ADDR\", \"$EXTRA_ADMIN\"]" \
+    --admins "[\"$DEPLOYER_ADDR\", \"$EXTRA_ADMIN\", \"$MAIN_ID\"]" \
     --permissions $PERMISSIONS_ID \
     --content $CONTENT_ID \
     --theme $THEME_ID \
     --admin_contract $ADMIN_CONTRACT_ID
 
-echo -e "${GREEN}Registry initialized with admins: $DEPLOYER_ADDR, $EXTRA_ADMIN${NC}"
+echo -e "${GREEN}Registry initialized with admins: $DEPLOYER_ADDR, $EXTRA_ADMIN, and Main contract${NC}"
 
 # Initialize Config (needs registry for admin verification)
 echo ""
@@ -146,28 +146,6 @@ stellar contract invoke \
     --registry $REGISTRY_ID
 
 echo -e "${GREEN}Config initialized${NC}"
-
-# Install board WASM hash for auto-deployment of board contracts
-echo ""
-echo -e "${GREEN}=== Installing Board WASM Hash ===${NC}"
-BOARD_WASM_OUTPUT=$(stellar contract install \
-    --wasm "$WASM_DIR/boards_board.wasm" \
-    --source $DEPLOYER \
-    --network $NETWORK 2>&1)
-# Extract the WASM hash (64 hex chars)
-BOARD_WASM_HASH=$(echo "$BOARD_WASM_OUTPUT" | grep -E '^[a-f0-9]{64}$' | tail -1)
-
-echo -e "Board WASM hash: ${YELLOW}$BOARD_WASM_HASH${NC}"
-
-stellar contract invoke \
-    --id $REGISTRY_ID \
-    --source $DEPLOYER \
-    --network $NETWORK \
-    -- set_board_wasm_hash \
-    --wasm_hash $BOARD_WASM_HASH \
-    --caller $DEPLOYER_ADDR
-
-echo -e "${GREEN}Board WASM hash installed${NC}"
 
 # Initialize Permissions
 echo ""
@@ -252,6 +230,21 @@ stellar contract invoke \
 
 echo -e "${GREEN}Voting initialized${NC}"
 
+# Initialize Board (single contract for all boards)
+echo ""
+echo -e "${GREEN}=== Initializing Board Contract ===${NC}"
+stellar contract invoke \
+    --id $BOARD_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID \
+    --permissions "\"$PERMISSIONS_ID\"" \
+    --content "\"$CONTENT_ID\"" \
+    --theme "\"$THEME_ID\""
+
+echo -e "${GREEN}Board contract initialized${NC}"
+
 # Initialize Main (needs registry, theme, permissions, content, admin, community, and config)
 echo ""
 echo -e "${GREEN}=== Initializing Main ===${NC}"
@@ -326,83 +319,48 @@ stellar contract invoke \
 
 echo -e "${GREEN}Voting registered${NC}"
 
-# Create first board manually (deploy + register + init)
-# Note: create_board via main has auth chaining issues, so we do it directly
+# Register board contract with registry as "board" alias
 echo ""
-echo -e "${GREEN}=== Creating First Board ===${NC}"
-
-# Deploy board contract
-echo -e "${YELLOW}Deploying board contract...${NC}"
-BOARD_DEPLOY_OUTPUT=$(stellar contract deploy \
-    --wasm "$WASM_DIR/boards_board.wasm" \
-    --source $DEPLOYER \
-    --network $NETWORK 2>&1)
-BOARD_CONTRACT=$(echo "$BOARD_DEPLOY_OUTPUT" | grep -E '^C[A-Z0-9]{55}$' | tail -1)
-
-if [ -z "$BOARD_CONTRACT" ]; then
-    echo -e "${RED}Error: Failed to deploy board contract${NC}"
-    echo "$BOARD_DEPLOY_OUTPUT"
-    exit 1
-fi
-
-echo -e "${GREEN}Board contract deployed: $BOARD_CONTRACT${NC}"
-
-# Register board with registry
-echo -e "${YELLOW}Registering board with registry...${NC}"
-BOARD_NUM_OUTPUT=$(stellar contract invoke \
+echo -e "${GREEN}=== Registering Board with Registry ===${NC}"
+stellar contract invoke \
     --id $REGISTRY_ID \
     --source $DEPLOYER \
     --network $NETWORK \
-    -- register_board_contract \
-    --board_contract $BOARD_CONTRACT \
+    -- set_contract \
+    --alias board \
+    --address $BOARD_ID \
+    --caller $DEPLOYER_ADDR
+
+echo -e "${GREEN}Board registered as @board${NC}"
+
+# Create first board via board contract's create_board function
+echo ""
+echo -e "${GREEN}=== Creating First Board ===${NC}"
+
+echo -e "${YELLOW}Creating board via boards-board.create_board()...${NC}"
+BOARD_NUM_OUTPUT=$(stellar contract invoke \
+    --id $BOARD_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- create_board \
+    --name "General" \
+    --description "General discussion board" \
+    --is_private '"false"' \
+    --is_listed '"true"' \
     --caller $DEPLOYER_ADDR 2>&1)
 BOARD_NUM=$(echo "$BOARD_NUM_OUTPUT" | grep -E '^[0-9]+$' | tail -1)
 
-echo -e "${GREEN}Board registered as #$BOARD_NUM${NC}"
-
-# Initialize board contract
-echo -e "${YELLOW}Initializing board...${NC}"
-stellar contract invoke \
-    --id $BOARD_CONTRACT \
-    --source $DEPLOYER \
-    --network $NETWORK \
-    -- init \
-    --board_id $BOARD_NUM \
-    --registry $REGISTRY_ID \
-    --permissions "\"$PERMISSIONS_ID\"" \
-    --content "\"$CONTENT_ID\"" \
-    --theme "\"$THEME_ID\"" \
-    --name "General" \
-    --description "General discussion board" \
-    --is_private false \
-    --creator "\"$DEPLOYER_ADDR\"" \
-    --is_listed true
-
-echo -e "${GREEN}Board initialized${NC}"
-
-# Set deployer as board owner in permissions
-echo -e "${YELLOW}Setting board ownership...${NC}"
-stellar contract invoke \
-    --id $PERMISSIONS_ID \
-    --source $DEPLOYER \
-    --network $NETWORK \
-    -- set_role \
-    --board_id $BOARD_NUM \
-    --user $DEPLOYER_ADDR \
-    --role 4 \
-    --caller $DEPLOYER_ADDR
-
 echo -e "${GREEN}Created board #$BOARD_NUM${NC}"
-echo -e "Board contract: ${YELLOW}$BOARD_CONTRACT${NC}"
 
-# Create a sample thread using the auto-deployed board contract
+# Create a sample thread in the board
 echo ""
 echo -e "${GREEN}=== Creating Sample Thread ===${NC}"
 THREAD_OUTPUT=$(stellar contract invoke \
-    --id $BOARD_CONTRACT \
+    --id $BOARD_ID \
     --source $DEPLOYER \
     --network $NETWORK \
     -- create_thread \
+    --board_id 0 \
     --title "Welcome to Soroban Boards!" \
     --creator $DEPLOYER_ADDR 2>&1)
 # Extract thread ID (number)
@@ -436,7 +394,7 @@ echo "  Admin:        $ADMIN_CONTRACT_ID"
 echo "  Community:    $COMMUNITY_ID"
 echo "  Voting:       $VOTING_ID"
 echo "  Config:       $CONFIG_ID"
-echo "  Board 0:      $BOARD_CONTRACT (auto-deployed)"
+echo "  Board:        $BOARD_ID (single contract for all boards)"
 echo ""
 echo "To interact with the contracts:"
 echo "  source .deployed-contracts.env"
@@ -456,7 +414,7 @@ echo "  # Render thread"
 echo "  ./render.sh /b/0/t/0"
 echo ""
 echo "  # List boards (raw)"
-echo "  stellar contract invoke --id \$REGISTRY_ID --source $DEPLOYER --network local -- list_boards --start 0 --limit 10"
+echo "  stellar contract invoke --id \$BOARD_ID --source $DEPLOYER --network local -- list_boards --start 0 --limit 10"
 echo ""
-echo "Note: Board contracts are now auto-deployed when boards are created."
-echo "New boards created via the UI will automatically have their own board contract."
+echo "Note: All boards are stored in the single boards-board contract (BOARD_ID)."
+echo "New boards created via the UI are entries within this contract."

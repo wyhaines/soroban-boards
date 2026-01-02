@@ -92,6 +92,21 @@ pub struct BoardConfig {
     pub reply_chunk_size: u32,
 }
 
+/// Board metadata (matches boards-board BoardMeta for cross-contract calls)
+#[contracttype]
+#[derive(Clone)]
+pub struct BoardMeta {
+    pub id: u64,
+    pub name: String,
+    pub description: String,
+    pub creator: Address,
+    pub created_at: u64,
+    pub thread_count: u64,
+    pub is_readonly: bool,
+    pub is_private: bool,
+    pub is_listed: bool,
+}
+
 /// Minimal community info for navigation (used by board contract)
 #[contracttype]
 #[derive(Clone)]
@@ -210,22 +225,10 @@ impl BoardsCommunity {
         Self::validate_community_name(&env, &name);
 
         // Parse is_private string to bool
-        let is_private_bool = is_private.len() == 4 && {
-            let mut buf = [0u8; 4];
-            is_private.copy_into_slice(&mut buf);
-            &buf == b"true"
-        };
+        let is_private_bool = is_private == String::from_str(&env, "true");
 
         // Parse is_listed string to bool (default to true)
-        let is_listed_bool = if is_listed.len() == 0 {
-            true
-        } else if is_listed.len() == 5 {
-            let mut buf = [0u8; 5];
-            is_listed.copy_into_slice(&mut buf);
-            &buf != b"false"
-        } else {
-            true
-        };
+        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
 
         // Check name not already taken
         let name_lower = Self::to_lowercase(&env, &name);
@@ -502,16 +505,76 @@ impl BoardsCommunity {
             .unwrap_or(0)
     }
 
-    /// Add a board to a community (called by registry when creating/moving board to community)
-    /// Note: This is an internal function called by the registry after it has validated
-    /// that the user has permission to perform this operation. We trust the registry's validation.
-    pub fn add_board(env: Env, community_id: u64, board_id: u64) {
+    /// Add a board to a community
+    /// Caller must be either the community owner, the board owner, or a registry admin
+    pub fn add_board(env: Env, community_id: u64, board_id: u64, caller: Address) {
+        caller.require_auth();
+
         // Verify community exists
-        let mut community: CommunityMeta = env
+        let community_opt: Option<CommunityMeta> = env
             .storage()
             .persistent()
-            .get(&CommunityKey::Community(community_id))
-            .expect("Community does not exist");
+            .get(&CommunityKey::Community(community_id));
+
+        if community_opt.is_none() {
+            panic!("Community {} does not exist", community_id);
+        }
+        let mut community = community_opt.unwrap();
+
+        // Get registry for checks
+        let registry_opt: Option<Address> = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Registry);
+
+        if registry_opt.is_none() {
+            panic!("Community contract not initialized (no registry)");
+        }
+        let registry = registry_opt.unwrap();
+
+        // Check if caller is a registry admin
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+        let is_registry_admin: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "is_admin"),
+                admin_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false);
+
+        // Verify caller is community owner OR board owner OR registry admin
+        let is_community_owner = caller == community.owner;
+        let is_board_owner = {
+            let alias_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
+            let board_contract: Option<Address> = env.invoke_contract(
+                &registry,
+                &Symbol::new(&env, "get_contract_by_alias"),
+                alias_args,
+            );
+            if let Some(ref bc) = board_contract {
+                // Get board metadata to check owner
+                let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+                let board_meta: Option<BoardMeta> = env.try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
+                    bc,
+                    &Symbol::new(&env, "get_board"),
+                    board_args,
+                ).ok().and_then(|r| r.ok());
+                board_meta.map_or(false, |b| b.creator == caller)
+            } else {
+                false
+            }
+        };
+
+        if !is_community_owner && !is_board_owner && !is_registry_admin {
+            panic!("Only community owner, board owner, or admin can add boards");
+        }
+
+        // Check if board is already in a community
+        if env.storage().persistent().has(&CommunityKey::BoardCommunity(board_id)) {
+            panic!("Board is already in a community");
+        }
 
         // Add board to community's board list
         let mut boards: Vec<u64> = env
@@ -855,27 +918,14 @@ impl BoardsCommunity {
         community.description = description;
 
         // Parse is_private string to bool
-        let is_private_bool = is_private.len() == 4 && {
-            let mut buf = [0u8; 4];
-            is_private.copy_into_slice(&mut buf);
-            &buf == b"true"
-        };
-        community.is_private = is_private_bool;
+        community.is_private = is_private == String::from_str(&env, "true");
 
         env.storage()
             .persistent()
             .set(&CommunityKey::Community(community_id), &community);
 
         // Parse and update is_listed
-        let is_listed_bool = if is_listed.len() == 0 {
-            true
-        } else if is_listed.len() == 5 {
-            let mut buf = [0u8; 5];
-            is_listed.copy_into_slice(&mut buf);
-            &buf != b"false"
-        } else {
-            true
-        };
+        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
 
         env.storage()
             .persistent()
@@ -1068,7 +1118,7 @@ impl BoardsCommunity {
         // "/c/{name}/boards" -> list boards in community
         // "/new" -> create community form
 
-        let path_bytes = Self::string_to_bytes(&env, &path);
+        let path_bytes = string_to_bytes(&env, &path);
         let path_len = path_bytes.len() as usize;
         let mut buf = [0u8; 256];
         let copy_len = core::cmp::min(path_len, 256);
@@ -1184,7 +1234,7 @@ impl BoardsCommunity {
             return builder.paragraph("No boards in this community yet.");
         }
 
-        // Get registry to look up board contracts
+        // Get registry to look up board contract
         let registry: Address = match env.storage().instance().get(&CommunityKey::Registry) {
             Some(r) => r,
             None => {
@@ -1192,48 +1242,53 @@ impl BoardsCommunity {
             }
         };
 
+        // Get single board contract via registry alias
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        let board_contract = match board_contract_opt {
+            Some(c) => c,
+            None => {
+                return builder.paragraph("Board contract not configured.");
+            }
+        };
+
         builder = builder.raw_str("<div class=\"board-list\">\n");
 
         for board_id in board_ids.iter() {
-            // Get board contract from registry
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-            let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-                &registry,
-                &Symbol::new(env, "get_board_contract"),
-                args,
-            ).ok().and_then(|r| r.ok()).flatten();
+            // Get config from board contract (now requires board_id)
+            let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_config"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            ).ok().and_then(|r| r.ok());
 
-            if let Some(board_contract) = board_contract_opt {
-                // Get config from board contract
-                let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
-                    &board_contract,
-                    &Symbol::new(env, "get_config"),
-                    Vec::new(env),
-                ).ok().and_then(|r| r.ok());
+            // Get thread count from board contract (now requires board_id)
+            let thread_count: u64 = env.try_invoke_contract::<u64, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "thread_count"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            ).ok().and_then(|r| r.ok()).unwrap_or(0);
 
-                // Get thread count from board contract
-                let thread_count: u64 = env.try_invoke_contract::<u64, soroban_sdk::Error>(
-                    &board_contract,
-                    &Symbol::new(env, "thread_count"),
-                    Vec::new(env),
-                ).ok().and_then(|r| r.ok()).unwrap_or(0);
-
-                if let Some(config) = config_opt {
-                    // Board card with link wrapper - use render:/b/ to go through main contract
-                    builder = builder.raw_str("<a href=\"render:/b/")
-                        .number(board_id as u32)
-                        .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
-                        .text_string(&config.name)
-                        .raw_str("</span><span class=\"board-card-desc\">")
-                        .text_string(&config.description)
-                        .raw_str("</span><span class=\"board-card-meta\">")
-                        .number(thread_count as u32)
-                        .text(" threads");
-                    if config.is_private {
-                        builder = builder.raw_str(" <span class=\"badge\">private</span>");
-                    }
-                    builder = builder.raw_str("</span></a>\n");
+            if let Some(config) = config_opt {
+                // Board card with link wrapper - use render:/b/ to go through main contract
+                builder = builder.raw_str("<a href=\"render:/b/")
+                    .number(board_id as u32)
+                    .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
+                    .text_string(&config.name)
+                    .raw_str("</span><span class=\"board-card-desc\">")
+                    .text_string(&config.description)
+                    .raw_str("</span><span class=\"board-card-meta\">")
+                    .number(thread_count as u32)
+                    .text(" threads");
+                if config.is_private {
+                    builder = builder.raw_str(" <span class=\"badge\">private</span>");
                 }
+                builder = builder.raw_str("</span></a>\n");
             }
         }
 
@@ -1465,9 +1520,12 @@ impl BoardsCommunity {
 
         // Description field with current value
         builder = builder.raw_str("<label>Description:</label>\n");
-        builder = builder.raw_str("<textarea name=\"description\" rows=\"3\">");
-        builder = builder.text_string(&community.description);
-        builder = builder.raw_str("</textarea>\n");
+        builder = builder.textarea_markdown_with_value_string(
+            "description",
+            3,
+            "Describe your community...",
+            &community.description,
+        );
 
         // Visibility Section
         builder = builder.newline();
@@ -1747,7 +1805,7 @@ impl BoardsCommunity {
 
         // Description field
         builder = builder.raw_str("<label for=\"description\">Description:</label>\n");
-        builder = builder.raw_str("<textarea name=\"description\" rows=\"3\" placeholder=\"Describe your community...\"></textarea>\n");
+        builder = builder.textarea_markdown("description", 3, "Describe your community...");
 
         // Private checkbox - hidden default + checkbox override
         builder = builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
@@ -1832,17 +1890,6 @@ impl BoardsCommunity {
         }
 
         String::from_str(env, core::str::from_utf8(&buf[..copy_len]).unwrap())
-    }
-
-    fn string_to_bytes(env: &Env, s: &String) -> Bytes {
-        let len = s.len() as usize;
-        if len == 0 {
-            return Bytes::new(env);
-        }
-        let mut buf = [0u8; 256];
-        let copy_len = core::cmp::min(len, 256);
-        s.copy_into_slice(&mut buf[..copy_len]);
-        Bytes::from_slice(env, &buf[..copy_len])
     }
 
     fn bytes_to_string(env: &Env, bytes: &[u8]) -> String {

@@ -1,6 +1,6 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, String, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
 
 /// Role levels (hierarchical - higher includes lower permissions)
 #[contracttype]
@@ -307,24 +307,14 @@ impl BoardsPermissions {
 
     /// Get a user's role for a board
     pub fn get_role(env: Env, board_id: u64, user: Address) -> Role {
-        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
-
         // Check if user is a site admin - they get Admin role on all boards
         if Self::is_site_admin(env.clone(), user.clone()) {
             return Role::Admin;
         }
 
-        // Also check registry's is_admin for backwards compatibility
-        if let Some(registry) = env.storage().instance().get::<_, Address>(&PermKey::Registry) {
-            let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
-            if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                &registry,
-                &Symbol::new(&env, "is_admin"),
-                admin_args,
-            ) {
-                return Role::Admin;
-            }
-        }
+        // Note: We intentionally don't call registry.is_admin here to avoid
+        // re-entry issues (registry.is_admin calls back to is_site_admin).
+        // Site admins are managed directly in this contract.
 
         env.storage()
             .persistent()
@@ -340,32 +330,14 @@ impl BoardsPermissions {
 
     /// Get full permission set for a user on a board
     pub fn get_permissions(env: Env, board_id: u64, user: Address) -> PermissionSet {
-        use soroban_sdk::{IntoVal, Symbol, Val, Vec};
-
         // Check if user is a site admin - they get full permissions on all boards
+        // Note: We do NOT call registry.is_admin here to avoid re-entry
+        // (registry.is_admin calls back to permissions.is_site_admin)
+        // Registry admins should be added to SiteAdmins during deployment.
         let is_site_admin = Self::is_site_admin(env.clone(), user.clone());
 
-        // Also check registry's is_admin for backwards compatibility
-        let is_registry_admin = if !is_site_admin {
-            if let Some(registry) = env.storage().instance().get::<_, Address>(&PermKey::Registry) {
-                let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
-                env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                    &registry,
-                    &Symbol::new(&env, "is_admin"),
-                    admin_args,
-                )
-                .ok()
-                .and_then(|r| r.ok())
-                .unwrap_or(false)
-            } else {
-                false
-            }
-        } else {
-            false
-        };
-
         // Site admins get full permissions
-        if is_site_admin || is_registry_admin {
+        if is_site_admin {
             return PermissionSet {
                 role: Role::Admin,
                 can_view: true,
@@ -1532,89 +1504,114 @@ impl BoardsPermissions {
     }
 
     /// Check if an address is a site admin.
+    ///
+    /// This calls registry.is_admin which is THE single source of truth for
+    /// admin status. Registry admins ARE site admins - there is ONE admin list.
+    ///
+    /// Note: registry.is_admin only checks its local storage and does NOT call
+    /// back to permissions, so there is no re-entry issue.
     pub fn is_site_admin(env: Env, address: Address) -> bool {
-        let admins: Vec<Address> = env
-            .storage()
-            .instance()
-            .get(&PermKey::SiteAdmins)
-            .unwrap_or(Vec::new(&env));
+        // Get registry address
+        let registry_opt: Option<Address> = env.storage().instance().get(&PermKey::Registry);
 
-        for i in 0..admins.len() {
-            if admins.get(i).unwrap() == address {
-                return true;
+        if let Some(registry) = registry_opt {
+            // Call registry.is_admin - this is the single source of truth
+            let args: Vec<Val> = Vec::from_array(&env, [address.into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "is_admin"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
+        } else {
+            // Fallback: no registry configured, check local SiteAdmins
+            let admins: Vec<Address> = env
+                .storage()
+                .instance()
+                .get(&PermKey::SiteAdmins)
+                .unwrap_or(Vec::new(&env));
+
+            for i in 0..admins.len() {
+                if admins.get(i).unwrap() == address {
+                    return true;
+                }
             }
+            false
         }
-        false
     }
 
     /// Get all site admin addresses.
+    /// Returns the admin list from the registry (the single source of truth).
     pub fn get_site_admins(env: Env) -> Vec<Address> {
-        env.storage()
-            .instance()
-            .get(&PermKey::SiteAdmins)
+        // Get registry address
+        let registry_opt: Option<Address> = env.storage().instance().get(&PermKey::Registry);
+
+        if let Some(registry) = registry_opt {
+            // Call registry.get_admins
+            env.try_invoke_contract::<Vec<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_admins"),
+                Vec::new(&env),
+            )
+            .ok()
+            .and_then(|r| r.ok())
             .unwrap_or(Vec::new(&env))
+        } else {
+            // Fallback: no registry configured, return local SiteAdmins
+            env.storage()
+                .instance()
+                .get(&PermKey::SiteAdmins)
+                .unwrap_or(Vec::new(&env))
+        }
     }
 
-    /// Add a new site admin. Requires existing admin auth.
+    /// Add a new site admin. Delegates to registry.add_admin.
+    ///
+    /// The registry's Admins list is THE single source of truth for admin status.
     pub fn add_site_admin(env: Env, new_admin: Address, caller: Address) {
-        caller.require_auth();
-
-        if !Self::is_site_admin(env.clone(), caller.clone()) {
-            panic!("Only site admins can add admins");
-        }
-
-        let mut admins: Vec<Address> = env
+        // Get registry address
+        let registry: Address = env
             .storage()
             .instance()
-            .get(&PermKey::SiteAdmins)
-            .unwrap_or(Vec::new(&env));
+            .get(&PermKey::Registry)
+            .expect("Not initialized");
 
-        // Check if already an admin
-        for i in 0..admins.len() {
-            if admins.get(i).unwrap() == new_admin {
-                panic!("Already a site admin");
-            }
-        }
-
-        admins.push_back(new_admin);
-        env.storage().instance().set(&PermKey::SiteAdmins, &admins);
+        // Delegate to registry - it handles auth checks
+        let args: Vec<Val> = Vec::from_array(&env, [
+            new_admin.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "add_admin"),
+            args,
+        );
     }
 
-    /// Remove a site admin. Requires existing admin auth.
+    /// Remove a site admin. Delegates to registry.remove_admin.
+    ///
+    /// The registry's Admins list is THE single source of truth for admin status.
     /// Cannot remove the last admin.
     pub fn remove_site_admin(env: Env, admin_to_remove: Address, caller: Address) {
-        caller.require_auth();
-
-        if !Self::is_site_admin(env.clone(), caller.clone()) {
-            panic!("Only site admins can remove admins");
-        }
-
-        let admins: Vec<Address> = env
+        // Get registry address
+        let registry: Address = env
             .storage()
             .instance()
-            .get(&PermKey::SiteAdmins)
-            .unwrap_or(Vec::new(&env));
+            .get(&PermKey::Registry)
+            .expect("Not initialized");
 
-        if admins.len() <= 1 {
-            panic!("Cannot remove the last site admin");
-        }
-
-        let mut new_admins = Vec::new(&env);
-        let mut found = false;
-        for i in 0..admins.len() {
-            let admin = admins.get(i).unwrap();
-            if admin == admin_to_remove {
-                found = true;
-            } else {
-                new_admins.push_back(admin);
-            }
-        }
-
-        if !found {
-            panic!("Address is not a site admin");
-        }
-
-        env.storage().instance().set(&PermKey::SiteAdmins, &new_admins);
+        // Delegate to registry - it handles auth checks
+        let args: Vec<Val> = Vec::from_array(&env, [
+            admin_to_remove.into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(
+            &registry,
+            &Symbol::new(&env, "remove_admin"),
+            args,
+        );
     }
 
     // ============================================================
@@ -1733,6 +1730,9 @@ impl BoardsPermissions {
         }
 
         // Get registry to look up config contract
+        // Note: We do NOT call registry.is_admin here because that causes re-entry
+        // (registry.is_admin calls back to permissions.is_site_admin)
+        // The is_site_admin check above already covers admin users.
         let registry: Option<Address> = env.storage().instance().get(&PermKey::Registry);
         let registry = match registry {
             Some(r) => r,
@@ -1746,26 +1746,12 @@ impl BoardsPermissions {
             }
         };
 
-        // Also check registry's is_admin (for backwards compatibility with pre-migration data)
-        let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
-        if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(&env, "is_admin"),
-            admin_args,
-        ) {
-            return CanCreateResult {
-                allowed: true,
-                is_bypass: true,
-                reason: String::from_str(&env, ""),
-            };
-        }
-
-        // Get config contract from registry
-        let config_args: Vec<Val> = Vec::new(&env);
+        // Get config contract from registry using get_contract_by_alias
+        let config_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
         let config: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
-                &Symbol::new(&env, "get_config_contract"),
+                &Symbol::new(&env, "get_contract_by_alias"),
                 config_args,
             )
             .ok()
@@ -1790,11 +1776,12 @@ impl BoardsPermissions {
         let user_post_count = Self::get_post_count(env.clone(), user.clone());
 
         // Get user's karma from voting contract
+        let voting_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
         let voting: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
-                &Symbol::new(&env, "get_voting_contract"),
-                Vec::new(&env),
+                &Symbol::new(&env, "get_contract_by_alias"),
+                voting_args,
             )
             .ok()
             .and_then(|r| r.ok())
@@ -1899,6 +1886,9 @@ impl BoardsPermissions {
         }
 
         // Get registry to look up config contract
+        // Note: We do NOT call registry.is_admin here because that causes re-entry
+        // (registry.is_admin calls back to permissions.is_site_admin)
+        // The is_site_admin check above already covers admin users.
         let registry: Option<Address> = env.storage().instance().get(&PermKey::Registry);
         let registry = match registry {
             Some(r) => r,
@@ -1912,26 +1902,12 @@ impl BoardsPermissions {
             }
         };
 
-        // Also check registry's is_admin (for backwards compatibility with pre-migration data)
-        let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
-        if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(&env, "is_admin"),
-            admin_args,
-        ) {
-            return CanCreateResult {
-                allowed: true,
-                is_bypass: true,
-                reason: String::from_str(&env, ""),
-            };
-        }
-
-        // Get config contract from registry
-        let config_args: Vec<Val> = Vec::new(&env);
+        // Get config contract from registry using get_contract_by_alias
+        let config_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
         let config: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
-                &Symbol::new(&env, "get_config_contract"),
+                &Symbol::new(&env, "get_contract_by_alias"),
                 config_args,
             )
             .ok()
@@ -1958,11 +1934,12 @@ impl BoardsPermissions {
         let user_post_count = Self::get_post_count(env.clone(), user.clone());
 
         // Get user's karma from voting contract
+        let voting_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
         let voting: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
-                &Symbol::new(&env, "get_voting_contract"),
-                Vec::new(&env),
+                &Symbol::new(&env, "get_contract_by_alias"),
+                voting_args,
             )
             .ok()
             .and_then(|r| r.ok())

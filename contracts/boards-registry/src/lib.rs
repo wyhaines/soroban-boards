@@ -22,13 +22,14 @@
 
 use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
+// Note: Board contract mapping (BoardContract, BoardContractCount, BoardWasmHash) removed.
+// Boards are now stored in a single boards-board contract, accessed via the "board" alias.
+
 /// Storage keys for the registry contract
 ///
 /// The registry is a pure contract discovery service. It stores:
 /// - Contract addresses by alias (for form:@alias:method protocol)
-/// - Board contract addresses for discovery (board_id -> Address)
 /// - Admin list for registry operations
-/// - WASM hash for deploying new board contracts
 #[contracttype]
 #[derive(Clone)]
 pub enum RegistryKey {
@@ -36,14 +37,8 @@ pub enum RegistryKey {
     Admins,
     /// Contract addresses for shared services (legacy, for backwards compatibility)
     Contracts,
-    /// Generic contract storage by alias (e.g., "perms", "content", "theme", "profile")
+    /// Generic contract storage by alias (e.g., "perms", "content", "theme", "profile", "board")
     Contract(Symbol),
-    /// Board contract address by ID (for discovery only)
-    BoardContract(u64),
-    /// Number of registered board contracts (next available ID)
-    BoardContractCount,
-    /// WASM hash for deploying board contracts
-    BoardWasmHash,
     /// Global pause flag
     Paused,
 }
@@ -85,7 +80,6 @@ impl BoardsRegistry {
         admins.get(0).unwrap().require_auth();
 
         env.storage().instance().set(&RegistryKey::Admins, &admins);
-        env.storage().instance().set(&RegistryKey::BoardContractCount, &0u64);
         env.storage().instance().set(&RegistryKey::Paused, &false);
 
         // Store in legacy Contracts struct for backwards compatibility
@@ -116,24 +110,6 @@ impl BoardsRegistry {
             &RegistryKey::Contract(Symbol::new(&env, "admin")),
             &admin_contract,
         );
-    }
-
-    // =========================================================================
-    // WASM Hash Management
-    // =========================================================================
-
-    /// Set the WASM hash for deploying board contracts (admin only)
-    pub fn set_board_wasm_hash(env: Env, wasm_hash: BytesN<32>, caller: Address) {
-        Self::require_admin_auth(&env, &caller);
-
-        env.storage()
-            .instance()
-            .set(&RegistryKey::BoardWasmHash, &wasm_hash);
-    }
-
-    /// Get the board WASM hash
-    pub fn get_board_wasm_hash(env: Env) -> Option<BytesN<32>> {
-        env.storage().instance().get(&RegistryKey::BoardWasmHash)
     }
 
     // =========================================================================
@@ -194,99 +170,30 @@ impl BoardsRegistry {
     }
 
     // =========================================================================
-    // Board Contract Discovery
-    // =========================================================================
-
-    /// Get the number of registered board contracts (next available ID)
-    pub fn board_contract_count(env: Env) -> u64 {
-        env.storage()
-            .instance()
-            .get(&RegistryKey::BoardContractCount)
-            .unwrap_or(0)
-    }
-
-    /// Register a board contract address and return its ID
-    ///
-    /// Called by boards-main when deploying a new board contract.
-    /// Returns the board ID assigned to this contract.
-    pub fn register_board_contract(env: Env, board_contract: Address, caller: Address) -> u64 {
-        Self::require_admin_auth(&env, &caller);
-
-        // Get next board ID
-        let board_id: u64 = env
-            .storage()
-            .instance()
-            .get(&RegistryKey::BoardContractCount)
-            .unwrap_or(0);
-
-        // Store the board contract address
-        env.storage()
-            .persistent()
-            .set(&RegistryKey::BoardContract(board_id), &board_contract);
-
-        // Increment count
-        env.storage()
-            .instance()
-            .set(&RegistryKey::BoardContractCount, &(board_id + 1));
-
-        board_id
-    }
-
-    /// Get board contract address for a board ID
-    pub fn get_board_contract(env: Env, board_id: u64) -> Option<Address> {
-        env.storage()
-            .persistent()
-            .get(&RegistryKey::BoardContract(board_id))
-    }
-
-    // =========================================================================
     // Admin Management
     // =========================================================================
 
-    /// Get all admin addresses (delegates to permissions contract)
+    /// Get all admin addresses.
+    ///
+    /// This returns the registry's local Admins list which is THE single
+    /// source of truth for admin status. Does NOT call other contracts.
     pub fn get_admins(env: Env) -> Vec<Address> {
-        // Try permissions contract first
-        if let Some(contracts) = env
-            .storage()
-            .instance()
-            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
-        {
-            let args: Vec<Val> = Vec::new(&env);
-            if let Ok(Ok(admins)) = env.try_invoke_contract::<Vec<Address>, soroban_sdk::Error>(
-                &contracts.permissions,
-                &Symbol::new(&env, "get_site_admins"),
-                args,
-            ) {
-                if admins.len() > 0 {
-                    return admins;
-                }
-            }
-        }
-        // Fallback to local storage for migration compatibility
         env.storage()
             .instance()
             .get(&RegistryKey::Admins)
             .unwrap_or(Vec::new(&env))
     }
 
-    /// Check if an address is an admin (checks both permissions contract and local storage)
+    /// Check if an address is an admin.
+    ///
+    /// This is THE source of truth for admin status. The registry's Admins list
+    /// is the single admin list for the entire system. All other contracts
+    /// should call this function to check admin status.
+    ///
+    /// IMPORTANT: This function ONLY checks local storage. It does NOT call
+    /// any other contracts to avoid re-entry issues. Other contracts (like
+    /// permissions.is_site_admin) should call this function.
     pub fn is_admin(env: Env, address: Address) -> bool {
-        // Check permissions contract first
-        if let Some(contracts) = env
-            .storage()
-            .instance()
-            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
-        {
-            let args: Vec<Val> = Vec::from_array(&env, [address.clone().into_val(&env)]);
-            if let Ok(Ok(true)) = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                &contracts.permissions,
-                &Symbol::new(&env, "is_site_admin"),
-                args,
-            ) {
-                return true;
-            }
-        }
-        // Also check local storage (for backwards compatibility with pre-migration data)
         let admins: Vec<Address> = env
             .storage()
             .instance()
@@ -301,28 +208,13 @@ impl BoardsRegistry {
         false
     }
 
-    /// Add a new admin (delegates to permissions contract)
+    /// Add a new admin to the registry's admin list.
+    ///
+    /// The registry's Admins list is THE single source of truth for admin status.
+    /// This function directly modifies the local list (no delegation to avoid loops).
     pub fn add_admin(env: Env, new_admin: Address, caller: Address) {
-        // Delegate to permissions contract
-        if let Some(contracts) = env
-            .storage()
-            .instance()
-            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
-        {
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [new_admin.clone().into_val(&env), caller.clone().into_val(&env)],
-            );
-            // This will require_auth on the caller within permissions contract
-            env.invoke_contract::<()>(
-                &contracts.permissions,
-                &Symbol::new(&env, "add_site_admin"),
-                args,
-            );
-            return;
-        }
-        // Fallback to local storage for migration compatibility
         Self::require_admin_auth(&env, &caller);
+
         let mut admins: Vec<Address> = env
             .storage()
             .instance()
@@ -339,29 +231,14 @@ impl BoardsRegistry {
         env.storage().instance().set(&RegistryKey::Admins, &admins);
     }
 
-    /// Remove an admin (delegates to permissions contract)
-    /// Cannot remove the last admin
+    /// Remove an admin from the registry's admin list.
+    ///
+    /// The registry's Admins list is THE single source of truth for admin status.
+    /// This function directly modifies the local list (no delegation to avoid loops).
+    /// Cannot remove the last admin.
     pub fn remove_admin(env: Env, admin_to_remove: Address, caller: Address) {
-        // Delegate to permissions contract
-        if let Some(contracts) = env
-            .storage()
-            .instance()
-            .get::<_, ContractAddresses>(&RegistryKey::Contracts)
-        {
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [admin_to_remove.clone().into_val(&env), caller.clone().into_val(&env)],
-            );
-            // This will require_auth on the caller within permissions contract
-            env.invoke_contract::<()>(
-                &contracts.permissions,
-                &Symbol::new(&env, "remove_site_admin"),
-                args,
-            );
-            return;
-        }
-        // Fallback to local storage for migration compatibility
         Self::require_admin_auth(&env, &caller);
+
         let admins: Vec<Address> = env
             .storage()
             .instance()
@@ -390,8 +267,37 @@ impl BoardsRegistry {
         env.storage().instance().set(&RegistryKey::Admins, &new_admins);
     }
 
+    /// Add an admin directly to local storage (bypasses permissions contract).
+    /// Use this to add contract addresses that need admin rights but can't sign.
+    /// Requires existing admin auth.
+    pub fn add_admin_direct(env: Env, new_admin: Address, caller: Address) {
+        Self::require_admin_auth(&env, &caller);
+
+        let mut admins: Vec<Address> = env
+            .storage()
+            .instance()
+            .get(&RegistryKey::Admins)
+            .expect("Not initialized");
+
+        // Check not already an admin
+        for i in 0..admins.len() {
+            if admins.get(i).unwrap() == new_admin {
+                panic!("Already an admin");
+            }
+        }
+
+        admins.push_back(new_admin);
+        env.storage().instance().set(&RegistryKey::Admins, &admins);
+    }
+
     /// Helper: require caller is an admin and has authorized
     fn require_admin_auth(env: &Env, caller: &Address) {
+        Self::require_admin(env, caller);
+        caller.require_auth();
+    }
+
+    /// Helper: require caller is an admin (no auth check - for internal/contract calls)
+    fn require_admin(env: &Env, caller: &Address) {
         let admins: Vec<Address> = env
             .storage()
             .instance()
@@ -409,8 +315,6 @@ impl BoardsRegistry {
         if !is_admin {
             panic!("Not an admin");
         }
-
-        caller.require_auth();
     }
 
     // =========================================================================
@@ -517,9 +421,6 @@ mod test {
 
         // Verify admin
         assert!(client.is_admin(&admin));
-
-        // Verify board contract count starts at 0
-        assert_eq!(client.board_contract_count(), 0);
     }
 
     #[test]
@@ -661,46 +562,5 @@ mod test {
             client.get_contract(&Symbol::new(&env, "perms")),
             Some(new_permissions)
         );
-    }
-
-    #[test]
-    fn test_register_board_contract() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsRegistry, ());
-        let client = BoardsRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let theme = Address::generate(&env);
-        let admin_contract = Address::generate(&env);
-
-        let admins = Vec::from_array(&env, [admin.clone()]);
-        client.init(&admins, &permissions, &content, &theme, &admin_contract);
-
-        // Initially no board contracts
-        assert_eq!(client.board_contract_count(), 0);
-
-        // Register first board contract
-        let board1 = Address::generate(&env);
-        let id1 = client.register_board_contract(&board1, &admin);
-        assert_eq!(id1, 0);
-        assert_eq!(client.board_contract_count(), 1);
-        assert_eq!(client.get_board_contract(&0), Some(board1.clone()));
-
-        // Register second board contract
-        let board2 = Address::generate(&env);
-        let id2 = client.register_board_contract(&board2, &admin);
-        assert_eq!(id2, 1);
-        assert_eq!(client.board_contract_count(), 2);
-        assert_eq!(client.get_board_contract(&1), Some(board2.clone()));
-
-        // First board still accessible
-        assert_eq!(client.get_board_contract(&0), Some(board1));
-
-        // Non-existent board returns None
-        assert_eq!(client.get_board_contract(&999), None);
     }
 }

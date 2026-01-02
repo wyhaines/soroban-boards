@@ -191,31 +191,6 @@ pub struct DefaultVotingCfg {
 #[contract]
 pub struct BoardsAdmin;
 
-/// Helper function to parse a Soroban String to u32
-/// Panics if the string contains non-digit characters
-fn parse_string_to_u32(_env: &Env, s: &String) -> u32 {
-    let len = s.len() as usize;
-    if len == 0 {
-        panic!("Empty string");
-    }
-    if len > 10 {
-        panic!("Number too large");
-    }
-
-    let mut buf = [0u8; 10];
-    s.copy_into_slice(&mut buf[..len]);
-
-    let mut result: u32 = 0;
-    for i in 0..len {
-        let byte = buf[i];
-        if byte < b'0' || byte > b'9' {
-            panic!("Invalid number format");
-        }
-        result = result * 10 + (byte - b'0') as u32;
-    }
-    result
-}
-
 #[contractimpl]
 impl BoardsAdmin {
     /// Initialize the admin contract
@@ -265,6 +240,18 @@ impl BoardsAdmin {
     /// Get config address
     pub fn get_config(env: Env) -> Option<Address> {
         env.storage().instance().get(&AdminKey::Config)
+    }
+
+    /// Get board contract address from registry (single contract for all boards)
+    fn get_board_contract_address(env: &Env) -> Address {
+        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        );
+        board_contract.expect("Board contract not registered")
     }
 
     /// Set config address (registry admin only)
@@ -906,44 +893,25 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        // Get registry for board contract lookup
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
-
-        // Get board contract address from registry
-        let board_contract_opt: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
 
         // Build title with board name
         let mut md = Self::render_nav(env, board_id);
 
-        // Get board config from board contract
-        let config_opt: Option<BoardConfig> = if let Some(ref board_addr) = board_contract_opt {
-            env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
-                board_addr,
-                &Symbol::new(env, "get_config"),
-                Vec::new(env),
-            ).ok().and_then(|r| r.ok())
-        } else {
-            None
-        };
+        // Get board config from board contract (now requires board_id)
+        let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "get_config"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        ).ok().and_then(|r| r.ok());
 
-        // Get board creator for ownership checks
-        let creator_opt: Option<Address> = if let Some(ref board_addr) = board_contract_opt {
-            env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-                board_addr,
-                &Symbol::new(env, "get_creator"),
-                Vec::new(env),
-            ).ok().and_then(|r| r.ok()).flatten()
-        } else {
-            None
-        };
+        // Get board creator for ownership checks (now requires board_id)
+        let creator_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "get_creator"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        ).ok().and_then(|r| r.ok()).flatten();
 
         if let Some(ref config) = config_opt {
             md = md.h1("Settings: ").text_string(&config.name).newline().newline();
@@ -1002,94 +970,82 @@ impl BoardsAdmin {
             .newline()
             .newline();
 
-        // Get board contract for chunk size and other settings
-        let board_contract: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
+        // Get chunk size and other settings (board_contract already defined above)
+        let chunk_size: u32 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_chunk_size"),
             Vec::from_array(env, [board_id.into_val(env)]),
         );
 
-        if let Some(board_addr) = board_contract {
-            let chunk_size: u32 = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "get_chunk_size"),
-                Vec::new(env),
-            );
+        md = md.h2("Display Settings")
+            .text("**Reply chunk size:** ").number(chunk_size).text(" replies per batch").newline()
+            .newline()
+            .note("Controls how many replies load at once in waterfall loading. Lower values load faster but require more scrolling.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .input("chunk_size", "New chunk size (1-20)")
+            .newline()
+            .form_link_to("Update Chunk Size", "admin", "set_chunk_size")
+            .newline()
+            .newline();
 
-            md = md.h2("Display Settings")
-                .text("**Reply chunk size:** ").number(chunk_size).text(" replies per batch").newline()
-                .newline()
-                .note("Controls how many replies load at once in waterfall loading. Lower values load faster but require more scrolling.")
-                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                .number(board_id as u32)
-                .raw_str("\" />\n")
-                .input("chunk_size", "New chunk size (1-20)")
-                .newline()
-                .form_link_to("Update Chunk Size", "admin", "set_chunk_size")
-                .newline()
-                .newline();
+        // Max reply depth setting
+        let max_depth: u32 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_max_reply_depth"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
 
-            // Max reply depth setting
-            let max_depth: u32 = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "get_max_reply_depth"),
-                Vec::new(env),
-            );
+        md = md.h2("Reply Threading")
+            .text("**Maximum reply depth:** ").number(max_depth).text(" levels").newline()
+            .newline()
+            .note("Controls how deeply nested replies can be. Replies at the maximum depth cannot have children. Setting this lower helps keep discussions focused.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .input("max_depth", "New max depth (1-20)")
+            .newline()
+            .form_link_to("Update Max Depth", "admin", "set_max_reply_depth")
+            .newline()
+            .newline();
 
-            md = md.h2("Reply Threading")
-                .text("**Maximum reply depth:** ").number(max_depth).text(" levels").newline()
-                .newline()
-                .note("Controls how deeply nested replies can be. Replies at the maximum depth cannot have children. Setting this lower helps keep discussions focused.")
-                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                .number(board_id as u32)
-                .raw_str("\" />\n")
-                .input("max_depth", "New max depth (1-20)")
-                .newline()
-                .form_link_to("Update Max Depth", "admin", "set_max_reply_depth")
-                .newline()
-                .newline();
+        // Edit window setting
+        let edit_window: u64 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_edit_window"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        );
 
-            // Edit window setting
-            let edit_window: u64 = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "get_edit_window"),
-                Vec::new(env),
-            );
+        // Convert seconds to hours for display
+        let edit_hours = if edit_window == 0 { 0 } else { edit_window / 3600 };
 
-            // Convert seconds to hours for display
-            let edit_hours = if edit_window == 0 { 0 } else { edit_window / 3600 };
+        md = md.h2("Content Editing")
+            .text("**Edit window:** ");
 
-            md = md.h2("Content Editing")
-                .text("**Edit window:** ");
-
-            if edit_window == 0 {
-                md = md.text("No limit (users can always edit their content)").newline();
-            } else {
-                md = md.number(edit_hours as u32).text(" hours").newline();
-            }
-
-            md = md.newline()
-                .note("Controls how long users can edit their posts after creation. Moderators can always edit.")
-                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                .number(board_id as u32)
-                .raw_str("\" />\n")
-                .input("edit_hours", "Edit window in hours (0 = no limit)")
-                .newline()
-                .form_link_to("Update Edit Window", "admin", "set_edit_window")
-                .newline()
-                .newline();
+        if edit_window == 0 {
+            md = md.text("No limit (users can always edit their content)").newline();
+        } else {
+            md = md.number(edit_hours as u32).text(" hours").newline();
         }
 
+        md = md.newline()
+            .note("Controls how long users can edit their posts after creation. Moderators can always edit.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .input("edit_hours", "Edit window in hours (0 = no limit)")
+            .newline()
+            .form_link_to("Update Edit Window", "admin", "set_edit_window")
+            .newline()
+            .newline();
+
         // Board visibility setting - query board contract
-        let is_listed: bool = if let Some(ref board_addr) = board_contract_opt {
-            env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                board_addr,
-                &Symbol::new(env, "get_board_listed"),
-                Vec::new(env),
-            ).unwrap_or(Ok(false)).unwrap_or(false)
-        } else {
-            false
-        };
+        let is_listed: bool = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "get_board_listed"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        ).unwrap_or(Ok(false)).unwrap_or(false);
 
         md = md.h2("Board Visibility")
             .text("**Listed publicly:** ");
@@ -1142,16 +1098,12 @@ impl BoardsAdmin {
         md = md.newline()
             .newline();
 
-        // Board read-only status - use existing board_contract_opt
-        let is_readonly = if let Some(ref board_addr) = board_contract_opt {
-            env.try_invoke_contract::<bool, soroban_sdk::Error>(
-                board_addr,
-                &Symbol::new(env, "is_readonly"),
-                Vec::new(env),
-            ).unwrap_or(Ok(false)).unwrap_or(false)
-        } else {
-            false
-        };
+        // Board read-only status
+        let is_readonly = env.try_invoke_contract::<bool, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "is_readonly"),
+            Vec::from_array(env, [board_id.into_val(env)]),
+        ).unwrap_or(Ok(false)).unwrap_or(false);
 
         md = md.h2("Posting Status")
             .text("**Current status:** ");
@@ -1181,6 +1133,7 @@ impl BoardsAdmin {
         md = md.h2("Community");
 
         // Get community contract address via alias lookup
+        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
         let community_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(env, "get_contract_by_alias"),
@@ -1214,6 +1167,10 @@ impl BoardsAdmin {
                         .newline()
                         .newline()
                         .note("Leaving a community makes this a standalone board.")
+                        .raw_str("<div data-form>\n")
+                        .raw_str("<input type=\"hidden\" name=\"community_id\" value=\"")
+                        .number(community_id as u32)
+                        .raw_str("\" />\n")
                         .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                         .number(board_id as u32)
                         .raw_str("\" />\n")
@@ -1224,6 +1181,7 @@ impl BoardsAdmin {
                         .number(board_id as u32)
                         .raw_str("/settings\" />\n")
                         .form_link_to("Leave Community", "community", "remove_board")
+                        .raw_str("\n</div>\n")
                         .newline();
                 } else {
                     md = md.text("**Status:** In community (ID: ")
@@ -1264,11 +1222,10 @@ impl BoardsAdmin {
                         .raw_str("<a href=\"render:/new\">Create Community</a>\n");
                 } else {
                     // Note: Form inputs ordered to match function signature:
-                    // move_board_to_community(board_id, community_id, caller)
+                    // add_board(community_id, board_id, caller)
+                    // Wrap in data-form div to create form boundary (isolates from other forms on page)
                     md = md.note("Move this board to one of your communities.")
-                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                        .number(board_id as u32)
-                        .raw_str("\" />\n")
+                        .raw_str("<div data-form>\n")
                         .raw_str("<label>Select Community:</label>\n")
                         .raw_str("<select name=\"community_id\">\n");
 
@@ -1282,6 +1239,9 @@ impl BoardsAdmin {
                     }
 
                     md = md.raw_str("</select>\n")
+                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        .number(board_id as u32)
+                        .raw_str("\" />\n")
                         .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
                         .text_string(&viewer.as_ref().unwrap().to_string())
                         .raw_str("\" />\n")
@@ -1290,6 +1250,7 @@ impl BoardsAdmin {
                         .raw_str("/settings\" />\n")
                         .newline()
                         .form_link_to("Move to Community", "community", "add_board")
+                        .raw_str("\n</div>\n")
                         .newline();
                 }
             }
@@ -1348,18 +1309,8 @@ impl BoardsAdmin {
 
     /// Render delete board confirmation page
     fn render_delete(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
-
-        // Get board contract from registry
-        let board_contract_opt: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        );
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
 
         let mut md = MarkdownBuilder::new(env);
 
@@ -1371,32 +1322,23 @@ impl BoardsAdmin {
             .div_end()
             .newline();
 
-        let board_contract = match board_contract_opt {
-            Some(addr) => addr,
-            None => {
-                return md.h1("Board Not Found")
-                    .paragraph("This board does not exist.")
-                    .build();
-            }
-        };
-
-        // Get board config and metadata from board contract
+        // Get board config and metadata from board contract (now requires board_id)
         let config: BoardConfig = env.invoke_contract(
             &board_contract,
             &Symbol::new(env, "get_config"),
-            Vec::new(env),
+            Vec::from_array(env, [board_id.into_val(env)]),
         );
 
         let creator_opt: Option<Address> = env.invoke_contract(
             &board_contract,
             &Symbol::new(env, "get_creator"),
-            Vec::new(env),
+            Vec::from_array(env, [board_id.into_val(env)]),
         );
 
         let thread_count: u64 = env.invoke_contract(
             &board_contract,
             &Symbol::new(env, "thread_count"),
-            Vec::new(env),
+            Vec::from_array(env, [board_id.into_val(env)]),
         );
 
         md = md.h1("Delete Board");
@@ -1465,11 +1407,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         let mut md = Self::render_nav_subpage(env, board_id)
             .h1("Flair Management");
@@ -1492,85 +1429,77 @@ impl BoardsAdmin {
             return Self::render_footer_into(env, md).build();
         }
 
-        // Get board contract
-        let board_contract: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
+
+        // Get existing flairs (now requires board_id)
+        let flairs: Vec<FlairDef> = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "list_flairs"),
             Vec::from_array(env, [board_id.into_val(env)]),
         );
 
-        if let Some(board_addr) = board_contract {
-            // Get existing flairs
-            let flairs: Vec<FlairDef> = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "list_flairs"),
-                Vec::new(env),
-            );
+        md = md.h2("Current Flairs");
 
-            md = md.h2("Current Flairs");
-
-            if flairs.is_empty() {
-                md = md.paragraph("No flairs defined yet. Create one below.");
-            } else {
-                for i in 0..flairs.len() {
-                    let flair = flairs.get(i).unwrap();
-                    md = md.hr()
-                        .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; background: ")
-                        .text_string(&flair.bg_color)
-                        .raw_str("; color: ")
-                        .text_string(&flair.color)
-                        .raw_str(";\">")
-                        .text_string(&flair.name)
-                        .raw_str("</div>\n\n")
-                        .raw_str("- **ID:** ").number(flair.id).newline()
-                        .raw_str("- **Enabled:** ").text(if flair.enabled { "Yes" } else { "No" }).newline()
-                        .raw_str("- **Required:** ").text(if flair.required { "Yes" } else { "No" }).newline()
-                        .raw_str("- **Mod Only:** ").text(if flair.mod_only { "Yes" } else { "No" }).newline()
-                        .newline()
-                        // Edit button - links to separate edit page
-                        .raw_str("[Edit](render:/admin/b/")
-                        .number(board_id as u32)
-                        .raw_str("/flairs/")
-                        .number(flair.id)
-                        .raw_str("/edit)");
-
-                    // Disable button (only for enabled flairs)
-                    if flair.enabled {
-                        md = md.text(" | ")
-                            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                            .number(board_id as u32)
-                            .raw_str("\" />\n")
-                            .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
-                            .number(flair.id)
-                            .raw_str("\" />\n")
-                            .form_link_to("Disable", "admin", "disable_flair");
-                    }
-
-                    md = md.newline();
-                }
-            }
-
-            // Create new flair form
-            md = md.hr()
-                .h2("Create New Flair")
-                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                .number(board_id as u32)
-                .raw_str("\" />\n")
-                .input("name", "Flair name (max 32 chars)")
-                .newline()
-                .input("color", "Text color (e.g., #ffffff)")
-                .newline()
-                .input("bg_color", "Background color (e.g., #ff4500)")
-                .newline()
-                // Hidden inputs provide default "false" when checkbox is unchecked
-                .raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n")
-                .raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n")
-                .raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n")
-                .raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n")
-                .form_link_to("Create Flair", "admin", "create_flair");
+        if flairs.is_empty() {
+            md = md.paragraph("No flairs defined yet. Create one below.");
         } else {
-            md = md.warning("Board contract not found.");
+            for i in 0..flairs.len() {
+                let flair = flairs.get(i).unwrap();
+                md = md.hr()
+                    .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; background: ")
+                    .text_string(&flair.bg_color)
+                    .raw_str("; color: ")
+                    .text_string(&flair.color)
+                    .raw_str(";\">")
+                    .text_string(&flair.name)
+                    .raw_str("</div>\n\n")
+                    .raw_str("- **ID:** ").number(flair.id).newline()
+                    .raw_str("- **Enabled:** ").text(if flair.enabled { "Yes" } else { "No" }).newline()
+                    .raw_str("- **Required:** ").text(if flair.required { "Yes" } else { "No" }).newline()
+                    .raw_str("- **Mod Only:** ").text(if flair.mod_only { "Yes" } else { "No" }).newline()
+                    .newline()
+                    // Edit button - links to separate edit page
+                    .raw_str("[Edit](render:/admin/b/")
+                    .number(board_id as u32)
+                    .raw_str("/flairs/")
+                    .number(flair.id)
+                    .raw_str("/edit)");
+
+                // Disable button (only for enabled flairs)
+                if flair.enabled {
+                    md = md.text(" | ")
+                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                        .number(board_id as u32)
+                        .raw_str("\" />\n")
+                        .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
+                        .number(flair.id)
+                        .raw_str("\" />\n")
+                        .form_link_to("Disable", "admin", "disable_flair");
+                }
+
+                md = md.newline();
+            }
         }
+
+        // Create new flair form
+        md = md.hr()
+            .h2("Create New Flair")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .input("name", "Flair name (max 32 chars)")
+            .newline()
+            .input("color", "Text color (e.g., #ffffff)")
+            .newline()
+            .input("bg_color", "Background color (e.g., #ff4500)")
+            .newline()
+            // Hidden inputs provide default "false" when checkbox is unchecked
+            .raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n")
+            .raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n")
+            .raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n")
+            .raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n")
+            .form_link_to("Create Flair", "admin", "create_flair");
 
         Self::render_footer_into(env, md).build()
     }
@@ -1581,11 +1510,6 @@ impl BoardsAdmin {
             .storage()
             .instance()
             .get(&AdminKey::Permissions)
-            .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
             .expect("Not initialized");
 
         let mut md = Self::render_nav_subpage(env, board_id)
@@ -1609,124 +1533,116 @@ impl BoardsAdmin {
             return Self::render_footer_into(env, md).build();
         }
 
-        // Get board contract
-        let board_contract: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
-            Vec::from_array(env, [board_id.into_val(env)]),
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
+
+        // Get the flair (now requires board_id)
+        let flair_opt: Option<FlairDef> = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_flair"),
+            Vec::from_array(env, [board_id.into_val(env), flair_id.into_val(env)]),
         );
 
-        if let Some(board_addr) = board_contract {
-            // Get the flair
-            let flair_opt: Option<FlairDef> = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "get_flair"),
-                Vec::from_array(env, [flair_id.into_val(env)]),
-            );
+        if let Some(flair) = flair_opt {
+            // Show current flair preview
+            md = md
+                .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; margin-bottom: 16px; background: ")
+                .text_string(&flair.bg_color)
+                .raw_str("; color: ")
+                .text_string(&flair.color)
+                .raw_str(";\">")
+                .text_string(&flair.name)
+                .raw_str("</div>\n\n")
+                .text("Editing flair ID: ").number(flair_id).newline()
+                .newline()
+                // Hidden fields
+                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                .number(board_id as u32)
+                .raw_str("\" />\n")
+                .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
+                .number(flair_id)
+                .raw_str("\" />\n")
+                .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
+                .number(board_id as u32)
+                .raw_str("/flairs\" />\n");
 
-            if let Some(flair) = flair_opt {
-                // Show current flair preview
-                md = md
-                    .raw_str("<div class=\"flair-preview\" style=\"display: inline-block; padding: 2px 8px; border-radius: 3px; margin-bottom: 16px; background: ")
-                    .text_string(&flair.bg_color)
-                    .raw_str("; color: ")
-                    .text_string(&flair.color)
-                    .raw_str(";\">")
-                    .text_string(&flair.name)
-                    .raw_str("</div>\n\n")
-                    .text("Editing flair ID: ").number(flair_id).newline()
-                    .newline()
-                    // Hidden fields
-                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                    .number(board_id as u32)
-                    .raw_str("\" />\n")
-                    .raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"")
-                    .number(flair_id)
-                    .raw_str("\" />\n")
-                    .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
-                    .number(board_id as u32)
-                    .raw_str("/flairs\" />\n");
+            // Pre-fill form with current values
+            // Name field - we need to use raw HTML to set the value
+            let name_len = flair.name.len() as usize;
+            let mut name_buf = [0u8; 64];
+            let name_copy_len = if name_len > 64 { 64 } else { name_len };
+            flair.name.copy_into_slice(&mut name_buf[..name_copy_len]);
 
-                // Pre-fill form with current values
-                // Name field - we need to use raw HTML to set the value
-                let name_len = flair.name.len() as usize;
-                let mut name_buf = [0u8; 64];
-                let name_copy_len = if name_len > 64 { 64 } else { name_len };
-                flair.name.copy_into_slice(&mut name_buf[..name_copy_len]);
-
-                md = md.raw_str("<div class=\"form-group\">\n")
-                    .raw_str("<label for=\"name\">Name</label>\n")
-                    .raw_str("<input type=\"text\" name=\"name\" id=\"name\" value=\"");
-                for j in 0..name_copy_len {
-                    md = md.raw_str(core::str::from_utf8(&name_buf[j..j+1]).unwrap_or(""));
-                }
-                md = md.raw_str("\" />\n")
-                    .raw_str("</div>\n\n");
-
-                // Color field
-                let color_len = flair.color.len() as usize;
-                let mut color_buf = [0u8; 32];
-                let color_copy_len = if color_len > 32 { 32 } else { color_len };
-                flair.color.copy_into_slice(&mut color_buf[..color_copy_len]);
-
-                md = md.raw_str("<div class=\"form-group\">\n")
-                    .raw_str("<label for=\"color\">Text color</label>\n")
-                    .raw_str("<input type=\"text\" name=\"color\" id=\"color\" value=\"");
-                for j in 0..color_copy_len {
-                    md = md.raw_str(core::str::from_utf8(&color_buf[j..j+1]).unwrap_or(""));
-                }
-                md = md.raw_str("\" />\n")
-                    .raw_str("</div>\n\n");
-
-                // Background color field
-                let bg_len = flair.bg_color.len() as usize;
-                let mut bg_buf = [0u8; 32];
-                let bg_copy_len = if bg_len > 32 { 32 } else { bg_len };
-                flair.bg_color.copy_into_slice(&mut bg_buf[..bg_copy_len]);
-
-                md = md.raw_str("<div class=\"form-group\">\n")
-                    .raw_str("<label for=\"bg_color\">Background color</label>\n")
-                    .raw_str("<input type=\"text\" name=\"bg_color\" id=\"bg_color\" value=\"");
-                for j in 0..bg_copy_len {
-                    md = md.raw_str(core::str::from_utf8(&bg_buf[j..j+1]).unwrap_or(""));
-                }
-                md = md.raw_str("\" />\n")
-                    .raw_str("</div>\n\n");
-
-                // Checkboxes with current values
-                md = md.raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n");
-                if flair.required {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" checked /> Required for new posts</label>\n");
-                } else {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n");
-                }
-
-                md = md.raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n");
-                if flair.mod_only {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" checked /> Moderator only</label>\n");
-                } else {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n");
-                }
-
-                md = md.raw_str("<input type=\"hidden\" name=\"enabled\" value=\"false\" />\n");
-                if flair.enabled {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked /> Enabled</label>\n");
-                } else {
-                    md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" /> Enabled</label>\n");
-                }
-
-                md = md.newline()
-                    .form_link_to("Update Flair", "admin", "update_flair")
-                    .newline()
-                    .newline()
-                    .raw_str("[Cancel](render:/admin/b/")
-                    .number(board_id as u32)
-                    .raw_str("/flairs)");
-            } else {
-                md = md.warning("Flair not found.");
+            md = md.raw_str("<div class=\"form-group\">\n")
+                .raw_str("<label for=\"name\">Name</label>\n")
+                .raw_str("<input type=\"text\" name=\"name\" id=\"name\" value=\"");
+            for j in 0..name_copy_len {
+                md = md.raw_str(core::str::from_utf8(&name_buf[j..j+1]).unwrap_or(""));
             }
+            md = md.raw_str("\" />\n")
+                .raw_str("</div>\n\n");
+
+            // Color field
+            let color_len = flair.color.len() as usize;
+            let mut color_buf = [0u8; 32];
+            let color_copy_len = if color_len > 32 { 32 } else { color_len };
+            flair.color.copy_into_slice(&mut color_buf[..color_copy_len]);
+
+            md = md.raw_str("<div class=\"form-group\">\n")
+                .raw_str("<label for=\"color\">Text color</label>\n")
+                .raw_str("<input type=\"text\" name=\"color\" id=\"color\" value=\"");
+            for j in 0..color_copy_len {
+                md = md.raw_str(core::str::from_utf8(&color_buf[j..j+1]).unwrap_or(""));
+            }
+            md = md.raw_str("\" />\n")
+                .raw_str("</div>\n\n");
+
+            // Background color field
+            let bg_len = flair.bg_color.len() as usize;
+            let mut bg_buf = [0u8; 32];
+            let bg_copy_len = if bg_len > 32 { 32 } else { bg_len };
+            flair.bg_color.copy_into_slice(&mut bg_buf[..bg_copy_len]);
+
+            md = md.raw_str("<div class=\"form-group\">\n")
+                .raw_str("<label for=\"bg_color\">Background color</label>\n")
+                .raw_str("<input type=\"text\" name=\"bg_color\" id=\"bg_color\" value=\"");
+            for j in 0..bg_copy_len {
+                md = md.raw_str(core::str::from_utf8(&bg_buf[j..j+1]).unwrap_or(""));
+            }
+            md = md.raw_str("\" />\n")
+                .raw_str("</div>\n\n");
+
+            // Checkboxes with current values
+            md = md.raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n");
+            if flair.required {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" checked /> Required for new posts</label>\n");
+            } else {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"required\" value=\"true\" /> Required for new posts</label>\n");
+            }
+
+            md = md.raw_str("<input type=\"hidden\" name=\"mod_only\" value=\"false\" />\n");
+            if flair.mod_only {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" checked /> Moderator only</label>\n");
+            } else {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"mod_only\" value=\"true\" /> Moderator only</label>\n");
+            }
+
+            md = md.raw_str("<input type=\"hidden\" name=\"enabled\" value=\"false\" />\n");
+            if flair.enabled {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" checked /> Enabled</label>\n");
+            } else {
+                md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" /> Enabled</label>\n");
+            }
+
+            md = md.newline()
+                .form_link_to("Update Flair", "admin", "update_flair")
+                .newline()
+                .newline()
+                .raw_str("[Cancel](render:/admin/b/")
+                .number(board_id as u32)
+                .raw_str("/flairs)");
         } else {
-            md = md.warning("Board contract not found.");
+            md = md.warning("Flair not found.");
         }
 
         Self::render_footer_into(env, md).build()
@@ -1738,11 +1654,6 @@ impl BoardsAdmin {
             .storage()
             .instance()
             .get(&AdminKey::Permissions)
-            .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
             .expect("Not initialized");
 
         let mut md = Self::render_nav_subpage(env, board_id)
@@ -1766,67 +1677,59 @@ impl BoardsAdmin {
             return Self::render_footer_into(env, md).build();
         }
 
-        // Get board contract
-        let board_contract: Option<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_board_contract"),
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(env);
+
+        // Get current rules (now requires board_id)
+        let current_rules: Option<String> = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(env, "get_rules"),
             Vec::from_array(env, [board_id.into_val(env)]),
         );
 
-        if let Some(board_addr) = board_contract {
-            // Get current rules
-            let current_rules: Option<String> = env.invoke_contract(
-                &board_addr,
-                &Symbol::new(env, "get_rules"),
-                Vec::new(env),
-            );
+        md = md.h2("Current Rules");
 
-            md = md.h2("Current Rules");
-
-            if let Some(ref rules) = current_rules {
-                if rules.len() > 0 {
-                    md = md.div_start("rules-content")
-                        .text_string(rules)
-                        .div_end()
-                        .newline()
-                        .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                        .number(board_id as u32)
-                        .raw_str("\" />\n")
-                        .form_link_to("Clear Rules", "admin", "clear_rules")
-                        .newline();
-                } else {
-                    md = md.paragraph("No rules set.");
-                }
+        if let Some(ref rules) = current_rules {
+            if rules.len() > 0 {
+                md = md.div_start("rules-content")
+                    .text_string(rules)
+                    .div_end()
+                    .newline()
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                    .number(board_id as u32)
+                    .raw_str("\" />\n")
+                    .form_link_to("Clear Rules", "admin", "clear_rules")
+                    .newline();
             } else {
                 md = md.paragraph("No rules set.");
             }
-
-            // Edit rules form
-            md = md.hr()
-                .h2("Edit Rules")
-                .note("Rules are displayed on the board page and when creating new threads. Use plain text or Markdown.")
-                .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
-                .number(board_id as u32)
-                .raw_str("\" />\n")
-                .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
-                .number(board_id as u32)
-                .raw_str("/rules\" />\n")
-                .textarea("rules", 10, "Enter board rules here...");
-
-            // Pre-fill with current rules if available
-            if let Some(rules) = current_rules {
-                if rules.len() > 0 {
-                    // Note: Can't pre-fill textarea in this setup, user needs to re-enter
-                    md = md.newline()
-                        .note("Copy existing rules above and paste into the text area if you want to edit.");
-                }
-            }
-
-            md = md.newline()
-                .form_link_to("Save Rules", "admin", "set_rules");
         } else {
-            md = md.warning("Board contract not found.");
+            md = md.paragraph("No rules set.");
         }
+
+        // Edit rules form
+        md = md.hr()
+            .h2("Edit Rules")
+            .note("Rules are displayed on the board page and when creating new threads. Use plain text or Markdown.")
+            .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+            .number(board_id as u32)
+            .raw_str("\" />\n")
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/admin/b/")
+            .number(board_id as u32)
+            .raw_str("/rules\" />\n")
+            .textarea_markdown("rules", 10, "Enter board rules here...");
+
+        // Pre-fill with current rules if available
+        if let Some(rules) = current_rules {
+            if rules.len() > 0 {
+                // Note: Can't pre-fill textarea in this setup, user needs to re-enter
+                md = md.newline()
+                    .note("Copy existing rules above and paste into the text area if you want to edit.");
+            }
+        }
+
+        md = md.newline()
+            .form_link_to("Save Rules", "admin", "set_rules");
 
         Self::render_footer_into(env, md).build()
     }
@@ -2108,7 +2011,7 @@ impl BoardsAdmin {
             .h2("Current Branding")
             .newline()
             .text("- **Site Name:** ").text_string(&branding.site_name).newline()
-            .text("- **Tagline:** ").text_string(&branding.tagline).newline()
+            .text("- **Home Content:** ").text_string(&branding.tagline).newline()
             // Color swatch: inline span with background color and contrasting text
             .raw_str("- **Primary Color:** <span style=\"background-color:")
             .text_string(&branding.primary_color)
@@ -2147,12 +2050,12 @@ impl BoardsAdmin {
             .newline()
             .form_link_to("Update Site Name", "admin", "set_site_name")
             .raw_str("\n</div>\n\n")
-            // Tagline form
+            // Home Content form
             .raw_str("<div data-form>\n\n")
-            .h3("Tagline")
-            .textarea_markdown_with_value_string("tagline", 3, "Tagline", &branding.tagline)
+            .h3("Home Content")
+            .textarea_markdown_with_value_string("tagline", 3, "Home content (markdown)", &branding.tagline)
             .newline()
-            .form_link_to("Update Tagline", "admin", "set_tagline")
+            .form_link_to("Update Home Content", "admin", "set_tagline")
             .raw_str("\n</div>\n\n")
             // Primary Color form
             .raw_str("<div data-form>\n\n")
@@ -2675,11 +2578,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -2692,17 +2590,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Hide the thread
+        // Hide the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             true.into_val(&env),
         ]);
@@ -2727,11 +2620,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -2744,17 +2632,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Unhide the thread
+        // Unhide the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             false.into_val(&env),
         ]);
@@ -2913,7 +2796,7 @@ impl BoardsAdmin {
         caller.require_auth();
 
         // Parse string to u32
-        let threshold_u32 = parse_string_to_u32(&env, &threshold);
+        let threshold_u32 = string_to_u32(&env, &threshold).expect("Invalid number");
 
         let permissions: Address = env
             .storage()
@@ -2956,7 +2839,7 @@ impl BoardsAdmin {
         caller.require_auth();
 
         // Parse string to u32
-        let chunk_size_u32 = parse_string_to_u32(&env, &chunk_size);
+        let chunk_size_u32 = string_to_u32(&env, &chunk_size).expect("Invalid number");
 
         let permissions: Address = env
             .storage()
@@ -2980,23 +2863,12 @@ impl BoardsAdmin {
             panic!("Chunk size must be between 1 and 20");
         }
 
-        // Get board contract
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
-
-        // Set the chunk size
+        // Set the chunk size (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             chunk_size_u32.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3018,7 +2890,7 @@ impl BoardsAdmin {
         caller.require_auth();
 
         // Parse string to u32
-        let max_depth_u32 = parse_string_to_u32(&env, &max_depth);
+        let max_depth_u32 = string_to_u32(&env, &max_depth).expect("Invalid number");
 
         let permissions: Address = env
             .storage()
@@ -3042,23 +2914,12 @@ impl BoardsAdmin {
             panic!("Max reply depth must be between 1 and 20");
         }
 
-        // Get board contract
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
-
-        // Set the max reply depth
+        // Set the max reply depth (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             max_depth_u32.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3081,7 +2942,7 @@ impl BoardsAdmin {
         caller.require_auth();
 
         // Parse string to u32 (hours)
-        let hours_u32 = parse_string_to_u32(&env, &edit_hours);
+        let hours_u32 = string_to_u32(&env, &edit_hours).expect("Invalid number");
 
         let permissions: Address = env
             .storage()
@@ -3103,23 +2964,12 @@ impl BoardsAdmin {
         // Convert hours to seconds (0 stays 0 for "no limit")
         let seconds: u64 = (hours_u32 as u64) * 3600;
 
-        // Get board contract
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
-
-        // Set the edit window
+        // Set the edit window (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             seconds.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3205,23 +3055,13 @@ impl BoardsAdmin {
         is_listed: bool,
         caller: Address,
     ) {
-        // Get registry to look up board contract
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Get board contract address
-        let board_contract: Address = env.invoke_contract::<Option<Address>>(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            Vec::from_array(&env, [board_id.into_val(&env)]),
-        ).expect("Board contract not found");
-
-        // Call board contract's set_board_listed function
+        // Call board contract's set_board_listed function (now requires board_id)
         // (The board contract handles permission checking internally)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             is_listed.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3259,23 +3099,13 @@ impl BoardsAdmin {
         is_private: bool,
         caller: Address,
     ) {
-        // Get registry to look up board contract
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Get board contract address
-        let board_contract: Address = env.invoke_contract::<Option<Address>>(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            Vec::from_array(&env, [board_id.into_val(&env)]),
-        ).expect("Board contract not found");
-
-        // Call board contract's set_private function
+        // Call board contract's set_private function (now requires board_id)
         // (The board contract handles permission checking internally)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             is_private.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3330,21 +3160,12 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract address from registry
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        let board_contract: Address = env.invoke_contract::<Option<Address>>(
-            &registry,
-            &Symbol::new(&env, "get_board_contract"),
-            Vec::from_array(&env, [board_id.into_val(&env)]),
-        ).expect("Board contract not found");
-
-        // Call board contract's set_readonly function
+        // Call board contract's set_readonly function (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             is_readonly.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3369,11 +3190,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3386,17 +3202,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Pin the thread
+        // Pin the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             true.into_val(&env),
         ]);
@@ -3421,11 +3232,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3438,17 +3244,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Unpin the thread
+        // Unpin the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             false.into_val(&env),
         ]);
@@ -3473,11 +3274,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3490,17 +3286,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Lock the thread
+        // Lock the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             true.into_val(&env),
         ]);
@@ -3525,11 +3316,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3542,17 +3328,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Unlock the thread
+        // Unlock the thread (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             false.into_val(&env),
         ]);
@@ -3577,11 +3358,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has moderator permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3594,17 +3370,12 @@ impl BoardsAdmin {
             panic!("Caller must be moderator or higher");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Delete the thread (soft delete)
+        // Delete the thread (soft delete) - now requires board_id
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             thread_id.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3683,11 +3454,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has admin permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3700,37 +3466,20 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
         // Parse checkbox values (check for "true" string value)
         let is_required = required
-            .map(|s| {
-                let len = s.len() as usize;
-                if len != 4 { return false; }
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                &buf == b"true"
-            })
+            .map(|s| s == String::from_str(&env, "true"))
             .unwrap_or(false);
         let is_mod_only = mod_only
-            .map(|s| {
-                let len = s.len() as usize;
-                if len != 4 { return false; }
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                &buf == b"true"
-            })
+            .map(|s| s == String::from_str(&env, "true"))
             .unwrap_or(false);
 
-        // Create the flair
+        // Create the flair (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             name.into_val(&env),
             color.into_val(&env),
             bg_color.into_val(&env),
@@ -3754,17 +3503,12 @@ impl BoardsAdmin {
     ) {
         caller.require_auth();
 
-        let flair_id_u32 = parse_string_to_u32(&env, &flair_id);
+        let flair_id_u32 = string_to_u32(&env, &flair_id).expect("Invalid number");
 
         let permissions: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Permissions)
-            .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
             .expect("Not initialized");
 
         // Verify caller has admin permissions
@@ -3778,17 +3522,12 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Disable the flair
+        // Disable the flair (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             flair_id_u32.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3821,11 +3560,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has admin permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3838,42 +3572,18 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
         // Parse checkbox values (check for "true" string value)
         let is_required = required
-            .map(|s| {
-                let len = s.len() as usize;
-                if len != 4 { return false; }
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                &buf == b"true"
-            })
+            .map(|s| s == String::from_str(&env, "true"))
             .unwrap_or(false);
         let is_mod_only = mod_only
-            .map(|s| {
-                let len = s.len() as usize;
-                if len != 4 { return false; }
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                &buf == b"true"
-            })
+            .map(|s| s == String::from_str(&env, "true"))
             .unwrap_or(false);
         let is_enabled = enabled
-            .map(|s| {
-                let len = s.len() as usize;
-                if len != 4 { return false; }
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                &buf == b"true"
-            })
+            .map(|s| s == String::from_str(&env, "true"))
             .unwrap_or(true); // Default to enabled
 
         // Build FlairDef
@@ -3918,11 +3628,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has admin permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3935,17 +3640,12 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Set the rules
+        // Set the rules (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             rules.into_val(&env),
             caller.into_val(&env),
         ]);
@@ -3969,11 +3669,6 @@ impl BoardsAdmin {
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&AdminKey::Registry)
-            .expect("Not initialized");
 
         // Verify caller has admin permissions
         let caller_perms: PermissionSet = env.invoke_contract(
@@ -3986,17 +3681,12 @@ impl BoardsAdmin {
             panic!("Caller must be admin or owner");
         }
 
-        // Get board contract
-        let board_contract: Address = env
-            .invoke_contract::<Option<Address>>(
-                &registry,
-                &Symbol::new(&env, "get_board_contract"),
-                Vec::from_array(&env, [board_id.into_val(&env)]),
-            )
-            .expect("Board contract not found");
+        // Get board contract (single contract for all boards)
+        let board_contract = Self::get_board_contract_address(&env);
 
-        // Clear the rules
+        // Clear the rules (now requires board_id)
         let args: Vec<Val> = Vec::from_array(&env, [
+            board_id.into_val(&env),
             caller.into_val(&env),
         ]);
         env.invoke_contract::<()>(
@@ -4143,35 +3833,30 @@ impl BoardsAdmin {
         // Update fields
         if let Some(s) = min_karma {
             if s.len() > 0 {
-                thresholds.min_karma = parse_string_to_u32(&env, &s) as i64;
+                thresholds.min_karma = string_to_u32(&env, &s).expect("Invalid number") as i64;
             }
         }
         if let Some(s) = min_account_age_secs {
             if s.len() > 0 {
-                thresholds.min_account_age_secs = parse_string_to_u32(&env, &s) as u64;
+                thresholds.min_account_age_secs = string_to_u32(&env, &s).expect("Invalid number") as u64;
             }
         }
         if let Some(s) = min_post_count {
             if s.len() > 0 {
-                thresholds.min_post_count = parse_string_to_u32(&env, &s);
+                thresholds.min_post_count = string_to_u32(&env, &s).expect("Invalid number");
             }
         }
         if let Some(s) = require_profile {
-            let len = s.len() as usize;
-            if len == 4 {
-                let mut buf = [0u8; 4];
-                s.copy_into_slice(&mut buf);
-                thresholds.require_profile = &buf == b"true";
-            }
+            thresholds.require_profile = s == String::from_str(&env, "true");
         }
         if let Some(s) = per_user_limit {
             if s.len() > 0 {
-                thresholds.per_user_limit = parse_string_to_u32(&env, &s);
+                thresholds.per_user_limit = string_to_u32(&env, &s).expect("Invalid number");
             }
         }
         if let Some(s) = xlm_lock_stroops {
             if s.len() > 0 {
-                thresholds.xlm_lock_stroops = parse_string_to_u32(&env, &s) as i128;
+                thresholds.xlm_lock_stroops = string_to_u32(&env, &s).expect("Invalid number") as i128;
             }
         }
 
@@ -4185,7 +3870,7 @@ impl BoardsAdmin {
     pub fn config_set_max_reply_depth(env: Env, max_reply_depth: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
         let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
-        let depth = parse_string_to_u32(&env, &max_reply_depth);
+        let depth = string_to_u32(&env, &max_reply_depth).expect("Invalid number");
         let args: Vec<Val> = Vec::from_array(&env, [depth.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_max_reply_depth"), args);
     }
@@ -4194,7 +3879,7 @@ impl BoardsAdmin {
     pub fn config_set_reply_chunk_size(env: Env, reply_chunk_size: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
         let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
-        let size = parse_string_to_u32(&env, &reply_chunk_size);
+        let size = string_to_u32(&env, &reply_chunk_size).expect("Invalid number");
         let args: Vec<Val> = Vec::from_array(&env, [size.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_reply_chunk_size"), args);
     }
@@ -4203,7 +3888,7 @@ impl BoardsAdmin {
     pub fn config_set_default_edit_window(env: Env, default_edit_window: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
         let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
-        let seconds = parse_string_to_u32(&env, &default_edit_window) as u64;
+        let seconds = string_to_u32(&env, &default_edit_window).expect("Invalid number") as u64;
         let args: Vec<Val> = Vec::from_array(&env, [seconds.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_default_edit_window"), args);
     }
@@ -4212,7 +3897,7 @@ impl BoardsAdmin {
     pub fn config_set_thread_body_max_bytes(env: Env, thread_body_max_bytes: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
         let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
-        let max_bytes = parse_string_to_u32(&env, &thread_body_max_bytes);
+        let max_bytes = string_to_u32(&env, &thread_body_max_bytes).expect("Invalid number");
         let args: Vec<Val> = Vec::from_array(&env, [max_bytes.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_thread_body_max_bytes"), args);
     }
@@ -4237,8 +3922,8 @@ impl BoardsAdmin {
         };
 
         let limits = NameLimits {
-            min_length: parse_string_to_u32(&env, &min_length),
-            max_length: parse_string_to_u32(&env, &max_length),
+            min_length: string_to_u32(&env, &min_length).expect("Invalid number"),
+            max_length: string_to_u32(&env, &max_length).expect("Invalid number"),
         };
 
         let func_name = if is_board { "set_board_name_limits" } else { "set_community_name_limits" };

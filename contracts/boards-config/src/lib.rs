@@ -345,13 +345,13 @@ impl BoardsConfig {
         Self::require_admin(&env, &caller);
 
         // Store footer_text in chonk for unlimited size rendering
-        let footer_bytes = Self::string_to_bytes_chunked(&env, &branding.footer_text);
+        let footer_bytes = string_to_bytes(&env, &branding.footer_text);
         let footer_chonk = Chonk::open(&env, Symbol::new(&env, "footer"));
         footer_chonk.clear();
         footer_chonk.write_chunked(footer_bytes, 1024);
 
         // Store tagline in chonk for unlimited size rendering
-        let tagline_bytes = Self::string_to_bytes_chunked(&env, &branding.tagline);
+        let tagline_bytes = string_to_bytes(&env, &branding.tagline);
         let tagline_chonk = Chonk::open(&env, Symbol::new(&env, "tagline"));
         tagline_chonk.clear();
         tagline_chonk.write_chunked(tagline_bytes, 1024);
@@ -599,7 +599,7 @@ impl BoardsConfig {
         _viewer: Option<Address>,
     ) -> Bytes {
         let branding = Self::get_branding(env.clone());
-        Self::string_to_bytes(&env, &branding.site_name)
+        string_to_bytes(&env, &branding.site_name)
     }
 
     /// Render tagline - for includes: {{include contract=CONFIG func="tagline"}}
@@ -609,7 +609,7 @@ impl BoardsConfig {
         _viewer: Option<Address>,
     ) -> Bytes {
         let branding = Self::get_branding(env.clone());
-        Self::string_to_bytes(&env, &branding.tagline)
+        string_to_bytes(&env, &branding.tagline)
     }
 
     /// Render logo HTML - for includes: {{include contract=CONFIG func="logo"}}
@@ -621,9 +621,9 @@ impl BoardsConfig {
 
         // Build: <img src="URL" alt="SITE_NAME" class="site-logo" />
         let mut result = Bytes::from_slice(&env, b"<img src=\"");
-        result.append(&Self::string_to_bytes(&env, &branding.logo_url));
+        result.append(&string_to_bytes(&env, &branding.logo_url));
         result.append(&Bytes::from_slice(&env, b"\" alt=\""));
-        result.append(&Self::string_to_bytes(&env, &branding.site_name));
+        result.append(&string_to_bytes(&env, &branding.site_name));
         result.append(&Bytes::from_slice(&env, b"\" class=\"site-logo\" />"));
         result
     }
@@ -642,14 +642,14 @@ impl BoardsConfig {
             // Return continuation tag for progressive loading
             // {{continue collection="footer" from=0 total=N}}
             let mut result = Bytes::from_slice(&env, b"{{continue collection=\"footer\" from=0 total=");
-            result.append(&Self::u32_to_bytes(&env, count));
+            result.append(&u32_to_bytes(&env, count));
             result.append(&Bytes::from_slice(&env, b"}}"));
             result
         } else {
             // Fallback to branding struct for backward compatibility
             // Use chunked conversion to handle any length
             let branding = Self::get_branding(env.clone());
-            Self::string_to_bytes_chunked(&env, &branding.footer_text)
+            string_to_bytes(&env, &branding.footer_text)
         }
     }
 
@@ -707,7 +707,7 @@ impl BoardsConfig {
         _viewer: Option<Address>,
     ) -> Bytes {
         let branding = Self::get_branding(env.clone());
-        Self::string_to_bytes(&env, &branding.primary_color)
+        string_to_bytes(&env, &branding.primary_color)
     }
 
     /// Render meta tags for document head - for includes: {{include contract=CONFIG func="meta"}}
@@ -749,86 +749,6 @@ impl BoardsConfig {
         }
 
         md.build()
-    }
-
-    // =========================================================================
-    // Helpers
-    // =========================================================================
-
-    /// Convert u32 to Bytes (for building tags)
-    fn u32_to_bytes(env: &Env, n: u32) -> Bytes {
-        let mut buf = [0u8; 10]; // max digits for u32
-        let mut i = 0;
-        let mut num = n;
-
-        if num == 0 {
-            return Bytes::from_slice(env, b"0");
-        }
-
-        while num > 0 {
-            buf[i] = b'0' + (num % 10) as u8;
-            num /= 10;
-            i += 1;
-        }
-
-        // Reverse the digits
-        let mut result = [0u8; 10];
-        for j in 0..i {
-            result[j] = buf[i - 1 - j];
-        }
-
-        Bytes::from_slice(env, &result[..i])
-    }
-
-    /// Convert String to Bytes with a fixed buffer (for short strings)
-    fn string_to_bytes(env: &Env, s: &String) -> Bytes {
-        let len = s.len() as usize;
-        if len == 0 {
-            return Bytes::new(env);
-        }
-        // Use a buffer for shorter text content
-        let mut buf = [0u8; 512];
-        let copy_len = core::cmp::min(len, 512);
-        s.copy_into_slice(&mut buf[..copy_len]);
-        Bytes::from_slice(env, &buf[..copy_len])
-    }
-
-    /// Convert String to Bytes in chunks for unlimited size support
-    /// Processes the string in 1024-byte chunks and assembles into a single Bytes
-    fn string_to_bytes_chunked(env: &Env, s: &String) -> Bytes {
-        let len = s.len() as usize;
-        if len == 0 {
-            return Bytes::new(env);
-        }
-
-        const CHUNK_SIZE: usize = 1024;
-        let mut result = Bytes::new(env);
-        let mut buf = [0u8; CHUNK_SIZE];
-        let mut offset = 0;
-
-        while offset < len {
-            let remaining = len - offset;
-            let chunk_len = core::cmp::min(remaining, CHUNK_SIZE);
-
-            // Copy this chunk from string to buffer
-            // Note: copy_into_slice copies the entire string, so we extract the slice we need
-            if offset == 0 {
-                // First chunk - copy and take what we need
-                s.copy_into_slice(&mut buf[..chunk_len]);
-            } else {
-                // For subsequent chunks, we need to copy the full string and extract our portion
-                // This is inefficient but necessary given Soroban's String API
-                let mut full_buf = [0u8; 8192]; // Large enough for most strings
-                let full_len = core::cmp::min(len, 8192);
-                s.copy_into_slice(&mut full_buf[..full_len]);
-                buf[..chunk_len].copy_from_slice(&full_buf[offset..offset + chunk_len]);
-            }
-
-            result.append(&Bytes::from_slice(env, &buf[..chunk_len]));
-            offset += chunk_len;
-        }
-
-        result
     }
 
     // =========================================================================
