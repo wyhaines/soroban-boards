@@ -200,6 +200,38 @@ impl BoardsCommunity {
         env.storage().instance().get(&CommunityKey::Config)
     }
 
+    // === Admin Helper Functions ===
+
+    /// Check if user is a community admin (via permissions contract)
+    fn is_community_admin(env: &Env, community_id: u64, user: &Address) -> bool {
+        let perms_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
+        if let Some(perms) = perms_opt {
+            let args: Vec<Val> = Vec::from_array(env, [
+                community_id.into_val(env),
+                user.clone().into_val(env),
+                (Role::Admin as u32).into_val(env),
+            ]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &perms,
+                &Symbol::new(env, "has_community_role"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
+        } else {
+            false
+        }
+    }
+
+    /// Check if user is community owner or admin
+    fn is_owner_or_admin(env: &Env, community: &CommunityMeta, user: &Address) -> bool {
+        if *user == community.owner {
+            return true;
+        }
+        Self::is_community_admin(env, community.id, user)
+    }
+
     /// Get how many communities a user has created
     pub fn count_user_communities(env: Env, user: Address) -> u32 {
         env.storage()
@@ -544,8 +576,8 @@ impl BoardsCommunity {
             .and_then(|r| r.ok())
             .unwrap_or(false);
 
-        // Verify caller is community owner OR board owner OR registry admin
-        let is_community_owner = caller == community.owner;
+        // Verify caller is community owner/admin OR board owner OR registry admin
+        let is_community_owner_or_admin = Self::is_owner_or_admin(&env, &community, &caller);
         let is_board_owner = {
             let alias_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
             let board_contract: Option<Address> = env.invoke_contract(
@@ -567,8 +599,8 @@ impl BoardsCommunity {
             }
         };
 
-        if !is_community_owner && !is_board_owner && !is_registry_admin {
-            panic!("Only community owner, board owner, or admin can add boards");
+        if !is_community_owner_or_admin && !is_board_owner && !is_registry_admin {
+            panic!("Only community owner/admin, board owner, or site admin can add boards");
         }
 
         // Check if board is already in a community
@@ -611,9 +643,8 @@ impl BoardsCommunity {
             .expect("Community does not exist");
 
         // Verify caller is community owner or admin
-        if caller != community.owner {
-            // TODO: Check if caller is community admin via permissions contract
-            panic!("Only community owner can remove boards");
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can remove boards");
         }
 
         // Remove board from community's board list
@@ -662,7 +693,7 @@ impl BoardsCommunity {
             .get(&CommunityKey::BoardCommunity(board_id))
     }
 
-    /// Fix board_count to match actual boards list (owner only)
+    /// Fix board_count to match actual boards list (owner/admin only)
     /// Use this to repair data inconsistencies
     pub fn fix_board_count(env: Env, community_id: u64, caller: Address) {
         caller.require_auth();
@@ -673,9 +704,9 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        // Only owner can fix
-        if caller != community.owner {
-            panic!("Only community owner can fix board count");
+        // Only owner or admin can fix
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can fix board count");
         }
 
         // Get actual boards list
@@ -705,9 +736,9 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        // Only owner can set rules (for now)
-        if caller != community.owner {
-            panic!("Only community owner can set rules");
+        // Only owner or admin can set rules
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can set rules");
         }
 
         env.storage()
@@ -722,7 +753,7 @@ impl BoardsCommunity {
             .get(&CommunityKey::CommunityRules(community_id))
     }
 
-    /// Set permission defaults for boards in this community
+    /// Set permission defaults for boards in this community (owner/admin only)
     pub fn set_permission_defaults(
         env: Env,
         community_id: u64,
@@ -737,8 +768,8 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        if caller != community.owner {
-            panic!("Only community owner can set permission defaults");
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can set permission defaults");
         }
 
         env.storage()
@@ -808,8 +839,8 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        if caller != community.owner {
-            panic!("Only community owner can accept join requests");
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can accept join requests");
         }
 
         // Remove from pending requests
@@ -871,6 +902,102 @@ impl BoardsCommunity {
         false
     }
 
+    // === Community Admin Management ===
+
+    /// Add a community admin (owner or existing admin can call)
+    pub fn add_admin(env: Env, community_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        let community = Self::get_community(env.clone(), community_id)
+            .expect("Community not found");
+
+        // Owner or existing admin can add admins
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only owner or admin can add admins");
+        }
+
+        // Call permissions contract to set role
+        let perms: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Permissions)
+            .expect("Permissions not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            user.into_val(&env),
+            (Role::Admin as u32).into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(&perms, &Symbol::new(&env, "set_community_role"), args);
+    }
+
+    /// Remove a community admin (owner only)
+    pub fn remove_admin(env: Env, community_id: u64, user: Address, caller: Address) {
+        caller.require_auth();
+
+        let community = Self::get_community(env.clone(), community_id)
+            .expect("Community not found");
+
+        // Only owner can remove admins
+        if caller != community.owner {
+            panic!("Only owner can remove admins");
+        }
+
+        // Call permissions contract to set role to Guest (removes admin)
+        let perms: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Permissions)
+            .expect("Permissions not initialized");
+
+        let args: Vec<Val> = Vec::from_array(&env, [
+            community_id.into_val(&env),
+            user.into_val(&env),
+            (Role::Guest as u32).into_val(&env),
+            caller.into_val(&env),
+        ]);
+        env.invoke_contract::<()>(&perms, &Symbol::new(&env, "set_community_role"), args);
+    }
+
+    /// Get list of community admins
+    pub fn get_admins(env: Env, community_id: u64) -> Vec<Address> {
+        let perms_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
+        if let Some(perms) = perms_opt {
+            let args: Vec<Val> = Vec::from_array(&env, [community_id.into_val(&env)]);
+            env.try_invoke_contract::<Vec<Address>, soroban_sdk::Error>(
+                &perms,
+                &Symbol::new(&env, "list_community_admins"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(Vec::new(&env))
+        } else {
+            Vec::new(&env)
+        }
+    }
+
+    /// Get communities where user is owner or admin
+    pub fn get_manageable_communities(env: Env, user: Address) -> Vec<CommunityInfo> {
+        let mut result: Vec<CommunityInfo> = Vec::new(&env);
+        let count = Self::community_count(env.clone());
+
+        for id in 0..count {
+            if let Some(community) = Self::get_community(env.clone(), id) {
+                if Self::is_owner_or_admin(&env, &community, &user) {
+                    result.push_back(CommunityInfo {
+                        id: community.id,
+                        name: community.name.clone(),
+                        display_name: community.display_name.clone(),
+                    });
+                }
+            }
+        }
+
+        result
+    }
+
     /// Get pending join requests (owner/admin only)
     pub fn get_join_requests(env: Env, community_id: u64, caller: Address) -> Vec<JoinRequest> {
         caller.require_auth();
@@ -881,8 +1008,8 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        if caller != community.owner {
-            panic!("Only community owner can view join requests");
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can view join requests");
         }
 
         env.storage()
@@ -891,7 +1018,7 @@ impl BoardsCommunity {
             .unwrap_or_else(|| Vec::new(&env))
     }
 
-    /// Update community metadata (owner only)
+    /// Update community metadata (owner/admin only)
     /// Accepts is_private and is_listed as strings ("true"/"false") from form input
     pub fn update_community(
         env: Env,
@@ -910,8 +1037,8 @@ impl BoardsCommunity {
             .get(&CommunityKey::Community(community_id))
             .expect("Community does not exist");
 
-        if caller != community.owner {
-            panic!("Only community owner can update community");
+        if !Self::is_owner_or_admin(&env, &community, &caller) {
+            panic!("Only community owner or admin can update community");
         }
 
         community.display_name = display_name;
@@ -1353,10 +1480,10 @@ impl BoardsCommunity {
         builder = builder.number(community.member_count as u32);
         builder = builder.raw_str(" members</span></div>\n");
 
-        // Actions based on viewer
+        // Actions based on viewer (owner or admin)
         if let Some(ref v) = viewer {
-            if *v == community.owner {
-                // Owner actions - build settings URL
+            if Self::is_owner_or_admin(env, &community, v) {
+                // Owner/Admin actions - build settings URL
                 let mut settings_url_buf = [0u8; 80];
                 let settings_prefix = b"render:/c/";
                 settings_url_buf[0..10].copy_from_slice(settings_prefix);
@@ -1372,6 +1499,12 @@ impl BoardsCommunity {
                 builder = builder.raw_str("<a class=\"soroban-action\" href=\"");
                 builder = builder.raw_str(settings_url);
                 builder = builder.raw_str("\">Settings</a>");
+
+                // Create Board link - goes to /create?community=ID
+                builder = builder.raw_str(" | <a class=\"soroban-action\" href=\"render:/create?community=");
+                builder = builder.number(community.id as u32);
+                builder = builder.raw_str("\">+ Create Board</a>");
+
                 builder = builder.raw_str("</div>\n");
             }
         }
@@ -1479,9 +1612,16 @@ impl BoardsCommunity {
             false
         };
 
-        if !is_owner && !is_site_admin {
+        // Check if viewer is a community admin
+        let is_community_admin = if let Some(ref user) = viewer {
+            Self::is_community_admin(env, community.id, user)
+        } else {
+            false
+        };
+
+        if !is_owner && !is_community_admin && !is_site_admin {
             return MarkdownBuilder::new(env)
-                .warning("Only the community owner can access settings.")
+                .warning("Only community owners or admins can access settings.")
                 .build();
         }
 
@@ -1598,6 +1738,63 @@ impl BoardsCommunity {
             builder = builder.raw_str("/settings\" />\n");
             builder = builder.newline();
             builder = builder.raw_str("<a href=\"form:initiate_transfer\" class=\"soroban-action\">Initiate Transfer</a>\n");
+        }
+
+        // Admin Management Section
+        builder = builder.newline();
+        builder = builder.h2("Community Admins");
+        builder = builder.paragraph("Admins can manage community settings, boards, and members. Only the owner can remove admins.");
+
+        let admins = Self::get_admins(env.clone(), community.id);
+        if admins.is_empty() {
+            builder = builder.paragraph("No admins assigned yet.");
+        } else {
+            builder = builder.raw_str("<h3>Current Admins</h3>\n");
+            builder = builder.raw_str("<ul class=\"admin-list\">\n");
+            for i in 0..admins.len() {
+                if let Some(admin) = admins.get(i) {
+                    builder = builder.raw_str("<li><code>");
+                    builder = builder.text_string(&admin.to_string());
+                    builder = builder.raw_str("</code></li>\n");
+                }
+            }
+            builder = builder.raw_str("</ul>\n");
+        }
+
+        // Add admin form (owner and admins can add)
+        builder = builder.newline();
+        builder = builder.h3("Add Admin");
+        builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+        builder = builder.number(community.id as u32);
+        builder = builder.raw_str("\" />\n");
+        builder = builder.raw_str("<label>Wallet Address:</label>\n");
+        builder = builder.raw_str("<input type=\"text\" name=\"user\" placeholder=\"G...\" />\n");
+        builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+        builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+        builder = builder.raw_str("\" />\n");
+        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+        builder = builder.text_string(&community.name);
+        builder = builder.raw_str("/settings\" />\n");
+        builder = builder.newline();
+        builder = builder.form_link_to("Add Admin", "community", "add_admin");
+
+        // Remove admin form (owner only)
+        if is_owner && !admins.is_empty() {
+            builder = builder.newline();
+            builder = builder.h3("Remove Admin");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
+            builder = builder.number(community.id as u32);
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<label>Admin Address to Remove:</label>\n");
+            builder = builder.raw_str("<input type=\"text\" name=\"user\" placeholder=\"G...\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
+            builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
+            builder = builder.raw_str("\" />\n");
+            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
+            builder = builder.text_string(&community.name);
+            builder = builder.raw_str("/settings\" />\n");
+            builder = builder.newline();
+            builder = builder.form_link_to("Remove Admin", "community", "remove_admin");
         }
 
         // Danger Zone

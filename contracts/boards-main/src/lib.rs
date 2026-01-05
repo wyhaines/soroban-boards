@@ -18,6 +18,7 @@
 //! - boards-permissions: Access control logic
 
 use soroban_render_sdk::prelude::*;
+use soroban_render_sdk::router::Request;
 use soroban_sdk::{
     contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
     Val, Vec,
@@ -132,6 +133,16 @@ pub struct CanCreateResult {
     pub allowed: bool,
     pub is_bypass: bool,
     pub reason: String,
+}
+
+/// Minimal community info for board creation dropdown
+/// (matches boards-community CommunityInfo)
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityInfo {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
 }
 
 #[contract]
@@ -327,13 +338,18 @@ impl BoardsMain {
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "delete_community"), args);
     }
 
-    /// Proxy function to create a standalone board
+    /// Proxy function to create a board (standalone or in a community)
     ///
     /// Delegates to the single boards-board contract to create a new board entry.
+    /// If community is provided (non-empty), also adds the board to that community.
+    ///
+    /// NOTE: Parameter order matches form field DOM order (name, description, community, is_private, is_listed)
+    /// NOTE: Field is named 'community' not 'community_id' to avoid viewer's auto-conversion of _id fields to u64
     pub fn create_board(
         env: Env,
         name: String,
         description: String,
+        community: String,
         is_private: String,
         is_listed: String,
         caller: Address,
@@ -361,9 +377,28 @@ impl BoardsMain {
             description.into_val(&env),
             is_private.into_val(&env),
             is_listed.into_val(&env),
-            caller.into_val(&env),
+            caller.clone().into_val(&env),
         ]);
-        env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board"), create_args)
+        let board_id: u64 = env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board"), create_args);
+
+        // If community is specified, add board to community
+        let community_id_parsed = Self::parse_string_to_u64(&env, &community);
+        if let Some(cid) = community_id_parsed {
+            let community_contract: Address = env
+                .storage()
+                .instance()
+                .get(&MainKey::Community)
+                .expect("Community contract not initialized");
+
+            let add_args: Vec<Val> = Vec::from_array(&env, [
+                cid.into_val(&env),
+                board_id.into_val(&env),
+                caller.into_val(&env),
+            ]);
+            env.invoke_contract::<()>(&community_contract, &Symbol::new(&env, "add_board"), add_args);
+        }
+
+        board_id
     }
 
     /// Set community contract address (for upgrades - requires registry admin auth)
@@ -420,8 +455,9 @@ impl BoardsMain {
             .handle(b"/", |_| Self::render_home(&env, &viewer))
             // My Account page
             .or_handle(b"/account", |_| Self::render_account(&env, &viewer))
-            // Create board form
-            .or_handle(b"/create", |_| Self::render_create_board(&env, &viewer))
+            // Create board form (supports ?community=ID query param)
+            // Router automatically strips query params for matching, so /create matches /create?community=5
+            .or_handle(b"/create", |req| Self::render_create_board_from_request(&env, &req, &viewer))
             // Help page
             .or_handle(b"/help", |_| Self::render_help(&env, &viewer))
             // Crosspost form
@@ -857,8 +893,8 @@ impl BoardsMain {
         Self::render_footer_into(env, md).build()
     }
 
-    /// Render create board form
-    fn render_create_board(env: &Env, viewer: &Option<Address>) -> Bytes {
+    /// Render create board form using Router Request (new version with query param support)
+    fn render_create_board_from_request(env: &Env, req: &Request, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env, viewer)
             .newline()  // Blank line after nav-bar for markdown parsing
             .h1("Create New Board");
@@ -868,6 +904,14 @@ impl BoardsMain {
             return Self::render_footer_into(env, md).build();
         }
 
+        let user = viewer.as_ref().unwrap();
+
+        // Get pre-selected community from query param using Request accessor
+        let preselected_community = req.get_query_param_u64(b"community");
+
+        // Get communities user can manage
+        let communities = Self::get_manageable_communities_for_user(env, user);
+
         md = md
             .paragraph("Create a new discussion board.")
             .newline()
@@ -875,7 +919,39 @@ impl BoardsMain {
             .input("name", "Board name")
             .newline()
             .textarea_markdown("description", 3, "Board description")
-            .newline()
+            .newline();
+
+        // Community selection dropdown (if user has any manageable communities)
+        if !communities.is_empty() {
+            md = md.raw_str("<div class=\"form-group\">\n")
+                .raw_str("<label>Community (optional):</label>\n")
+                .raw_str("<select name=\"community\">\n")
+                .raw_str("<option value=\"none\">None (standalone board)</option>\n");
+
+            for i in 0..communities.len() {
+                if let Some(community) = communities.get(i) {
+                    let is_selected = preselected_community == Some(community.id);
+
+                    md = md.raw_str("<option value=\"");
+                    md = md.number(community.id as u32);
+                    md = md.raw_str("\"");
+                    if is_selected {
+                        md = md.raw_str(" selected");
+                    }
+                    md = md.raw_str(">");
+                    md = md.text_string(&community.display_name);
+                    md = md.raw_str("</option>\n");
+                }
+            }
+
+            md = md.raw_str("</select>\n</div>\n").newline();
+        } else {
+            // Hidden non-empty value for form consistency (viewer skips empty values)
+            // "none" will fail to parse as u64, resulting in None
+            md = md.raw_str("<input type=\"hidden\" name=\"community\" value=\"none\" />\n");
+        }
+
+        md = md
             // Private board checkbox
             .raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n")
             .raw_str("<label class=\"checkbox-label\"><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Make this board private</label>\n")
@@ -886,7 +962,7 @@ impl BoardsMain {
             .newline()
             // Caller address for the contract
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
-            .text_string(&viewer.as_ref().unwrap().to_string())
+            .text_string(&user.to_string())
             .raw_str("\" />\n")
             .newline()
             // Use form_link_to to target main contract (proxies to board creation)
@@ -1227,6 +1303,40 @@ impl BoardsMain {
         }
 
         (from_board, from_thread)
+    }
+
+    /// Parse string to u64, returns None for empty or invalid strings
+    fn parse_string_to_u64(env: &Env, s: &String) -> Option<u64> {
+        let len = s.len() as usize;
+        if len == 0 || len > 20 {
+            return None;
+        }
+
+        let mut buf = [0u8; 20];
+        s.copy_into_slice(&mut buf[..len]);
+        let s_str = core::str::from_utf8(&buf[..len]).unwrap_or("");
+
+        let _ = env; // silence unused warning
+        s_str.parse::<u64>().ok()
+    }
+
+    /// Get communities the user can manage (calls community contract)
+    fn get_manageable_communities_for_user(env: &Env, user: &Address) -> Vec<CommunityInfo> {
+        let community_contract: Option<Address> = env.storage().instance().get(&MainKey::Community);
+
+        if let Some(community) = community_contract {
+            let args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
+            env.try_invoke_contract::<Vec<CommunityInfo>, soroban_sdk::Error>(
+                &community,
+                &Symbol::new(env, "get_manageable_communities"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(Vec::new(env))
+        } else {
+            Vec::new(env)
+        }
     }
 
     // ========================================================================
