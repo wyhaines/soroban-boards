@@ -45,6 +45,8 @@ pub enum MainKey {
     Community,
     /// Config contract address (for branding/settings)
     Config,
+    /// Pages contract address (for static content pages)
+    Pages,
 }
 
 /// Chunk metadata for progressive loading
@@ -143,6 +145,22 @@ pub struct CommunityInfo {
     pub id: u64,
     pub name: String,
     pub display_name: String,
+}
+
+/// Page metadata (matches boards-pages PageMeta)
+#[contracttype]
+#[derive(Clone)]
+pub struct PageMeta {
+    pub id: u64,
+    pub slug: String,
+    pub name: String,
+    pub nav_label: String,
+    pub author: Address,
+    pub created_at: u64,
+    pub updated_at: u64,
+    pub is_visible: bool,
+    pub show_in_nav: bool,
+    pub nav_order: u32,
 }
 
 #[contract]
@@ -382,7 +400,7 @@ impl BoardsMain {
         let board_id: u64 = env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board"), create_args);
 
         // If community is specified, add board to community
-        let community_id_parsed = Self::parse_string_to_u64(&env, &community);
+        let community_id_parsed = string_to_u64(&env, &community);
         if let Some(cid) = community_id_parsed {
             let community_contract: Address = env
                 .storage()
@@ -422,6 +440,32 @@ impl BoardsMain {
         env.storage().instance().set(&MainKey::Community, &community);
     }
 
+    /// Get pages contract address
+    pub fn get_pages(env: Env) -> Option<Address> {
+        env.storage().instance().get(&MainKey::Pages)
+    }
+
+    /// Set pages contract address (for upgrades - requires registry admin auth)
+    pub fn set_pages(env: Env, pages: Address, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is a registry admin
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+
+        if !is_admin {
+            panic!("Only registry admin can set pages");
+        }
+
+        env.storage().instance().set(&MainKey::Pages, &pages);
+    }
+
     /// Get registry address
     pub fn get_registry(env: Env) -> Address {
         env.storage()
@@ -458,8 +502,11 @@ impl BoardsMain {
             // Create board form (supports ?community=ID query param)
             // Router automatically strips query params for matching, so /create matches /create?community=5
             .or_handle(b"/create", |req| Self::render_create_board_from_request(&env, &req, &viewer))
-            // Help page
-            .or_handle(b"/help", |_| Self::render_help(&env, &viewer))
+            // Help page - delegate to pages contract (shows /p/help)
+            .or_handle(b"/help", |_| {
+                // Delegate to pages contract with /help path
+                Self::delegate_to_pages(&env, &Some(String::from_str(&env, "/help")), &viewer)
+            })
             // Crosspost form
             .or_handle(b"/crosspost*", |_| Self::render_crosspost(&env, &path, &viewer))
             // Community routes - delegate to community contract
@@ -482,6 +529,9 @@ impl BoardsMain {
             .or_handle(b"/b/{id}/flags", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/b/{id}/invites", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            // Pages routes - delegate to pages contract
+            .or_handle(b"/p/*", |_| Self::delegate_to_pages(&env, &path, &viewer))
+            .or_handle(b"/p", |_| Self::delegate_to_pages(&env, &path, &viewer))
             // Board routes - delegate to board contract
             .or_handle(b"/b/{id}/*", |req| {
                 let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
@@ -517,6 +567,37 @@ impl BoardsMain {
     }
 
     // ========================================================================
+    // Include Functions (for {{include}} tags from other contracts)
+    // ========================================================================
+
+    /// Render navigation bar for inclusion via {{include}} tag.
+    /// Returns just the nav-bar div without meta tags or aliases.
+    ///
+    /// Usage: {{include contract=@main func="render_nav_include" viewer return_path="/b/1"}}
+    /// - viewer: tells the viewer to pass the current viewer address
+    /// - return_path: optional path for profile "Go Back" link (defaults to "/")
+    pub fn render_nav_include(
+        env: Env,
+        viewer: Option<Address>,
+        return_path: Option<String>,
+    ) -> Bytes {
+        Self::render_nav_content(&env, &viewer, return_path).build()
+    }
+
+    /// Render footer for inclusion via {{include}} tag.
+    /// Returns the footer div with content from config contract.
+    ///
+    /// Usage: {{include contract=@main func="render_footer_include"}}
+    pub fn render_footer_include(env: Env) -> Bytes {
+        let footer_include = Self::config_include(&env, b"footer_text");
+        MarkdownBuilder::new(&env)
+            .div_start("footer")
+            .raw(footer_include)
+            .div_end()
+            .build()
+    }
+
+    // ========================================================================
     // Navigation
     // ========================================================================
 
@@ -543,28 +624,174 @@ impl BoardsMain {
         }
     }
 
-    /// Render the navigation bar with profile link
+    /// Emit {{aliases ...}} tag with all known contract alias-to-ID mappings.
+    /// This allows content to use friendly names like `{{include contract=config func="logo"}}`
+    /// instead of full 56-character contract IDs.
+    fn emit_aliases(env: &Env) -> Bytes {
+        let mut result = Bytes::from_slice(env, b"{{aliases ");
+
+        // Helper closure to add an alias entry
+        let add_alias = |result: &mut Bytes, name: &[u8], addr: &Address| {
+            result.append(&Bytes::from_slice(env, name));
+            result.append(&Bytes::from_slice(env, b"="));
+            result.append(&Self::address_to_contract_id_string(env, addr));
+            result.append(&Bytes::from_slice(env, b" "));
+        };
+
+        // Add main contract (self)
+        let self_addr = env.current_contract_address();
+        add_alias(&mut result, b"main", &self_addr);
+
+        // Add stored contract references
+        if let Some(config) = env.storage().instance().get::<_, Address>(&MainKey::Config) {
+            add_alias(&mut result, b"config", &config);
+        }
+        if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+            add_alias(&mut result, b"registry", &registry);
+        }
+        if let Some(theme) = env.storage().instance().get::<_, Address>(&MainKey::Theme) {
+            add_alias(&mut result, b"theme", &theme);
+        }
+        if let Some(perms) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+            add_alias(&mut result, b"perms", &perms);
+        }
+        if let Some(content) = env.storage().instance().get::<_, Address>(&MainKey::Content) {
+            add_alias(&mut result, b"content", &content);
+        }
+        if let Some(admin) = env.storage().instance().get::<_, Address>(&MainKey::Admin) {
+            add_alias(&mut result, b"admin", &admin);
+        }
+        if let Some(community) = env.storage().instance().get::<_, Address>(&MainKey::Community) {
+            add_alias(&mut result, b"community", &community);
+        }
+        if let Some(pages) = env.storage().instance().get::<_, Address>(&MainKey::Pages) {
+            add_alias(&mut result, b"pages", &pages);
+        }
+
+        // Look up additional aliases from registry (board, voting, profile)
+        if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+            // Board contract
+            let board_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+            if let Some(board) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                board_args,
+            ).ok().and_then(|r| r.ok()).flatten() {
+                add_alias(&mut result, b"board", &board);
+            }
+
+            // Voting contract
+            let voting_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "voting").into_val(env)]);
+            if let Some(voting) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                voting_args,
+            ).ok().and_then(|r| r.ok()).flatten() {
+                add_alias(&mut result, b"voting", &voting);
+            }
+
+            // Profile contract
+            let profile_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
+            if let Some(profile) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                profile_args,
+            ).ok().and_then(|r| r.ok()).flatten() {
+                add_alias(&mut result, b"profile", &profile);
+            }
+        }
+
+        result.append(&Bytes::from_slice(env, b"}}"));
+        result
+    }
+
+    /// Render the navigation bar with profile link (for use within boards-main)
+    /// Includes meta tags and aliases at the start for document setup.
     fn render_nav<'a>(env: &'a Env, viewer: &Option<Address>) -> MarkdownBuilder<'a> {
+        // Meta tags for document head (favicon, title, theme-color)
+        let meta_include = Self::config_include(env, b"meta");
+
+        // Emit aliases for include resolution
+        let aliases_tag = Self::emit_aliases(env);
+
+        // Start with meta and aliases, then add nav content
+        let mut md = MarkdownBuilder::new(env)
+            .raw(meta_include)
+            .raw(aliases_tag);
+
+        // Build return path for profile links: {CONTRACT_ID}:/
+        let self_addr = env.current_contract_address();
+        let self_id_str = Self::address_to_contract_id_string(env, &self_addr);
+        let mut return_path_bytes = self_id_str;
+        return_path_bytes.append(&Bytes::from_slice(env, b":/"));
+
+        // Convert to String for render_nav_content
+        let return_path = Self::bytes_to_string(env, &return_path_bytes);
+
+        // Append the nav content
+        md = Self::render_nav_content_into(env, md, viewer, Some(return_path));
+        md
+    }
+
+    /// Core navigation bar content (shared between render_nav and render_nav_include)
+    /// Returns just the nav-bar div without meta tags or aliases.
+    fn render_nav_content<'a>(
+        env: &'a Env,
+        viewer: &Option<Address>,
+        return_path: Option<String>,
+    ) -> MarkdownBuilder<'a> {
+        Self::render_nav_content_into(env, MarkdownBuilder::new(env), viewer, return_path)
+    }
+
+    /// Build nav content into an existing MarkdownBuilder
+    fn render_nav_content_into<'a>(
+        env: &'a Env,
+        md: MarkdownBuilder<'a>,
+        viewer: &Option<Address>,
+        return_path: Option<String>,
+    ) -> MarkdownBuilder<'a> {
         let registry: Address = env
             .storage()
             .instance()
             .get(&MainKey::Registry)
             .expect("Not initialized");
 
-        // Meta tags for document head (favicon, title, theme-color)
-        // Included at start so viewer can extract and apply them
-        let meta_include = Self::config_include(env, b"meta");
-
-        // Site name loaded via include for progressive loading
         let site_name_include = Self::config_include(env, b"site_name");
-        let mut md = MarkdownBuilder::new(env)
-            .raw(meta_include)  // Meta tags first (viewer extracts and removes)
+        let mut md = md
             .div_start("nav-bar")
             .raw_str("<a href=\"render:/\">")
             .raw(site_name_include)
             .raw_str("</a>")
-            .render_link("Communities", "/communities")
-            .render_link("Help", "/help");
+            .render_link("Communities", "/communities");
+
+        // Add dynamic page links from pages contract
+        let pages_opt: Option<Address> = env.storage().instance().get(&MainKey::Pages);
+        if let Some(pages_addr) = pages_opt {
+            let nav_pages: Vec<PageMeta> = env
+                .try_invoke_contract::<Vec<PageMeta>, soroban_sdk::Error>(
+                    &pages_addr,
+                    &Symbol::new(env, "get_nav_pages"),
+                    Vec::new(env),
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or_else(|| Vec::new(env));
+
+            for page in nav_pages.iter() {
+                let label = if page.nav_label.len() > 0 {
+                    page.nav_label.clone()
+                } else {
+                    page.name.clone()
+                };
+                md = md.raw_str("<a href=\"render:/p/")
+                    .text_string(&page.slug)
+                    .raw_str("\">")
+                    .text_string(&label)
+                    .raw_str("</a>");
+            }
+        } else {
+            md = md.render_link("Help", "/help");
+        }
 
         // Add My Account link for logged-in users
         if viewer.is_some() {
@@ -580,19 +807,19 @@ impl BoardsMain {
             alias_args,
         );
 
+        // Build return path bytes for profile link
+        let return_path_bytes = match &return_path {
+            Some(path) => Self::string_to_bytes(env, path),
+            None => {
+                // Default to @main:/
+                Bytes::from_slice(env, b"@main:/")
+            }
+        };
+
         if let Some(profile_addr) = profile_opt {
-            // Build return path using OUR contract ID (not @registry alias)
-            // This ensures "Go Back" returns to this contract correctly
-            let self_addr = env.current_contract_address();
-            let self_id_str = Self::address_to_contract_id_string(env, &self_addr);
-
-            // Format: {CONTRACT_ID}:/
-            let mut return_path = self_id_str;
-            return_path.append(&Bytes::from_slice(env, b":/"));
-
             let args: Vec<Val> = Vec::from_array(env, [
                 viewer.into_val(env),
-                return_path.into_val(env),
+                return_path_bytes.into_val(env),
             ]);
             let profile_link: Bytes = env.invoke_contract(
                 &profile_addr,
@@ -601,20 +828,31 @@ impl BoardsMain {
             );
             md = md.raw(profile_link);
         } else if viewer.is_some() {
-            // No profile contract registered - show a placeholder link
-            // Build return path for when profile contract is eventually registered
-            let self_addr = env.current_contract_address();
-            let self_id_str = Self::address_to_contract_id_string(env, &self_addr);
-            let mut return_path = self_id_str;
-            return_path.append(&Bytes::from_slice(env, b":/"));
-
             md = md
                 .raw_str("<a href=\"render:@profile:/register/from/")
-                .raw(return_path)
+                .raw(return_path_bytes)
                 .raw_str("\">Create Profile</a>");
         }
 
         md.div_end()
+    }
+
+    /// Convert Bytes to String
+    fn bytes_to_string(env: &Env, bytes: &Bytes) -> String {
+        let len = bytes.len() as usize;
+        let mut buf = [0u8; 128];
+        let copy_len = core::cmp::min(len, 128);
+        bytes.copy_into_slice(&mut buf[..copy_len]);
+        String::from_str(env, core::str::from_utf8(&buf[..copy_len]).unwrap_or(""))
+    }
+
+    /// Convert String to Bytes
+    fn string_to_bytes(env: &Env, s: &String) -> Bytes {
+        let len = s.len() as usize;
+        let mut buf = [0u8; 128];
+        let copy_len = core::cmp::min(len, 128);
+        s.copy_into_slice(&mut buf[..copy_len]);
+        Bytes::from_slice(env, &buf[..copy_len])
     }
 
     /// Append footer to builder - uses include for progressive loading
@@ -974,28 +1212,6 @@ impl BoardsMain {
         Self::render_footer_into(env, md).build()
     }
 
-    /// Render help page
-    fn render_help(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let md = Self::render_nav(env, viewer)
-            .newline()  // Blank line after nav-bar for markdown parsing
-            .raw_str("<h1>Help</h1>\n")
-            .raw_str("<h2>What is Soroban Boards?</h2>\n")
-            .paragraph("Soroban Boards is a decentralized forum system running on Stellar's Soroban smart contract platform. All content is stored on-chain, and the UI is rendered directly from the smart contracts.")
-            .raw_str("<h2>Features</h2>\n")
-            .list_item("Create discussion boards")
-            .list_item("Post threads and replies")
-            .list_item("Nested comment threads")
-            .list_item("Role-based permissions (Owner, Admin, Moderator, Member)")
-            .list_item("Content moderation (flagging, banning)")
-            .list_item("Progressive loading for large threads")
-            .raw_str("<h2>How to Use</h2>\n")
-            .list_item("Connect your Stellar wallet")
-            .list_item("Browse existing boards or create a new one")
-            .list_item("Create threads and reply to discussions")
-            .list_item("Flag inappropriate content");
-        Self::render_footer_into(env, md).build()
-    }
-
     /// Render My Account page
     fn render_account(env: &Env, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env, viewer)
@@ -1305,21 +1521,6 @@ impl BoardsMain {
         (from_board, from_thread)
     }
 
-    /// Parse string to u64, returns None for empty or invalid strings
-    fn parse_string_to_u64(env: &Env, s: &String) -> Option<u64> {
-        let len = s.len() as usize;
-        if len == 0 || len > 20 {
-            return None;
-        }
-
-        let mut buf = [0u8; 20];
-        s.copy_into_slice(&mut buf[..len]);
-        let s_str = core::str::from_utf8(&buf[..len]).unwrap_or("");
-
-        let _ = env; // silence unused warning
-        s_str.parse::<u64>().ok()
-    }
-
     /// Get communities the user can manage (calls community contract)
     fn get_manageable_communities_for_user(env: &Env, user: &Address) -> Vec<CommunityInfo> {
         let community_contract: Option<Address> = env.storage().instance().get(&MainKey::Community);
@@ -1392,6 +1593,68 @@ impl BoardsMain {
             .newline()  // Blank line after nav-bar for markdown parsing
             .raw(content);
         Self::render_footer_into(env, md).build()
+    }
+
+    /// Delegate rendering to the pages contract
+    fn delegate_to_pages(env: &Env, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let pages_opt: Option<Address> = env.storage().instance().get(&MainKey::Pages);
+
+        let Some(pages) = pages_opt else {
+            // Pages contract not configured - show message
+            return Self::wrap_with_nav_footer(
+                env,
+                viewer,
+                MarkdownBuilder::new(env)
+                    .h1("Pages Unavailable")
+                    .paragraph("The pages feature is not configured.")
+                    .render_link("Back to Home", "/")
+                    .build(),
+            );
+        };
+
+        // Strip "/p" prefix, pass rest to pages contract
+        let pages_path = Self::strip_pages_prefix(env, path);
+
+        let args: Vec<Val> = Vec::from_array(env, [
+            pages_path.into_val(env),
+            viewer.into_val(env),
+        ]);
+        let content: Bytes = env.invoke_contract(&pages, &Symbol::new(env, "render"), args);
+
+        // Wrap with nav and footer for consistent UI
+        Self::wrap_with_nav_footer(env, viewer, content)
+    }
+
+    /// Strip the `/p` prefix from a path to get relative path for pages contract
+    fn strip_pages_prefix(env: &Env, path: &Option<String>) -> Option<String> {
+        let Some(p) = path else {
+            return Some(String::from_str(env, "/"));
+        };
+
+        let path_len = p.len() as usize;
+        if path_len == 0 {
+            return Some(String::from_str(env, "/"));
+        }
+
+        // Copy path to buffer for processing
+        let mut path_buf = [0u8; 256];
+        let copy_len = if path_len > 256 { 256 } else { path_len };
+        p.copy_into_slice(&mut path_buf[0..copy_len]);
+
+        // Check if path starts with "/p"
+        if copy_len >= 2 && &path_buf[0..2] == b"/p" {
+            if copy_len == 2 {
+                // Exact match "/p", return "/"
+                return Some(String::from_str(env, "/"));
+            } else if path_buf[2] == b'/' {
+                // Path has more after "/p/", return the rest (starting with /)
+                let rest_slice = &path_buf[2..copy_len];
+                return Some(String::from_bytes(env, rest_slice));
+            }
+        }
+
+        // Fallback - return root
+        Some(String::from_str(env, "/"))
     }
 
     /// Delegate rendering to the admin contract
@@ -1477,10 +1740,10 @@ impl BoardsMain {
         let prefix_start = b"/b/";
         prefix[0..3].copy_from_slice(prefix_start);
 
-        // Convert board_id to string
-        let mut id_bytes = [0u8; 20];
-        let id_len = Self::u64_to_bytes_buf(board_id, &mut id_bytes);
-        prefix[3..3 + id_len].copy_from_slice(&id_bytes[0..id_len]);
+        // Convert board_id to string using SDK function
+        let id_bytes = u64_to_bytes(env, board_id);
+        let id_len = id_bytes.len() as usize;
+        id_bytes.copy_into_slice(&mut prefix[3..3 + id_len]);
         let prefix_len = 3 + id_len;
 
         // Copy path to buffer for comparison
@@ -1502,30 +1765,6 @@ impl BoardsMain {
 
         // Fallback - return root
         Some(String::from_str(env, "/"))
-    }
-
-    /// Convert u64 to byte slice, return number of bytes written
-    fn u64_to_bytes_buf(mut n: u64, buf: &mut [u8; 20]) -> usize {
-        if n == 0 {
-            buf[0] = b'0';
-            return 1;
-        }
-
-        let mut temp = [0u8; 20];
-        let mut len = 0;
-
-        while n > 0 {
-            temp[len] = b'0' + (n % 10) as u8;
-            n /= 10;
-            len += 1;
-        }
-
-        // Reverse into buf
-        for i in 0..len {
-            buf[i] = temp[len - 1 - i];
-        }
-
-        len
     }
 
     /// Format a Unix timestamp as a human-readable date string.

@@ -1356,7 +1356,14 @@ impl BoardsCommunity {
     }
 
     /// Render a list of boards as cards (fetches metadata from board contracts)
-    fn render_board_cards<'a>(env: &'a Env, mut builder: MarkdownBuilder<'a>, board_ids: &Vec<u64>) -> MarkdownBuilder<'a> {
+    /// Admins and board owners can see hidden boards with a "hidden" badge
+    fn render_board_cards<'a>(
+        env: &'a Env,
+        mut builder: MarkdownBuilder<'a>,
+        board_ids: &Vec<u64>,
+        viewer: &Option<Address>,
+        community: &CommunityMeta,
+    ) -> MarkdownBuilder<'a> {
         if board_ids.is_empty() {
             return builder.paragraph("No boards in this community yet.");
         }
@@ -1367,6 +1374,24 @@ impl BoardsCommunity {
             None => {
                 return builder.paragraph("Registry not configured.");
             }
+        };
+
+        // Check if viewer is a community owner/admin or registry admin
+        let viewer_is_community_admin = if let Some(ref v) = viewer {
+            Self::is_owner_or_admin(env, community, v)
+        } else {
+            false
+        };
+
+        let viewer_is_registry_admin = if let Some(ref v) = viewer {
+            let admin_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "is_admin"),
+                admin_args,
+            ).ok().and_then(|r| r.ok()).unwrap_or(false)
+        } else {
+            false
         };
 
         // Get single board contract via registry alias
@@ -1387,33 +1412,43 @@ impl BoardsCommunity {
         builder = builder.raw_str("<div class=\"board-list\">\n");
 
         for board_id in board_ids.iter() {
-            // Get config from board contract (now requires board_id)
-            let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+            // Get board metadata (includes is_listed and thread_count)
+            let board_opt: Option<BoardMeta> = env.try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
                 &board_contract,
-                &Symbol::new(env, "get_config"),
+                &Symbol::new(env, "get_board"),
                 Vec::from_array(env, [board_id.into_val(env)]),
             ).ok().and_then(|r| r.ok());
 
-            // Get thread count from board contract (now requires board_id)
-            let thread_count: u64 = env.try_invoke_contract::<u64, soroban_sdk::Error>(
-                &board_contract,
-                &Symbol::new(env, "thread_count"),
-                Vec::from_array(env, [board_id.into_val(env)]),
-            ).ok().and_then(|r| r.ok()).unwrap_or(0);
+            if let Some(board) = board_opt {
+                // Check if viewer can see hidden boards
+                let viewer_is_board_owner = if let Some(ref v) = viewer {
+                    *v == board.creator
+                } else {
+                    false
+                };
 
-            if let Some(config) = config_opt {
+                let can_see_hidden = viewer_is_community_admin || viewer_is_registry_admin || viewer_is_board_owner;
+
+                // Skip hidden boards unless viewer has permission
+                if !board.is_listed && !can_see_hidden {
+                    continue;
+                }
+
                 // Board card with link wrapper - use render:/b/ to go through main contract
                 builder = builder.raw_str("<a href=\"render:/b/")
                     .number(board_id as u32)
                     .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
-                    .text_string(&config.name)
+                    .text_string(&board.name)
                     .raw_str("</span><span class=\"board-card-desc\">")
-                    .text_string(&config.description)
+                    .text_string(&board.description)
                     .raw_str("</span><span class=\"board-card-meta\">")
-                    .number(thread_count as u32)
+                    .number(board.thread_count as u32)
                     .text(" threads");
-                if config.is_private {
+                if board.is_private {
                     builder = builder.raw_str(" <span class=\"badge\">private</span>");
+                }
+                if !board.is_listed {
+                    builder = builder.raw_str(" <span class=\"badge\">hidden</span>");
                 }
                 builder = builder.raw_str("</span></a>\n");
             }
@@ -1513,7 +1548,7 @@ impl BoardsCommunity {
         builder = builder.newline();
         builder = builder.h2("Boards");
         let board_ids = Self::get_community_boards(env.clone(), community.id);
-        builder = Self::render_board_cards(env, builder, &board_ids);
+        builder = Self::render_board_cards(env, builder, &board_ids, &viewer, &community);
 
         // Rules if set
         if let Some(rules) = Self::get_rules(env.clone(), community.id) {
@@ -1529,7 +1564,7 @@ impl BoardsCommunity {
         builder.build()
     }
 
-    fn render_community_boards(env: &Env, name: &String, _viewer: Option<Address>) -> Bytes {
+    fn render_community_boards(env: &Env, name: &String, viewer: Option<Address>) -> Bytes {
         let community = match Self::get_community_by_name(env.clone(), name.clone()) {
             Some(c) => c,
             None => {
@@ -1551,7 +1586,7 @@ impl BoardsCommunity {
         builder = builder.h2("Boards");
 
         let board_ids = Self::get_community_boards(env.clone(), community.id);
-        builder = Self::render_board_cards(env, builder, &board_ids);
+        builder = Self::render_board_cards(env, builder, &board_ids, &viewer, &community);
 
         builder.build()
     }

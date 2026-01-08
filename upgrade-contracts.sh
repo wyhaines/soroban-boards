@@ -45,6 +45,7 @@ UPGRADE_COMMUNITY=false
 UPGRADE_VOTING=false
 UPGRADE_CONFIG=false
 UPGRADE_BOARDS=false
+UPGRADE_PAGES=false
 
 if [ $# -gt 0 ]; then
     UPGRADE_ALL=false
@@ -60,10 +61,11 @@ if [ $# -gt 0 ]; then
             voting)      UPGRADE_VOTING=true ;;
             config)      UPGRADE_CONFIG=true ;;
             board|boards) UPGRADE_BOARDS=true ;;
+            pages)       UPGRADE_PAGES=true ;;
             all)         UPGRADE_ALL=true ;;
             *)
                 echo -e "${RED}Unknown contract: $arg${NC}"
-                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, config, board, all"
+                echo "Valid options: registry, permissions, content, theme, admin, main, community, voting, config, board, pages, all"
                 exit 1
                 ;;
         esac
@@ -81,6 +83,7 @@ if [ "$UPGRADE_ALL" = true ]; then
     UPGRADE_VOTING=true
     UPGRADE_CONFIG=true
     UPGRADE_BOARDS=true
+    UPGRADE_PAGES=true
 fi
 
 # Build contracts
@@ -496,6 +499,59 @@ if [ "$UPGRADE_BOARDS" = true ]; then
     echo ""
 fi
 
+# Upgrade or Deploy Pages contract
+if [ "$UPGRADE_PAGES" = true ]; then
+    echo -e "${GREEN}=== Pages Contract ===${NC}"
+
+    # Check if PAGES_ID exists in env
+    if [ -z "$PAGES_ID" ]; then
+        echo -e "${YELLOW}Pages contract not found - deploying new...${NC}"
+        PAGES_ID=$(deploy_contract "boards_pages")
+
+        # Initialize Pages
+        echo -e "${YELLOW}Initializing Pages...${NC}"
+        stellar contract invoke \
+            --id "$PAGES_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- init \
+            --registry "$REGISTRY_ID" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Pages initialized (with Help page as seed content)${NC}"
+
+        # Register with registry using generic set_contract
+        echo -e "${YELLOW}Registering Pages with Registry...${NC}"
+        stellar contract invoke \
+            --id "$REGISTRY_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_contract \
+            --alias pages \
+            --address "$PAGES_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Pages registered as @pages${NC}"
+
+        # Update Main contract with pages address
+        echo -e "${YELLOW}Setting Pages in Main contract...${NC}"
+        stellar contract invoke \
+            --id "$MAIN_ID" \
+            --source $DEPLOYER \
+            --network $NETWORK \
+            -- set_pages \
+            --pages "$PAGES_ID" \
+            --caller "$DEPLOYER_ADDR" 2>&1 | grep -v "^ℹ" || true
+        echo -e "${GREEN}Main updated with Pages${NC}"
+
+        # Update env file
+        echo "PAGES_ID=$PAGES_ID" >> "$ENV_FILE"
+    else
+        echo -e "Upgrading existing Pages ($PAGES_ID)"
+        PAGES_HASH=$(install_wasm "boards_pages")
+        echo -e "WASM hash: ${BLUE}$PAGES_HASH${NC}"
+        upgrade_contract_via_registry "Pages" "$PAGES_ID" "$PAGES_HASH"
+    fi
+    echo ""
+fi
+
 echo -e "${GREEN}=== Upgrade Complete! ===${NC}"
 echo ""
 echo "Contract addresses:"
@@ -516,6 +572,9 @@ if [ -n "$VOTING_ID" ]; then
 fi
 if [ -n "$CONFIG_ID" ]; then
     echo "  Config:       $CONFIG_ID"
+fi
+if [ -n "$PAGES_ID" ]; then
+    echo "  Pages:        $PAGES_ID"
 fi
 echo ""
 echo "All existing data has been preserved."

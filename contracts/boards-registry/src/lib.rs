@@ -20,7 +20,7 @@
 //! - Content storage → boards-content
 //! - Permissions/roles → boards-permissions
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec};
 
 // Note: Board contract mapping (BoardContract, BoardContractCount, BoardWasmHash) removed.
 // Boards are now stored in a single boards-board contract, accessed via the "board" alias.
@@ -155,6 +155,70 @@ impl BoardsRegistry {
     /// Get a contract address by alias (convenience wrapper).
     pub fn get_contract(env: Env, alias: Symbol) -> Option<Address> {
         Self::get_contract_by_alias(env, alias)
+    }
+
+    /// Render `{{aliases ...}}` tag with all registered contract aliases.
+    ///
+    /// This generates a tag that soroban-render viewers parse to enable
+    /// friendly alias names in `{{include contract=alias ...}}` directives.
+    ///
+    /// Other contracts can call this cross-contract to get alias definitions:
+    /// ```rust,ignore
+    /// let aliases_tag: Bytes = env.invoke_contract(
+    ///     &registry,
+    ///     &Symbol::new(env, "render_aliases"),
+    ///     Vec::new(env),
+    /// );
+    /// ```
+    ///
+    /// Returns Bytes containing `{{aliases registry=C... perms=C... theme=C... ...}}`
+    pub fn render_aliases(env: Env) -> Bytes {
+        let mut result = Bytes::from_slice(&env, b"{{aliases ");
+
+        // Add registry itself first
+        let self_addr = env.current_contract_address();
+        result.append(&Bytes::from_slice(&env, b"registry="));
+        result.append(&Self::address_to_bytes(&env, &self_addr));
+        result.append(&Bytes::from_slice(&env, b" "));
+
+        // Known aliases with their string representations
+        // (alias_name_bytes, alias_symbol_str)
+        const ALIASES: &[(&[u8], &str)] = &[
+            (b"main", "main"),
+            (b"theme", "theme"),
+            (b"admin", "admin"),
+            (b"perms", "perms"),
+            (b"content", "content"),
+            (b"community", "community"),
+            (b"config", "config"),
+            (b"pages", "pages"),
+            (b"board", "board"),
+            (b"voting", "voting"),
+            (b"profile", "profile"),
+        ];
+
+        for (alias_bytes, alias_str) in ALIASES {
+            let alias = Symbol::new(&env, alias_str);
+            if let Some(addr) = env.storage().instance().get(&RegistryKey::Contract(alias)) {
+                result.append(&Bytes::from_slice(&env, alias_bytes));
+                result.append(&Bytes::from_slice(&env, b"="));
+                result.append(&Self::address_to_bytes(&env, &addr));
+                result.append(&Bytes::from_slice(&env, b" "));
+            }
+        }
+
+        result.append(&Bytes::from_slice(&env, b"}}"));
+        result
+    }
+
+    /// Convert an Address to its contract ID string as Bytes
+    fn address_to_bytes(env: &Env, addr: &Address) -> Bytes {
+        let addr_str = addr.to_string();
+        let len = addr_str.len() as usize;
+        let mut buf = [0u8; 56]; // Contract IDs are 56 chars
+        let copy_len = core::cmp::min(len, 56);
+        addr_str.copy_into_slice(&mut buf[..copy_len]);
+        Bytes::from_slice(env, &buf[..copy_len])
     }
 
     /// Register or update a contract address by alias (admin only).

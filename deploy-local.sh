@@ -88,6 +88,7 @@ VOTING_ID=$(deploy_contract "boards_voting")
 CONFIG_ID=$(deploy_contract "boards_config")
 MAIN_ID=$(deploy_contract "boards_main")
 BOARD_ID=$(deploy_contract "boards_board")
+PAGES_ID=$(deploy_contract "boards_pages")
 
 # Save contract IDs to file (board contracts are auto-deployed)
 echo ""
@@ -114,6 +115,7 @@ COMMUNITY_ID=$COMMUNITY_ID
 VOTING_ID=$VOTING_ID
 CONFIG_ID=$CONFIG_ID
 BOARD_ID=$BOARD_ID
+PAGES_ID=$PAGES_ID
 EOF
 
 echo -e "${GREEN}Contract IDs saved to .deployed-contracts.env${NC}"
@@ -263,6 +265,18 @@ stellar contract invoke \
 
 echo -e "${GREEN}Main initialized${NC}"
 
+# Initialize Pages (needs registry)
+echo ""
+echo -e "${GREEN}=== Initializing Pages ===${NC}"
+stellar contract invoke \
+    --id $PAGES_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- init \
+    --registry $REGISTRY_ID
+
+echo -e "${GREEN}Pages initialized (with Help page as seed content)${NC}"
+
 # Register main contract with registry as "main" alias
 echo ""
 echo -e "${GREEN}=== Registering Main with Registry ===${NC}"
@@ -333,6 +347,33 @@ stellar contract invoke \
 
 echo -e "${GREEN}Board registered as @board${NC}"
 
+# Register pages contract with registry as "pages" alias
+echo ""
+echo -e "${GREEN}=== Registering Pages with Registry ===${NC}"
+stellar contract invoke \
+    --id $REGISTRY_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_contract \
+    --alias pages \
+    --address $PAGES_ID \
+    --caller $DEPLOYER_ADDR
+
+echo -e "${GREEN}Pages registered as @pages${NC}"
+
+# Set pages in main contract
+echo ""
+echo -e "${GREEN}=== Setting Pages in Main Contract ===${NC}"
+stellar contract invoke \
+    --id $MAIN_ID \
+    --source $DEPLOYER \
+    --network $NETWORK \
+    -- set_pages \
+    --pages $PAGES_ID \
+    --caller $DEPLOYER_ADDR
+
+echo -e "${GREEN}Pages set in Main${NC}"
+
 # Create first board via board contract's create_board function
 echo ""
 echo -e "${GREEN}=== Creating First Board ===${NC}"
@@ -395,6 +436,7 @@ echo "  Community:    $COMMUNITY_ID"
 echo "  Voting:       $VOTING_ID"
 echo "  Config:       $CONFIG_ID"
 echo "  Board:        $BOARD_ID (single contract for all boards)"
+echo "  Pages:        $PAGES_ID"
 echo ""
 echo "To interact with the contracts:"
 echo "  source .deployed-contracts.env"

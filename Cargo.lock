@@ -239,6 +239,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "boards-pages"
+version = "0.1.0"
+dependencies = [
+ "soroban-chonk",
+ "soroban-render-sdk",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "boards-permissions"
 version = "0.1.0"
 dependencies = [
@@ -1351,7 +1360,7 @@ dependencies = [
 
 [[package]]
 name = "soroban-render-sdk"
-version = "0.1.3"
+version = "0.1.4"
 dependencies = [
  "soroban-sdk",
 ]

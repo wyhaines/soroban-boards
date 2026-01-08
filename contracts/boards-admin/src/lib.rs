@@ -392,10 +392,15 @@ impl BoardsAdmin {
             .or_default(|_| Self::render_not_found(&env))
     }
 
-    /// Render the navigation bar
+    /// Render the navigation bar (uses config include for site name)
     fn render_nav(env: &Env, board_id: u64) -> MarkdownBuilder<'_> {
+        let aliases = Self::fetch_aliases(env);
+        let site_name_include = Self::config_include(env, b"site_name");
         MarkdownBuilder::new(env)
-            .render_link("Soroban Boards", "/")
+            .raw(aliases)  // Emit aliases for include resolution
+            .raw_str("<a href=\"render:/\">")
+            .raw(site_name_include)
+            .raw_str("</a>")
             .text(" | ")
             .raw_str("[Back to Board](render:/b/")
             .number(board_id as u32)
@@ -406,8 +411,13 @@ impl BoardsAdmin {
 
     /// Render the navigation bar for sub-pages (includes Back to Settings link)
     fn render_nav_subpage(env: &Env, board_id: u64) -> MarkdownBuilder<'_> {
+        let aliases = Self::fetch_aliases(env);
+        let site_name_include = Self::config_include(env, b"site_name");
         MarkdownBuilder::new(env)
-            .render_link("Soroban Boards", "/")
+            .raw(aliases)  // Emit aliases for include resolution
+            .raw_str("<a href=\"render:/\">")
+            .raw(site_name_include)
+            .raw_str("</a>")
             .text(" | ")
             .raw_str("[Back to Board](render:/b/")
             .number(board_id as u32)
@@ -451,18 +461,44 @@ impl BoardsAdmin {
         }
     }
 
-    /// Append footer to builder - uses include for configured footer text
-    fn render_footer_into<'a>(env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
-        let footer_include = Self::config_include(env, b"footer_text");
-        md.div_start("footer")
-            .raw(footer_include)
-            .div_end()
+    /// Fetch `{{aliases ...}}` tag from registry via cross-contract call.
+    ///
+    /// This enables includes using aliases like `{{include contract=config func="..."}}`
+    /// in rendered content. Call this early in render functions and prepend to output.
+    fn fetch_aliases(env: &Env) -> Bytes {
+        let registry_opt: Option<Address> = env.storage().instance().get(&AdminKey::Registry);
+
+        let Some(registry) = registry_opt else {
+            return Bytes::new(env);
+        };
+
+        // Call registry's render_aliases function
+        let args: Vec<Val> = Vec::new(env);
+        env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "render_aliases"),
+            args,
+        )
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(Bytes::new(env))
+    }
+
+    /// Append footer to builder via include from main contract.
+    /// Uses {{include}} tag for deferred loading and consistency with other contracts.
+    fn render_footer_into<'a>(_env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
+        md.raw_str("{{include contract=@main func=\"render_footer_include\"}}")
     }
 
     /// Render not found page
     fn render_not_found(env: &Env) -> Bytes {
+        let aliases = Self::fetch_aliases(env);
+        let site_name_include = Self::config_include(env, b"site_name");
         MarkdownBuilder::new(env)
-            .render_link("Soroban Boards", "/")
+            .raw(aliases)
+            .raw_str("<a href=\"render:/\">")
+            .raw(site_name_include)
+            .raw_str("</a>")
             .newline()
             .hr()
             .h1("Page Not Found")
@@ -1923,7 +1959,9 @@ impl BoardsAdmin {
 
     /// Navigation for site settings pages
     fn render_settings_nav(env: &Env) -> MarkdownBuilder<'_> {
+        let aliases = Self::fetch_aliases(env);
         MarkdownBuilder::new(env)
+            .raw(aliases)  // Emit aliases for include resolution
             .render_link("Soroban Boards", "/")
             .text(" | ")
             .render_link("Admin", "/admin/registry")
@@ -1980,6 +2018,12 @@ impl BoardsAdmin {
             .raw_str("<div class=\"card\">\n")
             .raw_str("<h3><a href=\"render:/admin/settings/operational\">Operational Settings</a></h3>\n")
             .raw_str("<p>Reply depth, chunk sizes, edit windows, and name length limits.</p>\n")
+            .raw_str("</div>\n")
+            .newline()
+            // Pages card
+            .raw_str("<div class=\"card\">\n")
+            .raw_str("<h3><a href=\"render:/p/admin\">Manage Pages</a></h3>\n")
+            .raw_str("<p>Create and edit static content pages like Help, About, and custom pages.</p>\n")
             .raw_str("</div>\n")
             .newline()
             .render_link("← Back to Registry Admin", "/admin/registry");
@@ -2086,7 +2130,7 @@ impl BoardsAdmin {
             // Footer Text form
             .raw_str("<div data-form>\n\n")
             .h3("Footer Text")
-            .textarea_markdown_with_value_string("footer_text", 3, "Custom footer text", &branding.footer_text)
+            .textarea_markdown_with_value_noparse_string("footer_text", 3, "Custom footer text", &branding.footer_text)
             .newline()
             .form_link_to("Update Footer Text", "admin", "set_footer_text")
             .raw_str("\n</div>\n\n")

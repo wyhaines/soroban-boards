@@ -964,6 +964,35 @@ impl BoardsBoard {
         new_count
     }
 
+    /// Set thread count (admin function for correcting counts)
+    pub fn set_thread_count(env: Env, board_id: u64, count: u64, caller: Address) {
+        caller.require_auth();
+
+        let meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Allow board creator or registry admin to set thread count
+        let is_registry_admin = if let Some(registry) = env.storage().instance().get::<_, Address>(&BoardKey::Registry) {
+            let args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+            env.invoke_contract::<bool>(&registry, &Symbol::new(&env, "is_admin"), args)
+        } else {
+            false
+        };
+
+        if meta.creator != caller && !is_registry_admin {
+            panic!("Only board creator or registry admin can set thread count");
+        }
+
+        env.storage().persistent().set(&BoardKey::BoardThreadCount(board_id), &count);
+
+        let mut updated_meta = meta;
+        updated_meta.thread_count = count;
+        env.storage().persistent().set(&BoardKey::Board(board_id), &updated_meta);
+    }
+
     /// Get reply chunk size for waterfall loading
     pub fn get_chunk_size(env: Env, board_id: u64) -> u32 {
         let config: BoardConfig = env
@@ -1872,41 +1901,20 @@ impl BoardsBoard {
             .or_default(|_| Self::render_board(&env, board_id, &viewer))
     }
 
-    /// Render navigation bar
-    fn render_nav<'a>(env: &'a Env, board_id: u64, viewer: &Option<Address>) -> MarkdownBuilder<'a> {
-        let mut md = MarkdownBuilder::new(env)
-            .div_start("nav-bar")
-            .render_link("Soroban Boards", "/")
-            .render_link("Help", "/help");
+    /// Render navigation bar via include from main contract.
+    /// Uses {{include}} tag for deferred loading - no cross-contract call overhead.
+    fn render_nav<'a>(env: &'a Env, board_id: u64, _viewer: &Option<Address>) -> MarkdownBuilder<'a> {
+        let aliases = Self::fetch_aliases(env);
 
-        // Add profile link if profile contract is available
-        if let Some(profile_addr) = Self::get_profile_contract(env) {
-            // Build return path to current board: @main:/b/{board_id}
-            let mut return_path = Bytes::from_slice(env, b"@main:/b/");
-            return_path.append(&u64_to_bytes(env, board_id));
+        // Build include tag with return path for this board
+        // Format: {{include contract=@main func="render_nav_include" viewer return_path="@main:/b/{id}"}}
+        let mut include_tag = Bytes::from_slice(env, b"{{include contract=@main func=\"render_nav_include\" viewer return_path=\"@main:/b/");
+        include_tag.append(&u64_to_bytes(env, board_id));
+        include_tag.append(&Bytes::from_slice(env, b"\"}}"));
 
-            let args: Vec<Val> = Vec::from_array(env, [
-                viewer.into_val(env),
-                return_path.into_val(env),
-            ]);
-            let profile_link: Bytes = env.invoke_contract(
-                &profile_addr,
-                &Symbol::new(env, "render_nav_link_return"),
-                args,
-            );
-            md = md.raw(profile_link);
-        } else if viewer.is_some() {
-            // No profile contract registered - show a placeholder link
-            let mut return_path = Bytes::from_slice(env, b"@main:/b/");
-            return_path.append(&u64_to_bytes(env, board_id));
-
-            md = md
-                .raw_str("<a href=\"render:@profile:/register/from/")
-                .raw(return_path)
-                .raw_str("\">Create Profile</a>");
-        }
-
-        md.div_end()
+        MarkdownBuilder::new(env)
+            .raw(aliases)  // Emit aliases for include resolution
+            .raw(include_tag)
     }
 
     /// Render back navigation with optional community link
@@ -1944,14 +1952,10 @@ impl BoardsBoard {
         md.div_end()
     }
 
-    /// Append footer to builder
-    fn render_footer_into(md: MarkdownBuilder<'_>) -> MarkdownBuilder<'_> {
-        md.div_start("footer")
-            .text("Powered by ")
-            .link("Soroban Render", "https://github.com/wyhaines/soroban-render")
-            .text(" on ")
-            .link("Stellar", "https://stellar.org")
-            .div_end()
+    /// Append footer to builder via include from main contract.
+    /// Uses {{include}} tag for deferred loading - no cross-contract call overhead.
+    fn render_footer_into<'a>(_env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
+        md.raw_str("{{include contract=@main func=\"render_footer_include\"}}")
     }
 
     /// Render a thread card for the board list
@@ -2220,7 +2224,7 @@ impl BoardsBoard {
             md = md.div_end();
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render private board access denied message
@@ -2275,20 +2279,19 @@ impl BoardsBoard {
             }
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render hidden thread access denied message
     fn render_hidden_thread_message(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
         let md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("[< Back to Board](render:/b/")
+            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
             .number(board_id as u32)
-            .raw_str(")")
-            .newline()
+            .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n")
             .newline()
             .warning("This thread has been hidden by a moderator.");
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render create thread form
@@ -2297,10 +2300,9 @@ impl BoardsBoard {
             .newline()  // Blank line after nav-bar div for markdown parsing
             // Error mappings for user-friendly error messages
             .raw_str("{{errors {\"1\": \"This board is read-only and does not accept new content.\", \"7\": \"Please select a flair for your post.\"}}}\n")
-            .raw_str("[< Back to Board](render:/b/")
+            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
             .number(board_id as u32)
-            .raw_str(")")
-            .newline()
+            .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n")
             .newline()  // Blank line before h1 for markdown parsing
             .h1("New Thread");
 
@@ -2321,13 +2323,13 @@ impl BoardsBoard {
         if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. New threads cannot be created.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to create a thread.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get viewer role and check permission to create threads
@@ -2345,7 +2347,7 @@ impl BoardsBoard {
         // Check if user has permission to create threads (requires Member+ role)
         if (viewer_role as u32) < (Role::Member as u32) {
             md = md.warning("You don't have permission to create threads on this board.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get flairs for the selector
@@ -2416,6 +2418,9 @@ impl BoardsBoard {
                 md = md.raw_str("<small class=\"flair-required-notice\" style=\"color:#c00;display:block;margin-top:4px;\">* A flair is required for new posts on this board</small>\n");
             }
             md = md.raw_str("</div>\n");
+        } else {
+            // Always include flair_id field - the content contract expects it
+            md = md.raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"none\" />\n");
         }
 
         md = md.textarea_markdown("body", 10, "Write your post content here...")
@@ -2431,7 +2436,7 @@ impl BoardsBoard {
             .number(board_id as u32)
             .raw_str(")");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render thread view
@@ -2486,10 +2491,9 @@ impl BoardsBoard {
 
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("[< Back to Board](render:/b/")
+            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
             .number(board_id as u32)
-            .raw_str(")")
-            .newline();
+            .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n");
 
         // Get flairs for display
         let flairs: Vec<FlairDef> = env
@@ -2806,7 +2810,7 @@ impl BoardsBoard {
                 .raw_str("/replies/0\"}}");
         }
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render a batch of top-level replies
@@ -3222,7 +3226,7 @@ impl BoardsBoard {
         if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Replies cannot be posted.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
@@ -3230,13 +3234,13 @@ impl BoardsBoard {
         if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be posted.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to reply.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get viewer role and check permission to reply (requires Member+ role)
@@ -3251,7 +3255,7 @@ impl BoardsBoard {
 
         if (viewer_role as u32) < (Role::Member as u32) {
             md = md.warning("You don't have permission to reply on this board.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Calculate parent_id and depth
@@ -3311,7 +3315,7 @@ impl BoardsBoard {
             .number(thread_id as u32)
             .raw_str(")");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Check if user can edit content (author or moderator)
@@ -3367,13 +3371,13 @@ impl BoardsBoard {
         if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Threads cannot be edited.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to edit.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get thread metadata
@@ -3381,14 +3385,14 @@ impl BoardsBoard {
             Some(t) => t,
             None => {
                 md = md.warning("Thread not found.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         };
 
         // Check if locked
         if thread.is_locked {
             md = md.warning("This thread is locked and cannot be edited.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check edit permission
@@ -3396,13 +3400,13 @@ impl BoardsBoard {
 
         if !is_author && !is_moderator {
             md = md.warning("You don't have permission to edit this thread.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check edit window (only applies to non-moderators)
         if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, thread.created_at) {
             md = md.warning("The edit window has expired for this thread.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get current thread body
@@ -3457,7 +3461,7 @@ impl BoardsBoard {
             .number(thread_id as u32)
             .raw_str(")");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Render edit reply form
@@ -3483,7 +3487,7 @@ impl BoardsBoard {
         if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
             if config.is_readonly {
                 md = md.warning("This board is read-only. Replies cannot be edited.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
@@ -3491,13 +3495,13 @@ impl BoardsBoard {
         if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be edited.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to edit.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get reply metadata from content contract
@@ -3516,14 +3520,14 @@ impl BoardsBoard {
             Some(r) => r,
             None => {
                 md = md.warning("Reply not found.");
-                return Self::render_footer_into(md).build();
+                return Self::render_footer_into(env, md).build();
             }
         };
 
         // Check if deleted
         if reply.is_deleted {
             md = md.warning("This reply has been deleted and cannot be edited.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check edit permission
@@ -3531,13 +3535,13 @@ impl BoardsBoard {
 
         if !is_author && !is_moderator {
             md = md.warning("You don't have permission to edit this reply.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check edit window (only applies to non-moderators)
         if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, reply.created_at) {
             md = md.warning("The edit window has expired for this reply.");
-            return Self::render_footer_into(md).build();
+            return Self::render_footer_into(env, md).build();
         }
 
         // Get current reply content
@@ -3585,7 +3589,7 @@ impl BoardsBoard {
             .number(thread_id as u32)
             .raw_str(")");
 
-        Self::render_footer_into(md).build()
+        Self::render_footer_into(env, md).build()
     }
 
     /// Get CSS from Theme contract
@@ -3621,6 +3625,29 @@ impl BoardsBoard {
         // Look up profile contract from registry using get_contract
         let args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
         env.invoke_contract(&registry, &Symbol::new(env, "get_contract"), args)
+    }
+
+    /// Fetch `{{aliases ...}}` tag from registry via cross-contract call.
+    ///
+    /// This enables includes using aliases like `{{include contract=config func="..."}}`
+    /// in rendered content. Call this early in render functions and prepend to output.
+    fn fetch_aliases(env: &Env) -> Bytes {
+        let registry_opt: Option<Address> = env.storage().instance().get(&BoardKey::Registry);
+
+        let Some(registry) = registry_opt else {
+            return Bytes::new(env);
+        };
+
+        // Call registry's render_aliases function
+        let args: Vec<Val> = Vec::new(env);
+        env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "render_aliases"),
+            args,
+        )
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or(Bytes::new(env))
     }
 
     /// Get the community this board belongs to (if any)
