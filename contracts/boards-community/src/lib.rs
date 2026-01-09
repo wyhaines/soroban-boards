@@ -770,6 +770,7 @@ impl BoardsCommunity {
     }
 
     /// Request the board contract to update a board's slug (returns new slug)
+    /// This is called when the board's current slug conflicts with another board in the community.
     fn request_board_slug_update(env: &Env, board_id: u64) -> Option<String> {
         let registry: Address = env
             .storage()
@@ -785,19 +786,58 @@ impl BoardsCommunity {
 
         let board_contract = board_contract?;
 
+        // Get the current slug from the board
+        let current_slug = Self::get_board_slug_from_contract(env, board_id)?;
+
+        // Generate a new unique slug by appending a random suffix
+        let new_slug = Self::generate_unique_community_slug(env, &current_slug);
+
         // Get the community contract's own address to pass as caller
         let community_contract = env.current_contract_address();
 
-        // Call update_board_slug with regenerate=true to generate a new unique slug
+        // Call update_board_slug with all 3 required arguments: board_id, new_slug, caller
         let update_args: Vec<Val> = Vec::from_array(env, [
             board_id.into_val(env),
+            new_slug.clone().into_val(env),
             community_contract.into_val(env),
         ]);
-        env.try_invoke_contract::<String, soroban_sdk::Error>(
+        env.try_invoke_contract::<(), soroban_sdk::Error>(
             &board_contract,
             &Symbol::new(env, "update_board_slug"),
             update_args,
-        ).ok().and_then(|r| r.ok())
+        ).ok().and_then(|r| r.ok());
+
+        Some(new_slug)
+    }
+
+    /// Generate a unique slug by appending a random 4-character suffix
+    fn generate_unique_community_slug(env: &Env, base_slug: &String) -> String {
+        // Generate random 4-character suffix using ledger timestamp and sequence
+        let timestamp = env.ledger().timestamp();
+        let sequence = env.ledger().sequence();
+        let combined = timestamp.wrapping_add(sequence as u64);
+
+        // Convert to base36 characters (a-z, 0-9)
+        let chars: [u8; 36] = *b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut suffix = [0u8; 4];
+        let mut val = combined;
+        for i in 0..4 {
+            suffix[i] = chars[(val % 36) as usize];
+            val /= 36;
+        }
+
+        // Build new slug: base-suffix (max 30 chars)
+        let base_len = base_slug.len() as usize;
+        let max_base = if base_len > 25 { 25 } else { base_len }; // Leave room for "-" + 4 chars
+        let mut buf = [0u8; 30];
+        base_slug.copy_into_slice(&mut buf[..max_base]);
+        buf[max_base] = b'-';
+        buf[max_base + 1..max_base + 5].copy_from_slice(&suffix);
+
+        String::from_str(
+            env,
+            core::str::from_utf8(&buf[..max_base + 5]).unwrap_or("board"),
+        )
     }
 
     /// Tell board contract to remove this board from standalone slug index
@@ -1144,14 +1184,27 @@ impl BoardsCommunity {
         }
     }
 
-    /// Get communities where user is owner or admin
+    /// Get communities where user is owner, admin, or registry admin
     pub fn get_manageable_communities(env: Env, user: Address) -> Vec<CommunityInfo> {
         let mut result: Vec<CommunityInfo> = Vec::new(&env);
         let count = Self::community_count(env.clone());
 
+        // Check if user is a registry admin (they can manage all communities)
+        let is_registry_admin = if let Some(registry) = env.storage().instance().get::<CommunityKey, Address>(&CommunityKey::Registry) {
+            let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
+            env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "is_admin"),
+                admin_args,
+            ).ok().and_then(|r| r.ok()).unwrap_or(false)
+        } else {
+            false
+        };
+
         for id in 0..count {
             if let Some(community) = Self::get_community(env.clone(), id) {
-                if Self::is_owner_or_admin(&env, &community, &user) {
+                // Registry admins can manage all communities
+                if is_registry_admin || Self::is_owner_or_admin(&env, &community, &user) {
                     result.push_back(CommunityInfo {
                         id: community.id,
                         name: community.name.clone(),
@@ -1537,19 +1590,24 @@ impl BoardsCommunity {
             }
         };
 
-        // Board contract render signature: render(board_id: u64, path: Option<String>, viewer: Option<Address>)
+        // Board contract render signature: render(board_id: u64, path: Option<String>, viewer: Option<Address>, community_slug: Option<String>)
         // Pass the remaining path (e.g., "/t/0" or "") to board contract
+        // Pass community slug so board can build correct paths without re-entrant calls
         let path_opt = if remaining_path.len() > 0 {
             Some(remaining_path)
         } else {
             None
         };
 
+        // Pass the community's URL-safe name (slug) to the board for path building
+        let community_slug: Option<String> = Some(community.name.clone());
+
         // Delegate to board contract
         let render_args: Vec<Val> = Vec::from_array(env, [
             board_id.into_val(env),
             path_opt.into_val(env),
             viewer.into_val(env),
+            community_slug.into_val(env),
         ]);
 
         env.try_invoke_contract::<Bytes, soroban_sdk::Error>(

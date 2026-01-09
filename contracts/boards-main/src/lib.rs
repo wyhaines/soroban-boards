@@ -391,8 +391,9 @@ impl BoardsMain {
         );
         let board_contract = board_contract.expect("Board contract not registered");
 
-        // Convert slug to Option - empty string means auto-generate from name
-        let slug_opt: Option<String> = if slug.len() > 0 {
+        // Convert slug to Option - empty string or "-" sentinel means auto-generate from name
+        // (viewer SDK strips empty values, so "-" is used as sentinel in hidden form field)
+        let slug_opt: Option<String> = if slug.len() > 0 && slug != String::from_str(&env, "-") {
             Some(slug)
         } else {
             None
@@ -1168,12 +1169,13 @@ impl BoardsMain {
             .redirect("/")  // Return to board list after creating board
             .input("name", "Board name")
             .newline()
-            // Slug field with hidden fallback for empty value
-            .raw_str("<input type=\"hidden\" name=\"slug\" value=\"\" />\n")
+            // Slug field - use "-" as default value (sentinel for auto-generate)
+            // Empty values get stripped by viewer SDK, so we use "-" as a non-empty sentinel
+            // User can replace "-" with their own slug, or leave it for auto-generation
             .raw_str("<div class=\"form-group\">\n")
             .raw_str("<label for=\"slug\">URL slug (optional):</label>\n")
-            .raw_str("<input type=\"text\" name=\"slug\" id=\"slug\" placeholder=\"auto-generated-from-name\" pattern=\"[a-z][a-z0-9-]{2,29}\" title=\"3-30 lowercase letters, numbers, and hyphens. Must start with a letter.\" />\n")
-            .raw_str("<small>Leave empty to auto-generate from board name</small>\n")
+            .raw_str("<input type=\"text\" name=\"slug\" id=\"slug\" value=\"-\" placeholder=\"auto-generated-from-name\" pattern=\"-|[a-z][a-z0-9-]{2,29}\" title=\"Leave as - for auto-generate, or enter 3-30 lowercase letters, numbers, and hyphens starting with a letter.\" />\n")
+            .raw_str("<small>Leave as '-' to auto-generate from board name, or enter your own slug</small>\n")
             .raw_str("</div>\n")
             .newline()
             .textarea_markdown("description", 3, "Board description")
@@ -1862,13 +1864,15 @@ impl BoardsMain {
             }
         }
 
-        // Standalone board - delegate directly
+        // Standalone board - delegate directly (no community slug)
         let relative_path = Self::strip_board_slug_prefix_as_option(env, path, &slug);
+        let community_slug: Option<String> = None;
 
         let args: Vec<Val> = Vec::from_array(env, [
             board_id.into_val(env),
             relative_path.into_val(env),
             viewer.into_val(env),
+            community_slug.into_val(env),
         ]);
         env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
     }

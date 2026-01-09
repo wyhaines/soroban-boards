@@ -21,6 +21,10 @@ pub enum BoardKey {
     Theme,
     /// Voting contract address
     Voting,
+    /// Community contract address (for board-community lookups)
+    Community,
+    /// Temporary: community slug for current render (avoids re-entrant calls)
+    RenderCommunitySlug,
     /// Total number of boards (auto-increment counter)
     BoardCount,
 
@@ -266,6 +270,49 @@ impl BoardsBoard {
             .expect("Not initialized");
         registry.require_auth();
         env.storage().instance().set(&BoardKey::Voting, &voting);
+    }
+
+    /// Get the community contract address
+    pub fn get_community(env: Env) -> Option<Address> {
+        env.storage().instance().get(&BoardKey::Community)
+    }
+
+    /// Debug: test cross-contract call to community (get community ID)
+    pub fn test_community_call(env: Env, board_id: u64) -> Option<u64> {
+        let community_contract: Address = env.storage().instance().get(&BoardKey::Community)?;
+        let args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
+        env.invoke_contract(
+            &community_contract,
+            &Symbol::new(&env, "get_board_community"),
+            args,
+        )
+    }
+
+    /// Debug: test full get_board_community
+    pub fn test_get_board_community(env: Env, board_id: u64) -> Option<CommunityInfo> {
+        Self::get_board_community(&env, board_id)
+    }
+
+    /// Set the community contract address (for board-community lookups)
+    /// Only callable by registry admins
+    pub fn set_community(env: Env, community: Address, caller: Address) {
+        caller.require_auth();
+
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Not initialized");
+
+        // Verify caller is a registry admin
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
+        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+
+        if !is_admin {
+            panic!("Only registry admin can set community");
+        }
+
+        env.storage().instance().set(&BoardKey::Community, &community);
     }
 
     /// Create a new board in this contract.
@@ -2058,7 +2105,17 @@ impl BoardsBoard {
     /// Main render entry point for board routes
     /// Routes are relative to the board (e.g., "/" = board view, "/t/0" = thread 0)
     /// board_id is now passed as a parameter
-    pub fn render(env: Env, board_id: u64, path: Option<String>, viewer: Option<Address>) -> Bytes {
+    /// community_slug: If board is in a community, pass the community's URL slug here
+    ///                 to enable proper path building without re-entrant calls
+    pub fn render(env: Env, board_id: u64, path: Option<String>, viewer: Option<Address>, community_slug: Option<String>) -> Bytes {
+        // Store community_slug in temp storage for use during this render
+        // This avoids re-entrant calls back to community contract
+        if let Some(ref slug) = community_slug {
+            env.storage().temporary().set(&BoardKey::RenderCommunitySlug, slug);
+        } else {
+            // Clear any stale value
+            env.storage().temporary().remove(&BoardKey::RenderCommunitySlug);
+        }
 
         Router::new(&env, path.clone())
             // Board view (thread list)
@@ -4094,34 +4151,38 @@ impl BoardsBoard {
     }
 
     /// Get the community this board belongs to (if any)
+    /// Uses try_invoke to handle potential re-entrant call issues gracefully
     fn get_board_community(env: &Env, board_id: u64) -> Option<CommunityInfo> {
-        let registry: Address = env.storage().instance().get(&BoardKey::Registry)?;
-
-        // Get community contract address from registry
-        let comm_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "community").into_val(env)]);
-        let community_contract: Address = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract"),
-            comm_args,
-        ).ok()?.ok()??;
+        // Get community contract address directly from storage
+        let community_contract: Address = env.storage().instance().get(&BoardKey::Community)?;
 
         // Query community contract for board's community ID
+        // Use try_invoke to gracefully handle any issues
         let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
-        let community_id: u64 = env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+        let community_id_result = env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
             &community_contract,
             &Symbol::new(env, "get_board_community"),
             args,
-        ).ok()?.ok()??;
+        );
+
+        // Unwrap the nested results/options
+        let community_id = match community_id_result {
+            Ok(Ok(Some(id))) => id,
+            _ => return None,
+        };
 
         // Fetch community metadata
         let meta_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
-        let community_meta: CommunityInfo = env.try_invoke_contract::<Option<CommunityInfo>, soroban_sdk::Error>(
+        let community_meta_result = env.try_invoke_contract::<Option<CommunityInfo>, soroban_sdk::Error>(
             &community_contract,
             &Symbol::new(env, "get_community_info"),
             meta_args,
-        ).ok()?.ok()??;
+        );
 
-        Some(community_meta)
+        match community_meta_result {
+            Ok(Ok(Some(meta))) => Some(meta),
+            _ => None,
+        }
     }
 
     /// Render author info (username link or truncated address)
@@ -4174,12 +4235,17 @@ impl BoardsBoard {
     ///
     /// For community boards: /c/{community_slug}/b/{board_slug}
     /// For standalone boards: /b/{board_slug}
-    fn build_board_base_path(env: &Env, board_id: u64, board_slug: &String) -> Bytes {
-        // Check if board is in a community
-        if let Some(community) = Self::get_board_community(env, board_id) {
+    ///
+    /// First checks temp storage for community slug (passed during render to avoid re-entrant calls).
+    /// Falls back to querying community contract if not in temp storage.
+    fn build_board_base_path(env: &Env, _board_id: u64, board_slug: &String) -> Bytes {
+        // First check temp storage for community slug (set during render)
+        let community_slug_opt: Option<String> = env.storage().temporary().get(&BoardKey::RenderCommunitySlug);
+
+        if let Some(community_slug) = community_slug_opt {
             // Community board: /c/{community_slug}/b/{board_slug}
             let mut path = Bytes::from_slice(env, b"/c/");
-            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, &community.name));
+            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, &community_slug));
             path.append(&Bytes::from_slice(env, b"/b/"));
             path.append(&soroban_render_sdk::bytes::string_to_bytes(env, board_slug));
             path
