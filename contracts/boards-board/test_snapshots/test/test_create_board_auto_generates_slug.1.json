@@ -13,20 +13,21 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "create_board",
+              "function_name": "create_board_with_slug",
               "args": [
                 {
-                  "string": "Private Board"
+                  "string": "My Awesome Board"
                 },
                 {
-                  "string": "Secret discussions"
-                },
-                {
-                  "string": "true"
+                  "string": "Auto-generated slug test"
                 },
                 {
                   "string": "false"
                 },
+                {
+                  "string": "true"
+                },
+                "void",
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
                 }
@@ -107,7 +108,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "Secret discussions"
+                        "string": "Auto-generated slug test"
                       }
                     },
                     {
@@ -123,7 +124,7 @@
                         "symbol": "is_listed"
                       },
                       "val": {
-                        "bool": false
+                        "bool": true
                       }
                     },
                     {
@@ -131,7 +132,7 @@
                         "symbol": "is_private"
                       },
                       "val": {
-                        "bool": true
+                        "bool": false
                       }
                     },
                     {
@@ -147,7 +148,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "Private Board"
+                        "string": "My Awesome Board"
                       }
                     },
                     {
@@ -155,7 +156,7 @@
                         "symbol": "slug"
                       },
                       "val": {
-                        "string": "private-board"
+                        "string": "my-awesome-board"
                       }
                     },
                     {
@@ -185,7 +186,7 @@
                   "symbol": "BoardBySlug"
                 },
                 {
-                  "string": "private-board"
+                  "string": "my-awesome-board"
                 }
               ]
             },
@@ -205,7 +206,7 @@
                       "symbol": "BoardBySlug"
                     },
                     {
-                      "string": "private-board"
+                      "string": "my-awesome-board"
                     }
                   ]
                 },
@@ -262,7 +263,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "Secret discussions"
+                        "string": "Auto-generated slug test"
                       }
                     },
                     {
@@ -270,7 +271,7 @@
                         "symbol": "is_private"
                       },
                       "val": {
-                        "bool": true
+                        "bool": false
                       }
                     },
                     {
@@ -294,7 +295,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "Private Board"
+                        "string": "My Awesome Board"
                       }
                     },
                     {
@@ -485,7 +486,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bool": false
+                  "bool": true
                 }
               }
             },

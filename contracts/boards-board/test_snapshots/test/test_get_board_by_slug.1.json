@@ -13,19 +13,22 @@
           "function": {
             "contract_fn": {
               "contract_address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD2KM",
-              "function_name": "create_board",
+              "function_name": "create_board_with_slug",
               "args": [
                 {
-                  "string": "Private Board"
+                  "string": "Lookup Test"
                 },
                 {
-                  "string": "Secret discussions"
+                  "string": "Test slug lookup"
+                },
+                {
+                  "string": "false"
                 },
                 {
                   "string": "true"
                 },
                 {
-                  "string": "false"
+                  "string": "lookup-test"
                 },
                 {
                   "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAHK3M"
@@ -37,6 +40,7 @@
         }
       ]
     ],
+    [],
     []
   ],
   "ledger": {
@@ -107,7 +111,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "Secret discussions"
+                        "string": "Test slug lookup"
                       }
                     },
                     {
@@ -123,7 +127,7 @@
                         "symbol": "is_listed"
                       },
                       "val": {
-                        "bool": false
+                        "bool": true
                       }
                     },
                     {
@@ -131,7 +135,7 @@
                         "symbol": "is_private"
                       },
                       "val": {
-                        "bool": true
+                        "bool": false
                       }
                     },
                     {
@@ -147,7 +151,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "Private Board"
+                        "string": "Lookup Test"
                       }
                     },
                     {
@@ -155,7 +159,7 @@
                         "symbol": "slug"
                       },
                       "val": {
-                        "string": "private-board"
+                        "string": "lookup-test"
                       }
                     },
                     {
@@ -185,7 +189,7 @@
                   "symbol": "BoardBySlug"
                 },
                 {
-                  "string": "private-board"
+                  "string": "lookup-test"
                 }
               ]
             },
@@ -205,7 +209,7 @@
                       "symbol": "BoardBySlug"
                     },
                     {
-                      "string": "private-board"
+                      "string": "lookup-test"
                     }
                   ]
                 },
@@ -262,7 +266,7 @@
                         "symbol": "description"
                       },
                       "val": {
-                        "string": "Secret discussions"
+                        "string": "Test slug lookup"
                       }
                     },
                     {
@@ -270,7 +274,7 @@
                         "symbol": "is_private"
                       },
                       "val": {
-                        "bool": true
+                        "bool": false
                       }
                     },
                     {
@@ -294,7 +298,7 @@
                         "symbol": "name"
                       },
                       "val": {
-                        "string": "Private Board"
+                        "string": "Lookup Test"
                       }
                     },
                     {
@@ -485,7 +489,7 @@
                 },
                 "durability": "persistent",
                 "val": {
-                  "bool": false
+                  "bool": true
                 }
               }
             },

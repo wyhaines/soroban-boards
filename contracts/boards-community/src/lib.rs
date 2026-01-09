@@ -42,6 +42,8 @@ pub enum CommunityKey {
     CommunityListed(u64),
     /// Pending ownership transfer request
     PendingOwnershipTransfer(u64),
+    /// Board slug -> board_id index within a community (community_id, slug) -> board_id
+    CommunityBoardBySlug(u64, String),
 }
 
 /// Community metadata
@@ -97,6 +99,7 @@ pub struct BoardConfig {
 #[derive(Clone)]
 pub struct BoardMeta {
     pub id: u64,
+    pub slug: String,
     pub name: String,
     pub description: String,
     pub creator: Address,
@@ -624,6 +627,27 @@ impl BoardsCommunity {
             .persistent()
             .set(&CommunityKey::BoardCommunity(board_id), &community_id);
 
+        // Handle slug management: get board's slug and check for conflicts in community scope
+        let mut board_slug = Self::get_board_slug_from_contract(&env, board_id);
+
+        if let Some(ref slug) = board_slug {
+            // Check if slug conflicts with existing board in this community
+            if !Self::is_community_slug_available(&env, community_id, slug) {
+                // Conflict - request board contract to generate a new unique slug
+                board_slug = Self::request_board_slug_update(&env, board_id);
+            }
+        }
+
+        // Store slug -> board_id index in community scope
+        if let Some(slug) = board_slug {
+            env.storage()
+                .persistent()
+                .set(&CommunityKey::CommunityBoardBySlug(community_id, slug), &board_id);
+        }
+
+        // Remove from standalone slug index (board is now in a community)
+        Self::request_remove_standalone_slug(&env, board_id);
+
         // Update board count
         community.board_count += 1;
         env.storage()
@@ -647,6 +671,9 @@ impl BoardsCommunity {
             panic!("Only community owner or admin can remove boards");
         }
 
+        // Get board's slug before removing (for removing from slug index)
+        let board_slug = Self::get_board_slug_from_contract(&env, board_id);
+
         // Remove board from community's board list
         let boards: Vec<u64> = env
             .storage()
@@ -668,6 +695,17 @@ impl BoardsCommunity {
         env.storage()
             .persistent()
             .remove(&CommunityKey::BoardCommunity(board_id));
+
+        // Remove from community slug index
+        if let Some(slug) = board_slug {
+            env.storage()
+                .persistent()
+                .remove(&CommunityKey::CommunityBoardBySlug(community_id, slug));
+        }
+
+        // Add to standalone slug index (board is now standalone)
+        // This handles conflicts by updating the board's slug if needed
+        Self::request_add_standalone_slug(&env, board_id);
 
         // Update board count
         if community.board_count > 0 {
@@ -691,6 +729,134 @@ impl BoardsCommunity {
         env.storage()
             .persistent()
             .get(&CommunityKey::BoardCommunity(board_id))
+    }
+
+    /// Get board ID by slug within a community
+    pub fn get_community_board_by_slug(env: Env, community_id: u64, slug: String) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&CommunityKey::CommunityBoardBySlug(community_id, slug))
+    }
+
+    /// Get board slug from the board contract
+    fn get_board_slug_from_contract(env: &Env, board_id: u64) -> Option<String> {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Registry)?;
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        let board_contract = board_contract?;
+
+        let slug_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+        env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "get_board_slug"),
+            slug_args,
+        ).ok().and_then(|r| r.ok()).flatten()
+    }
+
+    /// Check if a slug is available in the community scope
+    fn is_community_slug_available(env: &Env, community_id: u64, slug: &String) -> bool {
+        !env.storage()
+            .persistent()
+            .has(&CommunityKey::CommunityBoardBySlug(community_id, slug.clone()))
+    }
+
+    /// Request the board contract to update a board's slug (returns new slug)
+    fn request_board_slug_update(env: &Env, board_id: u64) -> Option<String> {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&CommunityKey::Registry)?;
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        let board_contract = board_contract?;
+
+        // Get the community contract's own address to pass as caller
+        let community_contract = env.current_contract_address();
+
+        // Call update_board_slug with regenerate=true to generate a new unique slug
+        let update_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            community_contract.into_val(env),
+        ]);
+        env.try_invoke_contract::<String, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "update_board_slug"),
+            update_args,
+        ).ok().and_then(|r| r.ok())
+    }
+
+    /// Tell board contract to remove this board from standalone slug index
+    fn request_remove_standalone_slug(env: &Env, board_id: u64) {
+        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
+        let registry = match registry_opt {
+            Some(r) => r,
+            None => return,
+        };
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        if let Some(board_contract) = board_contract_opt {
+            let community_contract = env.current_contract_address();
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                community_contract.into_val(env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "remove_standalone_slug_index"),
+                args,
+            );
+        }
+    }
+
+    /// Tell board contract to add this board to standalone slug index (returns new slug if conflict)
+    fn request_add_standalone_slug(env: &Env, board_id: u64) -> Option<String> {
+        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
+        let registry = match registry_opt {
+            Some(r) => r,
+            None => return None,
+        };
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        if let Some(board_contract) = board_contract_opt {
+            let community_contract = env.current_contract_address();
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                community_contract.into_val(env),
+            ]);
+            return env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "add_standalone_slug_index"),
+                args,
+            ).ok().and_then(|r| r.ok()).flatten();
+        }
+        None
     }
 
     /// Fix board_count to match actual boards list (owner/admin only)
@@ -1279,6 +1445,10 @@ impl BoardsCommunity {
                     if sub_path.starts_with(b"/fix-count") {
                         return Self::render_fix_count(&env, &community_name, viewer);
                     }
+                    // Handle /c/{community}/b/{board-slug}/* - delegate to board contract
+                    if sub_path.starts_with(b"/b/") {
+                        return Self::delegate_to_board_by_slug(&env, &community_name, &buf[name_end..copy_len], viewer);
+                    }
                 }
 
                 return Self::render_community_home(&env, &community_name, viewer);
@@ -1290,6 +1460,121 @@ impl BoardsCommunity {
     }
 
     // === Render Helper Functions ===
+
+    /// Delegate rendering to board contract using board slug within community scope
+    fn delegate_to_board_by_slug(env: &Env, community_name: &String, board_path: &[u8], viewer: Option<Address>) -> Bytes {
+        // Look up community by name
+        let community = match Self::get_community_by_name(env.clone(), community_name.clone()) {
+            Some(c) => c,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Community not found")
+                    .build();
+            }
+        };
+
+        // Parse board_path which is like "/b/{slug}" or "/b/{slug}/t/0" etc.
+        // Skip the "/b/" prefix (3 bytes) to get slug and remaining path
+        if board_path.len() < 4 {
+            return MarkdownBuilder::new(env)
+                .paragraph("Invalid board path")
+                .build();
+        }
+
+        let after_b_prefix = &board_path[3..]; // Skip "/b/"
+        let slug_end = Self::find_next_slash_in_slice(after_b_prefix, 0, after_b_prefix.len());
+
+        if slug_end == 0 {
+            return MarkdownBuilder::new(env)
+                .paragraph("Board slug not specified")
+                .build();
+        }
+
+        let slug_slice = &after_b_prefix[..slug_end];
+        let board_slug = Self::bytes_to_string(env, slug_slice);
+
+        // Look up board ID by slug within this community
+        let board_id = match Self::get_community_board_by_slug(env.clone(), community.id, board_slug.clone()) {
+            Some(id) => id,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Board not found in this community")
+                    .build();
+            }
+        };
+
+        // Build remaining path for board contract (everything after the slug)
+        // e.g., "/t/0" or "/t/0/reply" or "" for board home
+        let remaining_path = if slug_end < after_b_prefix.len() {
+            Self::bytes_to_string(env, &after_b_prefix[slug_end..])
+        } else {
+            String::from_str(env, "")
+        };
+
+        // Get registry and board contract
+        let registry: Address = match env.storage().instance().get(&CommunityKey::Registry) {
+            Some(r) => r,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Registry not configured")
+                    .build();
+            }
+        };
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        let board_contract = match board_contract_opt {
+            Some(c) => c,
+            None => {
+                return MarkdownBuilder::new(env)
+                    .paragraph("Board contract not configured")
+                    .build();
+            }
+        };
+
+        // Board contract render signature: render(board_id: u64, path: Option<String>, viewer: Option<Address>)
+        // Pass the remaining path (e.g., "/t/0" or "") to board contract
+        let path_opt = if remaining_path.len() > 0 {
+            Some(remaining_path)
+        } else {
+            None
+        };
+
+        // Delegate to board contract
+        let render_args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            path_opt.into_val(env),
+            viewer.into_val(env),
+        ]);
+
+        env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
+            &board_contract,
+            &Symbol::new(env, "render"),
+            render_args,
+        )
+        .ok()
+        .and_then(|r| r.ok())
+        .unwrap_or_else(|| {
+            MarkdownBuilder::new(env)
+                .paragraph("Error loading board")
+                .build()
+        })
+    }
+
+    /// Helper to find next slash in a slice
+    fn find_next_slash_in_slice(buf: &[u8], start: usize, end: usize) -> usize {
+        for i in start..end {
+            if buf[i] == b'/' {
+                return i;
+            }
+        }
+        end
+    }
 
     fn render_community_list(env: &Env, _viewer: Option<Address>) -> Bytes {
         let communities = Self::list_listed_communities(env.clone(), 0, 20);
@@ -1434,9 +1719,11 @@ impl BoardsCommunity {
                     continue;
                 }
 
-                // Board card with link wrapper - use render:/b/ to go through main contract
-                builder = builder.raw_str("<a href=\"render:/b/")
-                    .number(board_id as u32)
+                // Board card with link wrapper - use slug-based URL: /c/{community}/b/{slug}
+                builder = builder.raw_str("<a href=\"render:/c/")
+                    .text_string(&community.name)
+                    .raw_str("/b/")
+                    .text_string(&board.slug)
                     .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
                     .text_string(&board.name)
                     .raw_str("</span><span class=\"board-card-desc\">")
@@ -1515,10 +1802,26 @@ impl BoardsCommunity {
         builder = builder.number(community.member_count as u32);
         builder = builder.raw_str(" members</span></div>\n");
 
-        // Actions based on viewer (owner or admin)
+        // Actions based on viewer (owner, community admin, or registry admin)
+        // Check if viewer is a registry admin
+        let viewer_is_registry_admin = if let Some(ref v) = viewer {
+            if let Some(registry) = env.storage().instance().get::<CommunityKey, Address>(&CommunityKey::Registry) {
+                let admin_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
+                env.try_invoke_contract::<bool, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "is_admin"),
+                    admin_args,
+                ).ok().and_then(|r| r.ok()).unwrap_or(false)
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+
         if let Some(ref v) = viewer {
-            if Self::is_owner_or_admin(env, &community, v) {
-                // Owner/Admin actions - build settings URL
+            if Self::is_owner_or_admin(env, &community, v) || viewer_is_registry_admin {
+                // Owner/Admin/Registry Admin actions - build settings URL
                 let mut settings_url_buf = [0u8; 80];
                 let settings_prefix = b"render:/c/";
                 settings_url_buf[0..10].copy_from_slice(settings_prefix);

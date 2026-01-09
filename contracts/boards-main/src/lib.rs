@@ -61,11 +61,12 @@ pub struct ChunkMeta {
     pub version: u32,
 }
 
-/// Board metadata (same structure as registry for compatibility)
+/// Board metadata (same structure as boards-board for compatibility)
 #[contracttype]
 #[derive(Clone)]
 pub struct BoardMeta {
     pub id: u64,
+    pub slug: String,
     pub name: String,
     pub description: String,
     pub creator: Address,
@@ -361,11 +362,12 @@ impl BoardsMain {
     /// Delegates to the single boards-board contract to create a new board entry.
     /// If community is provided (non-empty), also adds the board to that community.
     ///
-    /// NOTE: Parameter order matches form field DOM order (name, description, community, is_private, is_listed)
+    /// NOTE: Parameter order matches form field DOM order (name, slug, description, community, is_private, is_listed)
     /// NOTE: Field is named 'community' not 'community_id' to avoid viewer's auto-conversion of _id fields to u64
     pub fn create_board(
         env: Env,
         name: String,
+        slug: String,
         description: String,
         community: String,
         is_private: String,
@@ -389,15 +391,23 @@ impl BoardsMain {
         );
         let board_contract = board_contract.expect("Board contract not registered");
 
-        // Delegate to boards-board.create_board()
+        // Convert slug to Option - empty string means auto-generate from name
+        let slug_opt: Option<String> = if slug.len() > 0 {
+            Some(slug)
+        } else {
+            None
+        };
+
+        // Delegate to boards-board.create_board_with_slug()
         let create_args: Vec<Val> = Vec::from_array(&env, [
             name.into_val(&env),
             description.into_val(&env),
             is_private.into_val(&env),
             is_listed.into_val(&env),
+            slug_opt.into_val(&env),
             caller.clone().into_val(&env),
         ]);
-        let board_id: u64 = env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board"), create_args);
+        let board_id: u64 = env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board_with_slug"), create_args);
 
         // If community is specified, add board to community
         let community_id_parsed = string_to_u64(&env, &community);
@@ -520,7 +530,7 @@ impl BoardsMain {
                 let name = req.get_var(b"name").unwrap_or(Bytes::new(&env));
                 Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
             })
-            // Admin routes - delegate to admin contract
+            // Admin routes - delegate to admin contract (keep numeric IDs for admin)
             .or_handle(b"/admin/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/admin/settings/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
             .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
@@ -532,14 +542,16 @@ impl BoardsMain {
             // Pages routes - delegate to pages contract
             .or_handle(b"/p/*", |_| Self::delegate_to_pages(&env, &path, &viewer))
             .or_handle(b"/p", |_| Self::delegate_to_pages(&env, &path, &viewer))
-            // Board routes - delegate to board contract
-            .or_handle(b"/b/{id}/*", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::delegate_to_board(&env, board_id, &path, &viewer)
+            // Board routes - delegate to board contract using slug
+            // For standalone boards: /b/{slug}/*
+            // For community boards accessed via /b/{slug}: redirect to /c/{community}/b/{slug}
+            .or_handle(b"/b/{slug}/*", |req| {
+                let slug = req.get_var(b"slug").unwrap_or(Bytes::new(&env));
+                Self::delegate_to_board_by_slug(&env, &slug, &path, &viewer)
             })
-            .or_handle(b"/b/{id}", |req| {
-                let board_id = req.get_var_u32(b"id").unwrap_or(0) as u64;
-                Self::delegate_to_board(&env, board_id, &path, &viewer)
+            .or_handle(b"/b/{slug}", |req| {
+                let slug = req.get_var(b"slug").unwrap_or(Bytes::new(&env));
+                Self::delegate_to_board_by_slug(&env, &slug, &path, &viewer)
             })
             // Default - home page
             .or_default(|_| Self::render_home(&env, &viewer))
@@ -1034,9 +1046,9 @@ impl BoardsMain {
 
                 md = md.raw_str("<div class=\"board-list\">\n");
                 for board in sorted_boards.iter() {
-                    // Board card with link wrapper
+                    // Board card with link wrapper - use slug-based URL: /b/{slug}
                     md = md.raw_str("<a href=\"render:/b/")
-                        .number(board.id as u32)
+                        .text_string(&board.slug)
                         .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
                         .text_string(&board.name)
                         .raw_str("</span><span class=\"board-card-desc\">")
@@ -1156,11 +1168,28 @@ impl BoardsMain {
             .redirect("/")  // Return to board list after creating board
             .input("name", "Board name")
             .newline()
+            // Slug field with hidden fallback for empty value
+            .raw_str("<input type=\"hidden\" name=\"slug\" value=\"\" />\n")
+            .raw_str("<div class=\"form-group\">\n")
+            .raw_str("<label for=\"slug\">URL slug (optional):</label>\n")
+            .raw_str("<input type=\"text\" name=\"slug\" id=\"slug\" placeholder=\"auto-generated-from-name\" pattern=\"[a-z][a-z0-9-]{2,29}\" title=\"3-30 lowercase letters, numbers, and hyphens. Must start with a letter.\" />\n")
+            .raw_str("<small>Leave empty to auto-generate from board name</small>\n")
+            .raw_str("</div>\n")
+            .newline()
             .textarea_markdown("description", 3, "Board description")
             .newline();
 
         // Community selection dropdown (if user has any manageable communities)
         if !communities.is_empty() {
+            // Hidden fallback with preselected value (select elements may not be captured correctly)
+            md = md.raw_str("<input type=\"hidden\" name=\"community\" value=\"");
+            if let Some(cid) = preselected_community {
+                md = md.number(cid as u32);
+            } else {
+                md = md.raw_str("none");
+            }
+            md = md.raw_str("\" />\n");
+
             md = md.raw_str("<div class=\"form-group\">\n")
                 .raw_str("<label>Community (optional):</label>\n")
                 .raw_str("<select name=\"community\">\n")
@@ -1578,13 +1607,42 @@ impl BoardsMain {
         };
 
         let args: Vec<Val> = Vec::from_array(env, [
-            community_path.into_val(env),
+            community_path.clone().into_val(env),
             viewer.into_val(env),
         ]);
         let content: Bytes = env.invoke_contract(&community, &Symbol::new(env, "render"), args);
 
-        // Wrap with nav and footer for consistent UI
-        Self::wrap_with_nav_footer(env, viewer, content)
+        // Check if this is a board route (/c/{name}/b/*)
+        // Board routes are wrapped by the board contract itself via include tags,
+        // so don't double-wrap with nav/footer
+        if Self::path_contains_board_segment(env, &community_path) {
+            content
+        } else {
+            // Wrap community pages with nav and footer for consistent UI
+            Self::wrap_with_nav_footer(env, viewer, content)
+        }
+    }
+
+    /// Check if path contains a board segment (/b/) indicating a board route
+    fn path_contains_board_segment(_env: &Env, path: &String) -> bool {
+        let path_len = path.len() as usize;
+        if path_len < 5 {
+            // Path too short to contain "/c/x/b/"
+            return false;
+        }
+
+        let mut buf = [0u8; 256];
+        let copy_len = if path_len > 256 { 256 } else { path_len };
+        path.copy_into_slice(&mut buf[0..copy_len]);
+
+        // Search for "/b/" pattern after the community name
+        for i in 0..copy_len.saturating_sub(2) {
+            if buf[i] == b'/' && buf[i + 1] == b'b' && buf[i + 2] == b'/' {
+                return true;
+            }
+        }
+
+        false
     }
 
     /// Wrap content with navigation bar and footer for consistent UI
@@ -1672,7 +1730,9 @@ impl BoardsMain {
         env.invoke_contract(&admin, &Symbol::new(env, "render"), args)
     }
 
-    /// Delegate rendering to the board contract
+    /// Delegate rendering to the board contract by numeric ID
+    /// (Kept for backwards compatibility during migration)
+    #[allow(dead_code)]
     fn delegate_to_board(env: &Env, board_id: u64, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
         let registry: Address = env
             .storage()
@@ -1709,6 +1769,159 @@ impl BoardsMain {
         env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
     }
 
+    /// Delegate rendering to the board contract using slug lookup.
+    /// For community boards accessed via /b/{slug}, redirects to canonical /c/{community}/b/{slug} URL.
+    /// For standalone boards, delegates directly to the board contract.
+    fn delegate_to_board_by_slug(env: &Env, slug_bytes: &Bytes, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        // Get board contract via registry alias
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        );
+
+        let Some(board_contract) = board_contract_opt else {
+            return MarkdownBuilder::new(env)
+                .h1("Board Service Unavailable")
+                .paragraph("The board contract is not configured.")
+                .render_link("Back to Home", "/")
+                .build();
+        };
+
+        // Convert slug bytes to String for lookup
+        let slug = Self::bytes_to_string(env, slug_bytes);
+
+        // Look up board ID by slug
+        let lookup_args: Vec<Val> = Vec::from_array(env, [slug.clone().into_val(env)]);
+        let board_id_opt: Option<u64> = env
+            .try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_board_id_by_slug"),
+                lookup_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        let Some(board_id) = board_id_opt else {
+            return MarkdownBuilder::new(env)
+                .h1("Board Not Found")
+                .paragraph("The requested board does not exist.")
+                .render_link("Back to Home", "/")
+                .build();
+        };
+
+        // Check if board is in a community
+        let community_contract_opt: Option<Address> = env.storage().instance().get(&MainKey::Community);
+
+        if let Some(ref community_contract) = community_contract_opt {
+            let community_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+            let community_id_opt: Option<u64> = env
+                .try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                    community_contract,
+                    &Symbol::new(env, "get_board_community"),
+                    community_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+
+            if let Some(community_id) = community_id_opt {
+                // Board is in a community - get community info for redirect
+                let info_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
+                let community_info: Option<CommunityMeta> = env
+                    .try_invoke_contract::<Option<CommunityMeta>, soroban_sdk::Error>(
+                        community_contract,
+                        &Symbol::new(env, "get_community"),
+                        info_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok())
+                    .flatten();
+
+                if let Some(community) = community_info {
+                    // Build canonical redirect URL: /c/{community_name}/b/{slug}{remaining_path}
+                    let remaining_path = Self::strip_board_slug_prefix(env, path, &slug);
+
+                    return MarkdownBuilder::new(env)
+                        .raw_str("{{redirect /c/")
+                        .text_string(&community.name)
+                        .raw_str("/b/")
+                        .text_string(&slug)
+                        .raw(remaining_path)
+                        .raw_str("}}")
+                        .build();
+                }
+            }
+        }
+
+        // Standalone board - delegate directly
+        let relative_path = Self::strip_board_slug_prefix_as_option(env, path, &slug);
+
+        let args: Vec<Val> = Vec::from_array(env, [
+            board_id.into_val(env),
+            relative_path.into_val(env),
+            viewer.into_val(env),
+        ]);
+        env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
+    }
+
+    /// Strip the `/b/{slug}` prefix from a path to get remaining path as Bytes
+    fn strip_board_slug_prefix(env: &Env, path: &Option<String>, slug: &String) -> Bytes {
+        let Some(p) = path else {
+            return Bytes::new(env);
+        };
+
+        let path_len = p.len() as usize;
+        let slug_len = slug.len() as usize;
+
+        // Expected prefix: "/b/{slug}"
+        let prefix_len = 3 + slug_len; // "/b/" + slug
+
+        // Copy path to buffer
+        let mut path_buf = [0u8; 256];
+        let copy_len = if path_len > 256 { 256 } else { path_len };
+        p.copy_into_slice(&mut path_buf[0..copy_len]);
+
+        // Copy slug to buffer for comparison
+        let mut slug_buf = [0u8; 64];
+        let slug_copy_len = if slug_len > 64 { 64 } else { slug_len };
+        slug.copy_into_slice(&mut slug_buf[0..slug_copy_len]);
+
+        // Check if path starts with "/b/{slug}"
+        if copy_len >= prefix_len
+            && &path_buf[0..3] == b"/b/"
+            && &path_buf[3..prefix_len] == &slug_buf[0..slug_copy_len]
+        {
+            if copy_len == prefix_len {
+                // Exact match, no remaining path
+                return Bytes::new(env);
+            } else if path_buf[prefix_len] == b'/' {
+                // Return rest (starting from /)
+                return Bytes::from_slice(env, &path_buf[prefix_len..copy_len]);
+            }
+        }
+
+        Bytes::new(env)
+    }
+
+    /// Strip the `/b/{slug}` prefix from a path to get remaining path as Option<String>
+    fn strip_board_slug_prefix_as_option(env: &Env, path: &Option<String>, slug: &String) -> Option<String> {
+        let remaining = Self::strip_board_slug_prefix(env, path, slug);
+        if remaining.len() == 0 {
+            Some(String::from_str(env, "/"))
+        } else {
+            Some(Self::bytes_to_string(env, &remaining))
+        }
+    }
+
     // ========================================================================
     // Helper Functions
     // ========================================================================
@@ -1728,6 +1941,8 @@ impl BoardsMain {
     }
 
     /// Strip the `/b/{id}` prefix from a path to get relative path for board contract
+    /// (Kept for backwards compatibility during migration)
+    #[allow(dead_code)]
     fn strip_board_prefix(env: &Env, path: &Option<String>, board_id: u64) -> Option<String> {
         let Some(p) = path else {
             return Some(String::from_str(env, "/"));

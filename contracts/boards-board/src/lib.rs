@@ -51,6 +51,8 @@ pub enum BoardKey {
     BoardCreatedAt(u64),
     /// Count of boards created by a user (for threshold limits)
     UserBoardCount(Address),
+    /// Slug-to-board-ID index (for standalone boards only - community boards use CommunityBoardBySlug)
+    BoardBySlug(String),
 }
 
 /// Board metadata (stored per-board)
@@ -58,6 +60,7 @@ pub enum BoardKey {
 #[derive(Clone)]
 pub struct BoardMeta {
     pub id: u64,
+    pub slug: String,
     pub name: String,
     pub description: String,
     pub creator: Address,
@@ -286,6 +289,22 @@ impl BoardsBoard {
         is_listed: String,
         caller: Address,
     ) -> u64 {
+        // Call create_board_with_slug with no explicit slug
+        Self::create_board_with_slug(env, name, description, is_private, is_listed, None, caller)
+    }
+
+    /// Create a new board with an optional explicit slug.
+    /// If slug is None, one will be generated from the board name.
+    /// Returns the assigned board ID.
+    pub fn create_board_with_slug(
+        env: Env,
+        name: String,
+        description: String,
+        is_private: String,
+        is_listed: String,
+        slug: Option<String>,
+        caller: Address,
+    ) -> u64 {
         caller.require_auth();
 
         // Get required contract addresses
@@ -395,9 +414,22 @@ impl BoardsBoard {
             .get(&BoardKey::BoardCount)
             .unwrap_or(0);
 
+        // Generate or validate slug
+        let final_slug = if let Some(explicit_slug) = slug {
+            // Validate explicit slug
+            Self::validate_slug(&env, &explicit_slug);
+            // Check uniqueness and modify if needed
+            Self::generate_unique_slug(&env, &explicit_slug)
+        } else {
+            // Generate slug from board name
+            let base_slug = Self::generate_slug_from_name(&env, &name);
+            Self::generate_unique_slug(&env, &base_slug)
+        };
+
         // Create and store BoardMeta
         let board_meta = BoardMeta {
             id: board_id,
+            slug: final_slug.clone(),
             name: name.clone(),
             description: description.clone(),
             creator: caller.clone(),
@@ -410,6 +442,11 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .set(&BoardKey::Board(board_id), &board_meta);
+
+        // Store slug -> board_id index (for standalone boards)
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardBySlug(final_slug), &board_id);
 
         // Create and store BoardConfig
         let config = BoardConfig {
@@ -484,6 +521,177 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .get(&BoardKey::Board(board_id))
+    }
+
+    /// Get board ID by slug (for standalone boards).
+    /// Returns None if slug not found.
+    pub fn get_board_id_by_slug(env: Env, slug: String) -> Option<u64> {
+        env.storage()
+            .persistent()
+            .get(&BoardKey::BoardBySlug(slug))
+    }
+
+    /// Get board metadata by slug (for standalone boards).
+    /// Returns None if slug not found.
+    pub fn get_board_by_slug(env: Env, slug: String) -> Option<BoardMeta> {
+        if let Some(board_id) = Self::get_board_id_by_slug(env.clone(), slug) {
+            Self::get_board(env, board_id)
+        } else {
+            None
+        }
+    }
+
+    /// Get board slug by ID.
+    /// Returns None if board not found.
+    pub fn get_board_slug(env: Env, board_id: u64) -> Option<String> {
+        Self::get_board(env, board_id).map(|meta| meta.slug)
+    }
+
+    /// Update board slug (for use by community contract during add/remove).
+    /// Only callable by registry or community contracts.
+    pub fn update_board_slug(env: Env, board_id: u64, new_slug: String, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is registry or community contract
+        let registry: Option<Address> = env.storage().instance().get(&BoardKey::Registry);
+        let is_registry = registry.as_ref().map(|r| r == &caller).unwrap_or(false);
+
+        // Also allow community contract (get from registry)
+        let is_community = if let Some(ref reg) = registry {
+            let community_alias = Symbol::new(&env, "community");
+            let args: Vec<Val> = Vec::from_array(&env, [community_alias.into_val(&env)]);
+            let community: Option<Address> = env
+                .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                    reg,
+                    &Symbol::new(&env, "get_contract_by_alias"),
+                    args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
+            community.map(|c| c == caller).unwrap_or(false)
+        } else {
+            false
+        };
+
+        if !is_registry && !is_community {
+            panic!("Only registry or community contract can update board slug");
+        }
+
+        // Validate new slug
+        Self::validate_slug(&env, &new_slug);
+
+        // Get current board and its old slug
+        let mut board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        let old_slug = board.slug.clone();
+
+        // Remove old slug index
+        env.storage()
+            .persistent()
+            .remove(&BoardKey::BoardBySlug(old_slug));
+
+        // Update board with new slug
+        board.slug = new_slug.clone();
+        env.storage()
+            .persistent()
+            .set(&BoardKey::Board(board_id), &board);
+
+        // Add new slug index
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardBySlug(new_slug), &board_id);
+    }
+
+    /// Remove board from standalone slug index (called when board joins a community).
+    pub fn remove_standalone_slug_index(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is community contract (via registry lookup)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Contract not initialized");
+
+        let community_alias = Symbol::new(&env, "community");
+        let args: Vec<Val> = Vec::from_array(&env, [community_alias.into_val(&env)]);
+        let community: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract_by_alias"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        if community.map(|c| c != caller).unwrap_or(true) {
+            panic!("Only community contract can remove standalone slug index");
+        }
+
+        // Get board slug and remove from index
+        if let Some(board) = Self::get_board(env.clone(), board_id) {
+            env.storage()
+                .persistent()
+                .remove(&BoardKey::BoardBySlug(board.slug));
+        }
+    }
+
+    /// Add board to standalone slug index (called when board leaves a community).
+    /// Checks for conflicts and updates slug if needed.
+    pub fn add_standalone_slug_index(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is community contract (via registry lookup)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Contract not initialized");
+
+        let community_alias = Symbol::new(&env, "community");
+        let args: Vec<Val> = Vec::from_array(&env, [community_alias.into_val(&env)]);
+        let community: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract_by_alias"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        if community.map(|c| c != caller).unwrap_or(true) {
+            panic!("Only community contract can add standalone slug index");
+        }
+
+        // Get board and check for slug conflicts
+        let mut board: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Generate unique slug (handles conflicts)
+        let unique_slug = Self::generate_unique_slug(&env, &board.slug);
+
+        // Update board if slug changed
+        if unique_slug != board.slug {
+            board.slug = unique_slug.clone();
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &board);
+        }
+
+        // Add to standalone index
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardBySlug(unique_slug), &board_id);
     }
 
     /// List boards with pagination
@@ -1906,10 +2114,23 @@ impl BoardsBoard {
     fn render_nav<'a>(env: &'a Env, board_id: u64, _viewer: &Option<Address>) -> MarkdownBuilder<'a> {
         let aliases = Self::fetch_aliases(env);
 
+        // Get board metadata for slug-based return path
+        let board_meta: Option<BoardMeta> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id));
+
         // Build include tag with return path for this board
-        // Format: {{include contract=@main func="render_nav_include" viewer return_path="@main:/b/{id}"}}
-        let mut include_tag = Bytes::from_slice(env, b"{{include contract=@main func=\"render_nav_include\" viewer return_path=\"@main:/b/");
-        include_tag.append(&u64_to_bytes(env, board_id));
+        // Format: {{include contract=@main func="render_nav_include" viewer return_path="@main:{base_path}"}}
+        let mut include_tag = Bytes::from_slice(env, b"{{include contract=@main func=\"render_nav_include\" viewer return_path=\"@main:");
+
+        if let Some(meta) = board_meta {
+            include_tag.append(&Self::build_board_base_path(env, board_id, &meta.slug));
+        } else {
+            // Fallback to numeric ID if board not found
+            include_tag.append(&Bytes::from_slice(env, b"/b/"));
+            include_tag.append(&u64_to_bytes(env, board_id));
+        }
         include_tag.append(&Bytes::from_slice(env, b"\"}}"));
 
         MarkdownBuilder::new(env)
@@ -1963,6 +2184,7 @@ impl BoardsBoard {
         env: &'a Env,
         md: MarkdownBuilder<'a>,
         board_id: u64,
+        base_path: &Bytes,
         thread: &ThreadMeta,
         voting_contract: &Option<Address>,
         flairs: &Vec<FlairDef>,
@@ -1993,8 +2215,8 @@ impl BoardsBoard {
                 .raw_str("</span>");
         }
 
-        md = md.raw_str("<a href=\"render:/b/")
-            .number(board_id as u32)
+        md = md.raw_str("<a href=\"render:")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread.id as u32)
             .raw_str("\" class=\"thread-card\">");
@@ -2036,6 +2258,16 @@ impl BoardsBoard {
 
     /// Render board view with thread list
     fn render_board(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
         let config: BoardConfig = env
             .storage()
             .persistent()
@@ -2114,13 +2346,13 @@ impl BoardsBoard {
             && !config.is_readonly
             && (viewer_role as u32) >= (Role::Member as u32);
         if can_create {
-            md = md.raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
+            md = md.raw_str("<a href=\"render:")
+                .raw(base_path.clone())
                 .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
                 .newline();
         }
 
-        // Show settings button for Admin+ users
+        // Show settings button for Admin+ users (uses numeric ID for admin routes)
         if (viewer_role as u32) >= (Role::Admin as u32) {
             md = md.raw_str("<a href=\"render:/admin/b/")
                 .number(board_id as u32)
@@ -2135,17 +2367,17 @@ impl BoardsBoard {
             md = md.div_start("sort-selector")
                 .raw_str("<span class=\"sort-label\">Sort:</span>")
                 // Hot is the default when voting is available
-                .raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
+                .raw_str("<a href=\"render:")
+                .raw(base_path.clone())
                 .raw_str("\" class=\"sort-option sort-active\">Hot</a>")
-                .raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
+                .raw_str("<a href=\"render:")
+                .raw(base_path.clone())
                 .raw_str("?sort=new\" class=\"sort-option\">New</a>")
-                .raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
+                .raw_str("<a href=\"render:")
+                .raw(base_path.clone())
                 .raw_str("?sort=top\" class=\"sort-option\">Top</a>")
-                .raw_str("<a href=\"render:/b/")
-                .number(board_id as u32)
+                .raw_str("<a href=\"render:")
+                .raw(base_path.clone())
                 .raw_str("?sort=controversial\" class=\"sort-option\">Controversial</a>")
                 .div_end();
         }
@@ -2184,7 +2416,7 @@ impl BoardsBoard {
                     if thread.is_hidden && !viewer_can_moderate {
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract, &flairs);
+                    md = Self::render_thread_card(env, md, board_id, &base_path, &thread, &voting_contract, &flairs);
                     shown += 1;
                 }
             }
@@ -2212,7 +2444,7 @@ impl BoardsBoard {
                         }
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &thread, &voting_contract, &flairs);
+                    md = Self::render_thread_card(env, md, board_id, &base_path, &thread, &voting_contract, &flairs);
                     shown += 1;
                 }
                 if idx > 0 {
@@ -2284,10 +2516,20 @@ impl BoardsBoard {
 
     /// Render hidden thread access denied message
     fn render_hidden_thread_message(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
         let md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
-            .number(board_id as u32)
+            .raw_str("<div class=\"back-nav\"><a href=\"render:")
+            .raw(base_path)
             .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n")
             .newline()
             .warning("This thread has been hidden by a moderator.");
@@ -2296,12 +2538,53 @@ impl BoardsBoard {
 
     /// Render create thread form
     fn render_create_thread(env: &Env, board_id: u64, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
+        // Get board config for private board check
+        let config: BoardConfig = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
+
+        // Get permissions contract and viewer role early for private board check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let (viewer_role, is_moderator) = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role: Role = env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args);
+                let can_mod = (role as u32) >= (Role::Moderator as u32);
+                (role, can_mod)
+            } else {
+                (Role::Guest, false)
+            }
+        } else {
+            (Role::Guest, false)
+        };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
+
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()  // Blank line after nav-bar div for markdown parsing
             // Error mappings for user-friendly error messages
             .raw_str("{{errors {\"1\": \"This board is read-only and does not accept new content.\", \"7\": \"Please select a flair for your post.\"}}}\n")
-            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
-            .number(board_id as u32)
+            .raw_str("<div class=\"back-nav\"><a href=\"render:")
+            .raw(base_path.clone())
             .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n")
             .newline()  // Blank line before h1 for markdown parsing
             .h1("New Thread");
@@ -2320,29 +2603,15 @@ impl BoardsBoard {
         }
 
         // Check if board is read-only
-        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
-            if config.is_readonly {
-                md = md.warning("This board is read-only. New threads cannot be created.");
-                return Self::render_footer_into(env, md).build();
-            }
+        if config.is_readonly {
+            md = md.warning("This board is read-only. New threads cannot be created.");
+            return Self::render_footer_into(env, md).build();
         }
 
         if viewer.is_none() {
             md = md.warning("Please connect your wallet to create a thread.");
             return Self::render_footer_into(env, md).build();
         }
-
-        // Get viewer role and check permission to create threads
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
-        let (viewer_role, is_moderator) = if let Some(ref perms_addr) = perms_addr_opt {
-            let user = viewer.as_ref().unwrap();
-            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let role: Role = env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args);
-            let can_mod = (role as u32) >= (Role::Moderator as u32);
-            (role, can_mod)
-        } else {
-            (Role::Guest, false)
-        };
 
         // Check if user has permission to create threads (requires Member+ role)
         if (viewer_role as u32) < (Role::Member as u32) {
@@ -2368,8 +2637,8 @@ impl BoardsBoard {
         }
 
         md = md
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"")
+            .raw(base_path.clone())
             .raw_str("\" />\n")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
@@ -2432,8 +2701,8 @@ impl BoardsBoard {
             .form_link_to("Create Thread", "content", "create_thread")
             .newline()
             .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[Cancel](render:")
+            .raw(base_path)
             .raw_str(")");
 
         Self::render_footer_into(env, md).build()
@@ -2449,6 +2718,13 @@ impl BoardsBoard {
 
         // Get profile contract for author display
         let profile_contract = Self::get_profile_contract(env);
+
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
 
         // Get board config for readonly check
         let config: BoardConfig = env
@@ -2477,6 +2753,15 @@ impl BoardsBoard {
         };
         let viewer_can_moderate = (viewer_role as u32) >= (Role::Moderator as u32);
 
+        // Check permissions for private boards - must be Member+ to view threads
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
+
         // Check if thread is hidden - only moderators can view hidden threads
         let is_hidden = thread.as_ref().map(|t| t.is_hidden).unwrap_or(false);
         if is_hidden && !viewer_can_moderate {
@@ -2489,10 +2774,13 @@ impl BoardsBoard {
         let viewer_can_post = (viewer_role as u32) >= (Role::Member as u32);
         let can_post = !is_readonly && !is_locked && viewer_can_post;
 
+        // Build base path for all links in this thread
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("<div class=\"back-nav\"><a href=\"render:/b/")
-            .number(board_id as u32)
+            .raw_str("<div class=\"back-nav\"><a href=\"render:")
+            .raw(base_path.clone())
             .raw_str("\" class=\"back-link\">← Back to Board</a></div>\n");
 
         // Get flairs for display
@@ -2527,7 +2815,7 @@ impl BoardsBoard {
                 .raw_str("</h1>\n");
 
             // Show author (with return path so "Go Back" returns here)
-            let return_path = Self::build_thread_return_path(env, board_id, thread_id);
+            let return_path = Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
             md = md.raw_str("<div class=\"thread-meta\">by ");
             md = Self::render_author(env, md, &t.creator, &profile_contract, Some(return_path));
             md = md.raw_str(" · ")
@@ -2568,18 +2856,31 @@ impl BoardsBoard {
             .flatten();
 
         if let Some(ref xpost) = crosspost_ref {
+            // Look up original board's slug for the crosspost link
+            let original_board_meta: Option<BoardMeta> = env
+                .storage()
+                .persistent()
+                .get(&BoardKey::Board(xpost.original_board_id));
+            let original_base_path = if let Some(ref orig_meta) = original_board_meta {
+                Self::build_board_base_path(env, xpost.original_board_id, &orig_meta.slug)
+            } else {
+                // Fallback to numeric ID if board not found (shouldn't happen)
+                let mut path = Bytes::from_slice(env, b"/b/");
+                path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, xpost.original_board_id as u32));
+                path
+            };
+
             md = md.div_start("crosspost-header")
                 .raw_str("<span class=\"crosspost-badge\">⤴ Crosspost</span> ")
-                .raw_str("Originally posted in ")
-                .raw_str("[Board #")
-                .number(xpost.original_board_id as u32)
-                .raw_str("](render:/b/")
-                .number(xpost.original_board_id as u32)
+                .raw_str("Originally posted in [")
+                .raw(original_base_path.clone())
+                .raw_str("](render:")
+                .raw(original_base_path)
                 .raw_str("/t/")
                 .number(xpost.original_thread_id as u32)
                 .raw_str(") by ");
-            // Show original author
-            let return_path = Self::build_thread_return_path(env, board_id, thread_id);
+            // Show original author (return path goes back to current thread)
+            let return_path = Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
             md = Self::render_author(env, md, &xpost.original_author, &profile_contract, Some(return_path.clone()));
             md = md.div_end()
                 .newline();
@@ -2691,8 +2992,8 @@ impl BoardsBoard {
         // Thread actions (only show if viewer is logged in and posting is allowed)
         if viewer.is_some() && can_post {
             md = md.div_start("thread-actions")
-                .raw_str("[Reply to Thread](render:/b/")
-                .number(board_id as u32)
+                .raw_str("[Reply to Thread](render:")
+                .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/reply)");
@@ -2704,8 +3005,8 @@ impl BoardsBoard {
 
                 if (is_author || is_moderator) && can_edit_time {
                     md = md.text(" ")
-                        .raw_str("[Edit](render:/b/")
-                        .number(board_id as u32)
+                        .raw_str("[Edit](render:")
+                        .raw(base_path.clone())
                         .raw_str("/t/")
                         .number(thread_id as u32)
                         .raw_str("/edit)");
@@ -2716,7 +3017,7 @@ impl BoardsBoard {
             if crosspost_ref.is_none() {
                 md = md.text(" ")
                     .raw_str("[Crosspost](render:/crosspost?from_board=")
-                    .number(board_id as u32)
+                    .text_string(&board_meta.slug)
                     .raw_str("&from_thread=")
                     .number(thread_id as u32)
                     .raw_str(")");
@@ -2802,9 +3103,9 @@ impl BoardsBoard {
         if reply_count == 0 {
             md = md.paragraph("No replies yet. Be the first to respond!");
         } else {
-            // Use waterfall loading
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
+            // Use waterfall loading with slug-based path
+            md = md.raw_str("{{render path=\"")
+                .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/replies/0\"}}");
@@ -2827,6 +3128,16 @@ impl BoardsBoard {
         // Get voting contract for vote buttons
         let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
 
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
         let config: BoardConfig = env
             .storage()
             .persistent()
@@ -2846,6 +3157,15 @@ impl BoardsBoard {
         } else {
             Role::Guest
         };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
 
         // Determine if posting is allowed (requires Member+ role, not readonly, not locked)
         let thread = env
@@ -2881,15 +3201,15 @@ impl BoardsBoard {
 
         for i in 0..replies.len() {
             if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, viewer, can_post, &profile_contract, &voting_contract);
+                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, &base_path, &board_meta.slug, viewer, can_post, &profile_contract, &voting_contract);
             }
         }
 
-        // If more replies exist, add continuation
+        // If more replies exist, add continuation with slug-based path
         let next_start = start + chunk_size;
         if (next_start as u64) < total_count {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
+            md = md.raw_str("{{render path=\"")
+                .raw(base_path)
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/replies/")
@@ -2914,6 +3234,16 @@ impl BoardsBoard {
         // Get voting contract for vote buttons
         let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
 
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
         let config: BoardConfig = env
             .storage()
             .persistent()
@@ -2933,6 +3263,15 @@ impl BoardsBoard {
         } else {
             Role::Guest
         };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
 
         // Determine if posting is allowed (requires Member+ role, not readonly, not locked)
         let thread = env
@@ -2973,15 +3312,15 @@ impl BoardsBoard {
 
         for i in 0..children.len() {
             if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, viewer, can_post, &profile_contract, &voting_contract);
+                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, &base_path, &board_meta.slug, viewer, can_post, &profile_contract, &voting_contract);
             }
         }
 
-        // If more children exist, add continuation
+        // If more children exist, add continuation with slug-based path
         let next_start = start + chunk_size;
         if next_start < total_count {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
+            md = md.raw_str("{{render path=\"")
+                .raw(base_path)
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/r/")
@@ -3002,6 +3341,8 @@ impl BoardsBoard {
         reply: &ReplyMeta,
         board_id: u64,
         thread_id: u64,
+        base_path: &Bytes,
+        board_slug: &String,
         viewer: &Option<Address>,
         can_post: bool,
         profile_contract: &Option<Address>,
@@ -3010,7 +3351,7 @@ impl BoardsBoard {
         md = md.div_start("reply");
 
         // Reply header with author (with return path so "Go Back" returns to thread)
-        let return_path = Self::build_thread_return_path(env, board_id, thread_id);
+        let return_path = Self::build_thread_return_path(env, board_id, board_slug, thread_id);
         md = md.div_start("reply-header");
         md = Self::render_author(env, md, &reply.creator, profile_contract, Some(return_path));
         md = md.raw_str(" · Reply #")
@@ -3135,8 +3476,8 @@ impl BoardsBoard {
 
         // Only show Reply button if posting is allowed
         if viewer.is_some() && can_post {
-            md = md.raw_str("[Reply](render:/b/")
-                .number(board_id as u32)
+            md = md.raw_str("[Reply](render:")
+                .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/r/")
@@ -3150,8 +3491,8 @@ impl BoardsBoard {
 
                 if (is_author || is_moderator) && can_edit_time {
                     md = md.text(" ")
-                        .raw_str("[Edit](render:/b/")
-                        .number(board_id as u32)
+                        .raw_str("[Edit](render:")
+                        .raw(base_path.clone())
                         .raw_str("/t/")
                         .number(thread_id as u32)
                         .raw_str("/r/")
@@ -3187,10 +3528,10 @@ impl BoardsBoard {
             count_args,
         );
 
-        // If has children, embed continuation for waterfall loading
+        // If has children, embed continuation for waterfall loading with slug-based path
         if children_count > 0 {
-            md = md.raw_str("{{render path=\"/b/")
-                .number(board_id as u32)
+            md = md.raw_str("{{render path=\"")
+                .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
                 .raw_str("/r/")
@@ -3204,12 +3545,51 @@ impl BoardsBoard {
 
     /// Render reply form
     fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
+        // Get board config for private board check
+        let config: BoardConfig = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
+
+        // Get permissions contract and viewer role early for private board check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
+
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
             // Error mappings for user-friendly error messages
             .raw_str("{{errors {\"1\": \"This board is read-only.\", \"2\": \"This thread is locked and does not accept new replies.\", \"3\": \"You don't have permission to perform this action.\"}}}\n")
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[< Back to Thread](render:")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
@@ -3223,11 +3603,9 @@ impl BoardsBoard {
         }
 
         // Check if board is read-only
-        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
-            if config.is_readonly {
-                md = md.warning("This board is read-only. Replies cannot be posted.");
-                return Self::render_footer_into(env, md).build();
-            }
+        if config.is_readonly {
+            md = md.warning("This board is read-only. Replies cannot be posted.");
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check if thread is locked
@@ -3243,16 +3621,7 @@ impl BoardsBoard {
             return Self::render_footer_into(env, md).build();
         }
 
-        // Get viewer role and check permission to reply (requires Member+ role)
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
-        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
-            let user = viewer.as_ref().unwrap();
-            let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
-        } else {
-            Role::Guest
-        };
-
+        // Check if user has permission to reply (requires Member+ role)
         if (viewer_role as u32) < (Role::Member as u32) {
             md = md.warning("You don't have permission to reply on this board.");
             return Self::render_footer_into(env, md).build();
@@ -3283,8 +3652,8 @@ impl BoardsBoard {
         };
 
         md = md
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str("\" />\n")
@@ -3309,8 +3678,8 @@ impl BoardsBoard {
             .form_link_to("Post Reply", "content", "create_reply")
             .newline()
             .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[Cancel](render:")
+            .raw(base_path)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")");
@@ -3350,6 +3719,45 @@ impl BoardsBoard {
 
     /// Render edit thread form
     fn render_edit_thread(env: &Env, board_id: u64, thread_id: u64, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
+        // Get board config for private board check
+        let config: BoardConfig = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
+
+        // Get permissions contract and viewer role early for private board check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
+
         let content: Address = env
             .storage()
             .instance()
@@ -3358,8 +3766,8 @@ impl BoardsBoard {
 
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[< Back to Thread](render:")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
@@ -3368,11 +3776,9 @@ impl BoardsBoard {
             .h1("Edit Thread");
 
         // Check if board is read-only
-        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
-            if config.is_readonly {
-                md = md.warning("This board is read-only. Threads cannot be edited.");
-                return Self::render_footer_into(env, md).build();
-            }
+        if config.is_readonly {
+            md = md.warning("This board is read-only. Threads cannot be edited.");
+            return Self::render_footer_into(env, md).build();
         }
 
         if viewer.is_none() {
@@ -3422,8 +3828,8 @@ impl BoardsBoard {
         // For now, we'll use a hidden field with base64 or just render the textarea
 
         md = md
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str("\" />\n")
@@ -3455,8 +3861,8 @@ impl BoardsBoard {
             .form_link_to("Save Changes", "content", "edit_thread")
             .newline()
             .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[Cancel](render:")
+            .raw(base_path)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")");
@@ -3466,6 +3872,45 @@ impl BoardsBoard {
 
     /// Render edit reply form
     fn render_edit_reply(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, viewer: &Option<Address>) -> Bytes {
+        // Get board metadata for slug-based URLs
+        let board_meta: BoardMeta = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::Board(board_id))
+            .expect("Board not found");
+
+        // Build base path for all links
+        let base_path = Self::build_board_base_path(env, board_id, &board_meta.slug);
+
+        // Get board config for private board check
+        let config: BoardConfig = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardConfig(board_id))
+            .expect("Board not found");
+
+        // Get permissions contract and viewer role early for private board check
+        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
+            if let Some(user) = viewer {
+                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
+            } else {
+                Role::Guest
+            }
+        } else {
+            Role::Guest
+        };
+
+        // Check permissions for private boards - must be Member+ to access
+        if config.is_private {
+            if let Some(ref perms_addr) = perms_addr_opt {
+                if (viewer_role as u32) < (Role::Member as u32) {
+                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                }
+            }
+        }
+
         let content: Address = env
             .storage()
             .instance()
@@ -3474,8 +3919,8 @@ impl BoardsBoard {
 
         let mut md = Self::render_nav(env, board_id, viewer)
             .newline()
-            .raw_str("[< Back to Thread](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[< Back to Thread](render:")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")")
@@ -3484,11 +3929,9 @@ impl BoardsBoard {
             .h1("Edit Reply");
 
         // Check if board is read-only
-        if let Some(config) = env.storage().persistent().get::<_, BoardConfig>(&BoardKey::BoardConfig(board_id)) {
-            if config.is_readonly {
-                md = md.warning("This board is read-only. Replies cannot be edited.");
-                return Self::render_footer_into(env, md).build();
-            }
+        if config.is_readonly {
+            md = md.warning("This board is read-only. Replies cannot be edited.");
+            return Self::render_footer_into(env, md).build();
         }
 
         // Check if thread is locked
@@ -3552,8 +3995,8 @@ impl BoardsBoard {
         );
 
         md = md
-            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/b/")
-            .number(board_id as u32)
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"")
+            .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str("\" />\n")
@@ -3583,8 +4026,8 @@ impl BoardsBoard {
             .form_link_to("Save Changes", "content", "edit_reply_content")
             .newline()
             .newline()
-            .raw_str("[Cancel](render:/b/")
-            .number(board_id as u32)
+            .raw_str("[Cancel](render:")
+            .raw(base_path)
             .raw_str("/t/")
             .number(thread_id as u32)
             .raw_str(")");
@@ -3727,11 +4170,32 @@ impl BoardsBoard {
         }
     }
 
-    /// Build a return path for the current thread view
-    fn build_thread_return_path(env: &Env, board_id: u64, thread_id: u64) -> Bytes {
-        // Build cross-contract return path: @main:/b/{board_id}/t/{thread_id}
-        let mut path = Bytes::from_slice(env, b"@main:/b/");
-        path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, board_id as u32));
+    /// Build the base path for a board (e.g., "/b/{slug}" or "/c/{community}/b/{slug}")
+    ///
+    /// For community boards: /c/{community_slug}/b/{board_slug}
+    /// For standalone boards: /b/{board_slug}
+    fn build_board_base_path(env: &Env, board_id: u64, board_slug: &String) -> Bytes {
+        // Check if board is in a community
+        if let Some(community) = Self::get_board_community(env, board_id) {
+            // Community board: /c/{community_slug}/b/{board_slug}
+            let mut path = Bytes::from_slice(env, b"/c/");
+            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, &community.name));
+            path.append(&Bytes::from_slice(env, b"/b/"));
+            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, board_slug));
+            path
+        } else {
+            // Standalone board: /b/{board_slug}
+            let mut path = Bytes::from_slice(env, b"/b/");
+            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, board_slug));
+            path
+        }
+    }
+
+    /// Build a return path for the current thread view (using slugs)
+    fn build_thread_return_path(env: &Env, board_id: u64, board_slug: &String, thread_id: u64) -> Bytes {
+        // Build cross-contract return path: @main:{base_path}/t/{thread_id}
+        let mut path = Bytes::from_slice(env, b"@main:");
+        path.append(&Self::build_board_base_path(env, board_id, board_slug));
         path.append(&Bytes::from_slice(env, b"/t/"));
         path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, thread_id as u32));
         path
@@ -3849,6 +4313,215 @@ impl BoardsBoard {
 
         (year as i32, m as u8, d as u8)
     }
+
+    // =========================================================================
+    // Slug Helper Functions
+    // =========================================================================
+
+    /// Validate slug format: 3-30 chars, starts with lowercase letter,
+    /// contains only lowercase letters, numbers, and hyphens, cannot end with hyphen.
+    fn validate_slug(env: &Env, slug: &String) {
+        let len = slug.len() as usize;
+        if len < 3 || len > 30 {
+            panic!("Board slug must be 3-30 characters");
+        }
+
+        let mut buf = [0u8; 30];
+        let copy_len = core::cmp::min(len, 30);
+        slug.copy_into_slice(&mut buf[..copy_len]);
+
+        // First character must be lowercase letter
+        let first = buf[0];
+        if !(first >= b'a' && first <= b'z') {
+            panic!("Board slug must start with lowercase letter");
+        }
+
+        // All characters must be lowercase alphanumeric or hyphen
+        for i in 0..copy_len {
+            let c = buf[i];
+            let valid = (c >= b'a' && c <= b'z')
+                || (c >= b'0' && c <= b'9')
+                || c == b'-';
+            if !valid {
+                panic!("Board slug can only contain lowercase letters, numbers, and hyphens");
+            }
+        }
+
+        // Cannot end with hyphen
+        if buf[copy_len - 1] == b'-' {
+            panic!("Board slug cannot end with hyphen");
+        }
+
+        let _ = env;
+    }
+
+    /// Generate a slug from a board name.
+    /// Converts to lowercase, replaces spaces and special chars with hyphens,
+    /// collapses multiple hyphens, trims leading/trailing hyphens.
+    fn generate_slug_from_name(env: &Env, name: &String) -> String {
+        let len = name.len() as usize;
+        if len == 0 {
+            return String::from_str(env, "board");
+        }
+
+        let mut name_buf = [0u8; 64];
+        let copy_len = core::cmp::min(len, 64);
+        name.copy_into_slice(&mut name_buf[..copy_len]);
+
+        let mut slug_buf = [0u8; 30];
+        let mut slug_len = 0usize;
+        let mut last_was_hyphen = true; // Start true to skip leading hyphens
+
+        for i in 0..copy_len {
+            if slug_len >= 30 {
+                break;
+            }
+
+            let c = name_buf[i];
+
+            // Convert to lowercase letter
+            if c >= b'A' && c <= b'Z' {
+                slug_buf[slug_len] = c + 32; // to lowercase
+                slug_len += 1;
+                last_was_hyphen = false;
+            } else if c >= b'a' && c <= b'z' {
+                slug_buf[slug_len] = c;
+                slug_len += 1;
+                last_was_hyphen = false;
+            } else if c >= b'0' && c <= b'9' {
+                // Numbers are OK but not as first char
+                if slug_len > 0 {
+                    slug_buf[slug_len] = c;
+                    slug_len += 1;
+                    last_was_hyphen = false;
+                }
+            } else if !last_was_hyphen && slug_len > 0 {
+                // Replace spaces, underscores, etc with hyphen (collapse multiple)
+                slug_buf[slug_len] = b'-';
+                slug_len += 1;
+                last_was_hyphen = true;
+            }
+        }
+
+        // Trim trailing hyphen
+        while slug_len > 0 && slug_buf[slug_len - 1] == b'-' {
+            slug_len -= 1;
+        }
+
+        // Ensure minimum length
+        if slug_len < 3 {
+            return String::from_str(env, "board");
+        }
+
+        // Build String from slice
+        String::from_str(
+            env,
+            core::str::from_utf8(&slug_buf[..slug_len]).unwrap_or("board"),
+        )
+    }
+
+    /// Generate a random 4-character suffix for slug conflict resolution.
+    fn generate_random_suffix(env: &Env) -> String {
+        // Use ledger timestamp and sequence for pseudo-randomness
+        let timestamp = env.ledger().timestamp();
+        let sequence = env.ledger().sequence();
+        let combined = timestamp.wrapping_mul(31).wrapping_add(sequence as u64);
+
+        let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
+        let mut suffix = [0u8; 4];
+        let mut val = combined;
+        for i in 0..4 {
+            suffix[i] = chars[(val % 36) as usize];
+            val /= 36;
+        }
+
+        String::from_str(
+            env,
+            core::str::from_utf8(&suffix).unwrap_or("0000"),
+        )
+    }
+
+    /// Check if a slug is available for standalone boards.
+    fn is_slug_available(env: &Env, slug: &String) -> bool {
+        !env.storage()
+            .persistent()
+            .has(&BoardKey::BoardBySlug(slug.clone()))
+    }
+
+    /// Generate a unique slug, appending random suffix if needed.
+    /// For standalone boards only - community boards are handled by boards-community.
+    fn generate_unique_slug(env: &Env, base_slug: &String) -> String {
+        // Check if base slug is available
+        if Self::is_slug_available(env, base_slug) {
+            return base_slug.clone();
+        }
+
+        // Try with random suffixes (up to 10 attempts)
+        for _ in 0..10 {
+            let suffix = Self::generate_random_suffix(env);
+
+            // Build slug with suffix: base-suffix
+            let base_len = base_slug.len() as usize;
+            let mut buf = [0u8; 30];
+            let copy_len = core::cmp::min(base_len, 25); // Leave room for -xxxx
+            base_slug.copy_into_slice(&mut buf[..copy_len]);
+
+            buf[copy_len] = b'-';
+            let mut suffix_buf = [0u8; 4];
+            suffix.copy_into_slice(&mut suffix_buf);
+            for (i, &c) in suffix_buf.iter().enumerate() {
+                buf[copy_len + 1 + i] = c;
+            }
+
+            let new_slug = String::from_str(
+                env,
+                core::str::from_utf8(&buf[..copy_len + 5]).unwrap_or("board"),
+            );
+
+            if Self::is_slug_available(env, &new_slug) {
+                return new_slug;
+            }
+        }
+
+        // Fallback: use timestamp as suffix
+        let ts = env.ledger().timestamp();
+        let ts_str = Self::u64_to_string(env, ts);
+
+        let base_len = base_slug.len() as usize;
+        let mut buf = [0u8; 30];
+        let copy_len = core::cmp::min(base_len, 15);
+        base_slug.copy_into_slice(&mut buf[..copy_len]);
+        buf[copy_len] = b'-';
+
+        let ts_len = ts_str.len() as usize;
+        let ts_copy = core::cmp::min(ts_len, 14);
+        ts_str.copy_into_slice(&mut buf[copy_len + 1..copy_len + 1 + ts_copy]);
+
+        String::from_str(
+            env,
+            core::str::from_utf8(&buf[..copy_len + 1 + ts_copy]).unwrap_or("board"),
+        )
+    }
+
+    /// Convert u64 to String (for timestamp suffix).
+    fn u64_to_string(env: &Env, mut n: u64) -> String {
+        if n == 0 {
+            return String::from_str(env, "0");
+        }
+
+        let mut buf = [0u8; 20];
+        let mut pos = 20;
+        while n > 0 && pos > 0 {
+            pos -= 1;
+            buf[pos] = b'0' + (n % 10) as u8;
+            n /= 10;
+        }
+
+        String::from_str(
+            env,
+            core::str::from_utf8(&buf[pos..]).unwrap_or("0"),
+        )
+    }
 }
 
 #[cfg(test)]
@@ -3949,8 +4622,9 @@ mod test {
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread with flair");
 
-        // Create thread with flair
-        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id), &creator);
+        // Create thread with flair (use flair_N format for form input)
+        let flair_id_str = String::from_str(&env, "flair_0"); // First flair ID is 0
+        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id_str), &creator);
 
         let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert_eq!(thread.flair_id, Some(flair_id));
@@ -4005,8 +4679,9 @@ mod test {
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread with required flair");
 
-        // This should succeed because we provide the required flair
-        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id), &creator);
+        // This should succeed because we provide the required flair (use flair_N format)
+        let flair_id_str = String::from_str(&env, "flair_0"); // First flair ID is 0
+        let thread_id = client.create_thread(&board_id, &title, &Some(flair_id_str), &creator);
 
         let thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert_eq!(thread.flair_id, Some(flair_id));
@@ -4021,8 +4696,9 @@ mod test {
         let creator = Address::generate(&env);
         let title = String::from_str(&env, "Thread with invalid flair");
 
-        // Try to use a flair ID that doesn't exist
-        client.create_thread(&board_id, &title, &Some(999), &creator);
+        // Try to use a flair ID that doesn't exist (use flair_N format)
+        let invalid_flair = String::from_str(&env, "flair_999");
+        client.create_thread(&board_id, &title, &Some(invalid_flair), &creator);
     }
 
     #[test]
@@ -4190,5 +4866,199 @@ mod test {
         client.delete_thread(&board_id, &thread_id, &creator);
         let deleted_thread = client.get_thread(&board_id, &thread_id).unwrap();
         assert!(deleted_thread.is_deleted);
+    }
+
+    // ========================================================================
+    // Slug Tests
+    // ========================================================================
+
+    #[test]
+    fn test_create_board_with_explicit_slug() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "Test Board");
+        let desc = String::from_str(&env, "A test board");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let slug = String::from_str(&env, "test-board");
+        let caller = Address::generate(&env);
+
+        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+        assert_eq!(board_id, 0);
+
+        let board = client.get_board(&board_id).unwrap();
+        assert_eq!(board.name, name);
+        assert_eq!(board.slug, slug);
+    }
+
+    #[test]
+    fn test_create_board_auto_generates_slug() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "My Awesome Board");
+        let desc = String::from_str(&env, "Auto-generated slug test");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let caller = Address::generate(&env);
+
+        // Pass None for slug to auto-generate
+        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &None, &caller);
+
+        let board = client.get_board(&board_id).unwrap();
+        // Slug should be derived from name: "my-awesome-board"
+        let expected_slug = String::from_str(&env, "my-awesome-board");
+        assert_eq!(board.slug, expected_slug);
+    }
+
+    #[test]
+    fn test_get_board_by_slug() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "Lookup Test");
+        let desc = String::from_str(&env, "Test slug lookup");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let slug = String::from_str(&env, "lookup-test");
+        let caller = Address::generate(&env);
+
+        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+
+        // Look up by slug
+        let found_board = client.get_board_by_slug(&slug);
+        assert!(found_board.is_some());
+        assert_eq!(found_board.unwrap().id, board_id);
+
+        // Look up by ID should also work
+        let found_id = client.get_board_id_by_slug(&slug);
+        assert_eq!(found_id, Some(board_id));
+    }
+
+    #[test]
+    fn test_slug_uniqueness_adds_suffix() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let caller = Address::generate(&env);
+
+        // Create first board with slug "general"
+        let name1 = String::from_str(&env, "General");
+        let slug1 = String::from_str(&env, "general");
+        let board1_id = client.create_board_with_slug(&name1, &desc, &is_private, &is_listed, &Some(slug1.clone()), &caller);
+        let board1 = client.get_board(&board1_id).unwrap();
+        assert_eq!(board1.slug, slug1);
+
+        // Create second board with same slug - should get suffix
+        let name2 = String::from_str(&env, "General 2");
+        let board2_id = client.create_board_with_slug(&name2, &desc, &is_private, &is_listed, &Some(slug1.clone()), &caller);
+        let board2 = client.get_board(&board2_id).unwrap();
+        // Slug should NOT equal "general" - it should have a suffix
+        assert!(board2.slug != slug1);
+        // But should start with "general-"
+        // We can't easily check prefix in Soroban, so just verify they're different boards
+        assert_ne!(board1_id, board2_id);
+    }
+
+    #[test]
+    #[should_panic(expected = "Board slug must be 3-30 characters")]
+    fn test_slug_validation_too_short() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "Short");
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let slug = String::from_str(&env, "ab"); // Too short - 2 chars
+        let caller = Address::generate(&env);
+
+        // This should panic
+        client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug), &caller);
+    }
+
+    #[test]
+    #[should_panic(expected = "Board slug must start with lowercase letter")]
+    fn test_slug_validation_must_start_with_letter() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "Numbers");
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let slug = String::from_str(&env, "123-board"); // Starts with number
+        let caller = Address::generate(&env);
+
+        // This should panic
+        client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug), &caller);
+    }
+
+    #[test]
+    fn test_board_metadata_includes_slug() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsBoard, ());
+        let client = BoardsBoardClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry, &None, &None, &None);
+
+        let name = String::from_str(&env, "Meta Test");
+        let desc = String::from_str(&env, "Testing metadata");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        let slug = String::from_str(&env, "meta-test");
+        let caller = Address::generate(&env);
+
+        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+
+        // Get board and verify slug is in metadata
+        let board = client.get_board(&board_id).unwrap();
+        assert_eq!(board.id, board_id);
+        assert_eq!(board.slug, slug);
+        assert_eq!(board.name, name);
+        assert_eq!(board.creator, caller);
     }
 }
