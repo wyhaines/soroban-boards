@@ -57,6 +57,8 @@ pub enum BoardKey {
     UserBoardCount(Address),
     /// Slug-to-board-ID index (for standalone boards only - community boards use CommunityBoardBySlug)
     BoardBySlug(String),
+    /// Community slug for boards that belong to a community (stored at creation time)
+    BoardCommunitySlug(u64),
 }
 
 /// Board metadata (stored per-board)
@@ -288,8 +290,9 @@ impl BoardsBoard {
         )
     }
 
-    /// Debug: test full get_board_community
-    pub fn test_get_board_community(env: Env, board_id: u64) -> Option<CommunityInfo> {
+    /// Get community info for a board (if it belongs to a community)
+    /// Used by admin contract to construct correct "Back to Board" URLs
+    pub fn get_board_community_info(env: Env, board_id: u64) -> Option<CommunityInfo> {
         Self::get_board_community(&env, board_id)
     }
 
@@ -739,6 +742,114 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .set(&BoardKey::BoardBySlug(unique_slug), &board_id);
+    }
+
+    /// Set the community slug for a board (called when board is added to a community).
+    /// This stores the slug locally to avoid expensive cross-contract calls later.
+    /// Only callable by community contract.
+    pub fn set_board_community_slug(env: Env, board_id: u64, community_slug: String, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is community contract (via registry lookup)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Contract not initialized");
+
+        let community_alias = Symbol::new(&env, "community");
+        let args: Vec<Val> = Vec::from_array(&env, [community_alias.into_val(&env)]);
+        let community: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract_by_alias"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        if community.map(|c| c != caller).unwrap_or(true) {
+            panic!("Only community contract can set board community slug");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardCommunitySlug(board_id), &community_slug);
+    }
+
+    /// Clear the community slug for a board (called when board is removed from a community).
+    /// Only callable by community contract.
+    pub fn clear_board_community_slug(env: Env, board_id: u64, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is community contract (via registry lookup)
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Contract not initialized");
+
+        let community_alias = Symbol::new(&env, "community");
+        let args: Vec<Val> = Vec::from_array(&env, [community_alias.into_val(&env)]);
+        let community: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "get_contract_by_alias"),
+                args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
+
+        if community.map(|c| c != caller).unwrap_or(true) {
+            panic!("Only community contract can clear board community slug");
+        }
+
+        env.storage()
+            .persistent()
+            .remove(&BoardKey::BoardCommunitySlug(board_id));
+    }
+
+    /// Get the community slug for a board (if it belongs to a community).
+    /// Returns None if the board doesn't belong to a community.
+    /// This is a simple storage read with no cross-contract calls.
+    pub fn get_board_community_slug(env: Env, board_id: u64) -> Option<String> {
+        env.storage()
+            .persistent()
+            .get(&BoardKey::BoardCommunitySlug(board_id))
+    }
+
+    /// Migration function: Set community slug for existing boards that were added to communities
+    /// before this feature was implemented. Only callable by registry admins.
+    pub fn migrate_set_community_slug(env: Env, board_id: u64, community_slug: String, caller: Address) {
+        caller.require_auth();
+
+        // Verify caller is a registry admin
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&BoardKey::Registry)
+            .expect("Contract not initialized");
+
+        let admin_args: Vec<Val> = Vec::from_array(&env, [caller.into_val(&env)]);
+        let is_admin: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(&env, "is_admin"),
+                admin_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false);
+
+        if !is_admin {
+            panic!("Only registry admin can migrate community slugs");
+        }
+
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardCommunitySlug(board_id), &community_slug);
     }
 
     /// List boards with pagination

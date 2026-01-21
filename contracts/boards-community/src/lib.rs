@@ -648,6 +648,9 @@ impl BoardsCommunity {
         // Remove from standalone slug index (board is now in a community)
         Self::request_remove_standalone_slug(&env, board_id);
 
+        // Store the community slug in the board contract for efficient URL generation
+        Self::request_set_board_community_slug(&env, board_id, &community.name);
+
         // Update board count
         community.board_count += 1;
         env.storage()
@@ -702,6 +705,9 @@ impl BoardsCommunity {
                 .persistent()
                 .remove(&CommunityKey::CommunityBoardBySlug(community_id, slug));
         }
+
+        // Clear the community slug from the board contract
+        Self::request_clear_board_community_slug(&env, board_id);
 
         // Add to standalone slug index (board is now standalone)
         // This handles conflicts by updating the board's slug if needed
@@ -897,6 +903,65 @@ impl BoardsCommunity {
             ).ok().and_then(|r| r.ok()).flatten();
         }
         None
+    }
+
+    /// Tell board contract to store community slug for efficient URL generation
+    fn request_set_board_community_slug(env: &Env, board_id: u64, community_slug: &String) {
+        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
+        let registry = match registry_opt {
+            Some(r) => r,
+            None => return,
+        };
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        if let Some(board_contract) = board_contract_opt {
+            let community_contract = env.current_contract_address();
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                community_slug.into_val(env),
+                community_contract.into_val(env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "set_board_community_slug"),
+                args,
+            );
+        }
+    }
+
+    /// Tell board contract to clear community slug (when board is removed from community)
+    fn request_clear_board_community_slug(env: &Env, board_id: u64) {
+        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
+        let registry = match registry_opt {
+            Some(r) => r,
+            None => return,
+        };
+
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        ).ok().and_then(|r| r.ok()).flatten();
+
+        if let Some(board_contract) = board_contract_opt {
+            let community_contract = env.current_contract_address();
+            let args: Vec<Val> = Vec::from_array(env, [
+                board_id.into_val(env),
+                community_contract.into_val(env),
+            ]);
+            let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "clear_board_community_slug"),
+                args,
+            );
+        }
     }
 
     /// Fix board_count to match actual boards list (owner/admin only)

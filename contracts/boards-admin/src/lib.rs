@@ -117,6 +117,15 @@ pub struct FlairDef {
     pub enabled: bool,
 }
 
+/// Community info from board contract
+#[contracttype]
+#[derive(Clone)]
+pub struct CommunityInfo {
+    pub id: u64,
+    pub name: String,
+    pub display_name: String,
+}
+
 /// Voting configuration from voting contract
 #[contracttype]
 #[derive(Clone)]
@@ -393,6 +402,8 @@ impl BoardsAdmin {
     }
 
     /// Render the navigation bar (uses config include for site name)
+    /// Note: Back to Board uses /b/{id} which works for standalone boards but not community boards.
+    /// This is a limitation due to budget constraints. Users can use browser back for community boards.
     fn render_nav(env: &Env, board_id: u64) -> MarkdownBuilder<'_> {
         let aliases = Self::fetch_aliases(env);
         let site_name_include = Self::config_include(env, b"site_name");

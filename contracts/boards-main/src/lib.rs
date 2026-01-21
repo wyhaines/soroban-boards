@@ -868,6 +868,26 @@ impl BoardsMain {
         Bytes::from_slice(env, &buf[..copy_len])
     }
 
+    /// Try to parse a String as a u64 (for handling numeric board IDs in URLs)
+    fn try_parse_u64(s: &String) -> Option<u64> {
+        let len = s.len() as usize;
+        if len == 0 || len > 20 {
+            return None;
+        }
+        let mut buf = [0u8; 20];
+        s.copy_into_slice(&mut buf[..len]);
+
+        let mut result: u64 = 0;
+        for i in 0..len {
+            let c = buf[i];
+            if c < b'0' || c > b'9' {
+                return None;
+            }
+            result = result.checked_mul(10)?.checked_add((c - b'0') as u64)?;
+        }
+        Some(result)
+    }
+
     /// Append footer to builder - uses include for progressive loading
     fn render_footer_into<'a>(env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
         let footer_include = Self::config_include(env, b"footer_text");
@@ -1762,13 +1782,45 @@ impl BoardsMain {
         // Convert path to relative path for board contract
         let relative_path = Self::strip_board_prefix(env, path, board_id);
 
-        // Call render with board_id as first parameter
+        // Check if this board belongs to a community and get the community slug
+        let community_slug = Self::get_board_community_slug(env, board_id);
+
+        // Call render with board_id, path, viewer, and community_slug
         let args: Vec<Val> = Vec::from_array(env, [
             board_id.into_val(env),
             relative_path.into_val(env),
             viewer.into_val(env),
+            community_slug.into_val(env),
         ]);
         env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
+    }
+
+    /// Get the community slug for a board (if it belongs to a community)
+    fn get_board_community_slug(env: &Env, board_id: u64) -> Option<String> {
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&MainKey::Registry)
+            .expect("Not initialized");
+
+        // Get board contract
+        let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_contract_opt: Option<Address> = env.invoke_contract(
+            &registry,
+            &Symbol::new(env, "get_contract_by_alias"),
+            alias_args,
+        );
+
+        if let Some(board_contract) = board_contract_opt {
+            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+            env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_board_community_slug"),
+                args,
+            ).ok().and_then(|r| r.ok()).flatten()
+        } else {
+            None
+        }
     }
 
     /// Delegate rendering to the board contract using slug lookup.
@@ -1800,17 +1852,20 @@ impl BoardsMain {
         // Convert slug bytes to String for lookup
         let slug = Self::bytes_to_string(env, slug_bytes);
 
-        // Look up board ID by slug
-        let lookup_args: Vec<Val> = Vec::from_array(env, [slug.clone().into_val(env)]);
-        let board_id_opt: Option<u64> = env
-            .try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
-                &board_contract,
-                &Symbol::new(env, "get_board_id_by_slug"),
-                lookup_args,
-            )
-            .ok()
-            .and_then(|r| r.ok())
-            .flatten();
+        // Try to parse as numeric ID first, then fall back to slug lookup
+        let board_id_opt: Option<u64> = Self::try_parse_u64(&slug)
+            .or_else(|| {
+                // Not a numeric ID, try slug lookup
+                let lookup_args: Vec<Val> = Vec::from_array(env, [slug.clone().into_val(env)]);
+                env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "get_board_id_by_slug"),
+                    lookup_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten()
+            });
 
         let Some(board_id) = board_id_opt else {
             return MarkdownBuilder::new(env)
@@ -1818,6 +1873,23 @@ impl BoardsMain {
                 .paragraph("The requested board does not exist.")
                 .render_link("Back to Home", "/")
                 .build();
+        };
+
+        // If we parsed as numeric ID, get the actual board slug for redirects
+        let actual_slug = if Self::try_parse_u64(&slug).is_some() {
+            // Slug was a numeric ID - get the real slug from board contract
+            let slug_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
+            env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_board_slug"),
+                slug_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+            .unwrap_or(slug.clone())
+        } else {
+            slug.clone()
         };
 
         // Check if board is in a community
@@ -1849,17 +1921,17 @@ impl BoardsMain {
                     .flatten();
 
                 if let Some(community) = community_info {
-                    // Build canonical redirect URL: /c/{community_name}/b/{slug}{remaining_path}
-                    let remaining_path = Self::strip_board_slug_prefix(env, path, &slug);
+                    // Board is in a community - render directly with community context
+                    let relative_path = Self::strip_board_slug_prefix_as_option(env, path, &slug);
+                    let community_slug: Option<String> = Some(community.name);
 
-                    return MarkdownBuilder::new(env)
-                        .raw_str("{{redirect /c/")
-                        .text_string(&community.name)
-                        .raw_str("/b/")
-                        .text_string(&slug)
-                        .raw(remaining_path)
-                        .raw_str("}}")
-                        .build();
+                    let args: Vec<Val> = Vec::from_array(env, [
+                        board_id.into_val(env),
+                        relative_path.into_val(env),
+                        viewer.into_val(env),
+                        community_slug.into_val(env),
+                    ]);
+                    return env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args);
                 }
             }
         }

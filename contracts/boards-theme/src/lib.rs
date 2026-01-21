@@ -259,11 +259,12 @@ impl BoardsTheme {
             .rule(".crosspost-badge", "display: inline-block; padding: 0.125rem 0.5rem; background: var(--primary); color: white; border-radius: 3px; font-size: 0.75rem; font-weight: 600; margin-right: var(--space-xs);")
             .rule(".crosspost-count", "color: var(--text-muted); font-size: 0.875rem; margin-left: var(--space-xs);")
             .rule(".crosspost-preview", "background: var(--bg-muted); padding: var(--space-md); border-radius: 6px; margin-bottom: var(--space-md);")
-            // Board rules styles
-            .rule(".board-rules", "margin-bottom: var(--space-md); border: 1px solid var(--border); border-radius: 6px; overflow: hidden;")
-            .rule(".board-rules summary", "padding: var(--space-sm) var(--space-md); background: var(--bg-muted); cursor: pointer;")
-            .rule(".board-rules summary:hover", "background: var(--bg-hover);")
-            .rule(".rules-content", "padding: var(--space-md); white-space: pre-wrap; font-size: 0.875rem; line-height: 1.5;")
+            // Board rules styles - green tip box
+            .rule(".board-rules", "margin-bottom: var(--space-md); border-left: 4px solid #2da44e; border-radius: 6px; overflow: hidden; background: linear-gradient(to right, rgba(45, 164, 78, 0.08), rgba(45, 164, 78, 0.03)); padding: var(--space-sm);")
+            .rule(".board-rules summary", "padding: var(--space-sm) var(--space-md); cursor: pointer; color: #1a7f37; font-weight: 500;")
+            .rule(".board-rules summary:hover", "background: rgba(45, 164, 78, 0.08); border-radius: 4px;")
+            .rule(".board-rules summary::before", "content: '📋 '; margin-right: var(--space-xs);")
+            .rule(".rules-content", "padding: var(--space-xs) var(--space-md) var(--space-sm); white-space: pre-wrap; font-size: 0.875rem; line-height: 1.6; color: var(--text);")
             .rule(".rules-reminder", "margin-bottom: var(--space-md); border: 2px solid var(--warning); border-radius: 6px; overflow: hidden; background: rgba(255, 193, 7, 0.05);")
             .rule(".rules-reminder summary", "padding: var(--space-sm) var(--space-md); background: rgba(255, 193, 7, 0.1); cursor: pointer; color: var(--warning);")
             .rule(".rules-reminder summary:hover", "background: rgba(255, 193, 7, 0.15);")
@@ -330,6 +331,10 @@ impl BoardsTheme {
             .rule(".alert-warning", "background: #3a3019; color: #ffd859;")
             .rule(".alert-danger", "background: #3a1c1c; color: #ff8080;")
             .rule(".alert-info", "background: #2a2644; color: #b8a8e8;")
+            // Board rules dark mode - green tip box
+            .rule(".board-rules", "background: linear-gradient(to right, rgba(111, 221, 139, 0.1), rgba(111, 221, 139, 0.03));")
+            .rule(".board-rules summary", "color: #6fdd8b;")
+            .rule(".board-rules summary:hover", "background: rgba(111, 221, 139, 0.1);")
             .rule(".badge-pinned", "background: #3a3019; color: #ffd859;")
             .rule(".badge-locked", "background: #3a1c1c; color: #ff8080;")
             .rule(".badge-private", "background: #3a2d4a; color: #c9a5ff;")
