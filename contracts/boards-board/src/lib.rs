@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use soroban_render_sdk::prelude::*;
 use soroban_sdk::{
@@ -380,7 +381,7 @@ impl BoardsBoard {
         let is_private_bool = is_private == String::from_str(&env, "true");
 
         // Parse is_listed string to bool (default to listed)
-        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
+        let is_listed_bool = is_listed.is_empty() || is_listed != String::from_str(&env, "false");
 
         // Check if caller is site admin (bypass all threshold checks)
         let is_site_admin = if let Some(ref perms) = permissions {
@@ -1205,20 +1206,20 @@ impl BoardsBoard {
                 }
             } else {
                 // For regular flairs, allow thread creator or moderators
-                if thread.creator != caller {
-                    if env.storage().instance().has(&BoardKey::Permissions) {
-                        let permissions: Address = env
-                            .storage()
-                            .instance()
-                            .get(&BoardKey::Permissions)
-                            .unwrap();
-                        let args: Vec<Val> =
-                            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
-                        let fn_name = Symbol::new(&env, "can_moderate");
-                        let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
-                        if !can_moderate {
-                            panic!("Only thread creator or moderators can set flair");
-                        }
+                if thread.creator != caller
+                    && env.storage().instance().has(&BoardKey::Permissions)
+                {
+                    let permissions: Address = env
+                        .storage()
+                        .instance()
+                        .get(&BoardKey::Permissions)
+                        .unwrap();
+                    let args: Vec<Val> =
+                        Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
+                    let fn_name = Symbol::new(&env, "can_moderate");
+                    let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
+                    if !can_moderate {
+                        panic!("Only thread creator or moderators can set flair");
                     }
                 }
             }
@@ -1741,7 +1742,7 @@ impl BoardsBoard {
         // Parse flair_id from string: "none" or empty → None, "flair_N" → Some(N)
         let parsed_flair_id: Option<u32> = if let Some(ref flair_str) = flair_id {
             let none_str = String::from_str(&env, "none");
-            if flair_str.len() == 0 || flair_str == &none_str {
+            if flair_str.is_empty() || flair_str == &none_str {
                 None
             } else {
                 // Expect format "flair_N" - parse N as u32
@@ -1760,9 +1761,8 @@ impl BoardsBoard {
                 {
                     // Parse the number after "flair_"
                     let mut result: u32 = 0;
-                    for i in 6..len {
-                        let b = buf[i];
-                        if b >= b'0' && b <= b'9' {
+                    for &b in buf.iter().take(len).skip(6) {
+                        if b.is_ascii_digit() {
                             result = result * 10 + (b - b'0') as u32;
                         } else {
                             panic!("Invalid flair_id format");
@@ -2625,7 +2625,7 @@ impl BoardsBoard {
             .persistent()
             .get::<_, String>(&BoardKey::BoardRules(board_id))
         {
-            if rules.len() > 0 {
+            if !rules.is_empty() {
                 md = md
                     .div_start("board-rules")
                     .raw_str("<details><summary><strong>Board Rules</strong></summary>")
@@ -2931,7 +2931,7 @@ impl BoardsBoard {
             .persistent()
             .get::<_, String>(&BoardKey::BoardRules(board_id))
         {
-            if rules.len() > 0 {
+            if !rules.is_empty() {
                 md = md.div_start("rules-reminder")
                     .raw_str("<details open><summary><strong>Before posting, please read the board rules:</strong></summary>")
                     .div_start("rules-content")
@@ -3258,7 +3258,7 @@ impl BoardsBoard {
         let body: Bytes =
             env.invoke_contract(&content, &Symbol::new(env, "get_thread_body"), args.clone());
 
-        if body.len() > 0 {
+        if !body.is_empty() {
             md = md.raw(body);
         } else {
             md = md.italic("No content");
@@ -4351,7 +4351,7 @@ impl BoardsBoard {
             .raw_str("<textarea name=\"new_body\" data-editor=\"markdown\" rows=\"10\">");
 
         // Include the current body content in the textarea
-        if body.len() > 0 {
+        if !body.is_empty() {
             md = md.raw(body);
         }
 
@@ -4533,7 +4533,7 @@ impl BoardsBoard {
             .raw_str("<textarea name=\"content\" data-editor=\"markdown\" rows=\"6\">");
 
         // Include the current content in the textarea
-        if reply_content.len() > 0 {
+        if !reply_content.is_empty() {
             md = md.raw(reply_content);
         }
 
@@ -4810,23 +4810,23 @@ impl BoardsBoard {
         buffer[4] = b'-';
 
         // Month (2 digits)
-        buffer[5] = b'0' + ((month / 10) % 10) as u8;
-        buffer[6] = b'0' + (month % 10) as u8;
+        buffer[5] = b'0' + ((month / 10) % 10);
+        buffer[6] = b'0' + (month % 10);
         buffer[7] = b'-';
 
         // Day (2 digits)
-        buffer[8] = b'0' + ((day / 10) % 10) as u8;
-        buffer[9] = b'0' + (day % 10) as u8;
+        buffer[8] = b'0' + ((day / 10) % 10);
+        buffer[9] = b'0' + (day % 10);
         buffer[10] = b' ';
 
         // Hour (2 digits)
-        buffer[11] = b'0' + ((hours / 10) % 10) as u8;
-        buffer[12] = b'0' + (hours % 10) as u8;
+        buffer[11] = b'0' + ((hours / 10) % 10);
+        buffer[12] = b'0' + (hours % 10);
         buffer[13] = b':';
 
         // Minute (2 digits)
-        buffer[14] = b'0' + ((minutes / 10) % 10) as u8;
-        buffer[15] = b'0' + (minutes % 10) as u8;
+        buffer[14] = b'0' + ((minutes / 10) % 10);
+        buffer[15] = b'0' + (minutes % 10);
         buffer[16] = b' ';
 
         // UTC
@@ -4862,7 +4862,7 @@ impl BoardsBoard {
     /// contains only lowercase letters, numbers, and hyphens, cannot end with hyphen.
     fn validate_slug(env: &Env, slug: &String) {
         let len = slug.len() as usize;
-        if len < 3 || len > 30 {
+        if !(3..=30).contains(&len) {
             panic!("Board slug must be 3-30 characters");
         }
 
@@ -4872,14 +4872,13 @@ impl BoardsBoard {
 
         // First character must be lowercase letter
         let first = buf[0];
-        if !(first >= b'a' && first <= b'z') {
+        if !first.is_ascii_lowercase() {
             panic!("Board slug must start with lowercase letter");
         }
 
         // All characters must be lowercase alphanumeric or hyphen
-        for i in 0..copy_len {
-            let c = buf[i];
-            let valid = (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'-';
+        for &c in buf.iter().take(copy_len) {
+            let valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-';
             if !valid {
                 panic!("Board slug can only contain lowercase letters, numbers, and hyphens");
             }
@@ -4910,23 +4909,21 @@ impl BoardsBoard {
         let mut slug_len = 0usize;
         let mut last_was_hyphen = true; // Start true to skip leading hyphens
 
-        for i in 0..copy_len {
+        for &c in name_buf.iter().take(copy_len) {
             if slug_len >= 30 {
                 break;
             }
 
-            let c = name_buf[i];
-
             // Convert to lowercase letter
-            if c >= b'A' && c <= b'Z' {
+            if c.is_ascii_uppercase() {
                 slug_buf[slug_len] = c + 32; // to lowercase
                 slug_len += 1;
                 last_was_hyphen = false;
-            } else if c >= b'a' && c <= b'z' {
+            } else if c.is_ascii_lowercase() {
                 slug_buf[slug_len] = c;
                 slug_len += 1;
                 last_was_hyphen = false;
-            } else if c >= b'0' && c <= b'9' {
+            } else if c.is_ascii_digit() {
                 // Numbers are OK but not as first char
                 if slug_len > 0 {
                     slug_buf[slug_len] = c;
@@ -4968,8 +4965,8 @@ impl BoardsBoard {
         let chars = b"abcdefghijklmnopqrstuvwxyz0123456789";
         let mut suffix = [0u8; 4];
         let mut val = combined;
-        for i in 0..4 {
-            suffix[i] = chars[(val % 36) as usize];
+        for s in &mut suffix {
+            *s = chars[(val % 36) as usize];
             val /= 36;
         }
 

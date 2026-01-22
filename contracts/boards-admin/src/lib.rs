@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use soroban_render_sdk::prelude::*;
 use soroban_sdk::{
@@ -1284,7 +1285,7 @@ impl BoardsAdmin {
                 // Board is in a community - get community info
                 let comm_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
                 let comm_opt: Option<CommunityMeta> = env.invoke_contract(
-                    &community_contract,
+                    community_contract,
                     &Symbol::new(env, "get_community"),
                     comm_args,
                 );
@@ -1332,7 +1333,7 @@ impl BoardsAdmin {
 
                 // Get communities the user owns
                 let count: u64 = env.invoke_contract(
-                    &community_contract,
+                    community_contract,
                     &Symbol::new(env, "community_count"),
                     Vec::new(env),
                 );
@@ -1341,7 +1342,7 @@ impl BoardsAdmin {
                 for i in 0..count {
                     let comm_args: Vec<Val> = Vec::from_array(env, [i.into_val(env)]);
                     let comm_opt: Option<CommunityMeta> = env.invoke_contract(
-                        &community_contract,
+                        community_contract,
                         &Symbol::new(env, "get_community"),
                         comm_args,
                     );
@@ -1839,7 +1840,7 @@ impl BoardsAdmin {
         md = md.h2("Current Rules");
 
         if let Some(ref rules) = current_rules {
-            if rules.len() > 0 {
+            if !rules.is_empty() {
                 md = md
                     .div_start("rules-content")
                     .text_string(rules)
@@ -1871,7 +1872,7 @@ impl BoardsAdmin {
 
         // Pre-fill with current rules if available
         if let Some(rules) = current_rules {
-            if rules.len() > 0 {
+            if !rules.is_empty() {
                 // Note: Can't pre-fill textarea in this setup, user needs to re-enter
                 md = md.newline().note(
                     "Copy existing rules above and paste into the text area if you want to edit.",
@@ -2178,7 +2179,7 @@ impl BoardsAdmin {
             .text_string(&branding.primary_color)
             .raw_str("</span>\n");
 
-        if branding.logo_url.len() > 0 {
+        if !branding.logo_url.is_empty() {
             md = md
                 .text("- **Logo URL:** ")
                 .text_string(&branding.logo_url)
@@ -2187,7 +2188,7 @@ impl BoardsAdmin {
             md = md.text("- **Logo URL:** *(not set)*").newline();
         }
 
-        if branding.favicon_url.len() > 0 {
+        if !branding.favicon_url.is_empty() {
             md = md
                 .text("- **Favicon URL:** ")
                 .text_string(&branding.favicon_url)
@@ -2196,7 +2197,7 @@ impl BoardsAdmin {
             md = md.text("- **Favicon URL:** *(not set)*").newline();
         }
 
-        if branding.footer_text.len() > 0 {
+        if !branding.footer_text.is_empty() {
             md = md
                 .text("- **Footer Text:** ")
                 .text_string(&branding.footer_text)
@@ -3083,7 +3084,7 @@ impl BoardsAdmin {
         }
 
         // Validate chunk size (1-20 is reasonable range)
-        if chunk_size_u32 < 1 || chunk_size_u32 > 20 {
+        if !(1..=20).contains(&chunk_size_u32) {
             panic!("Chunk size must be between 1 and 20");
         }
 
@@ -3131,7 +3132,7 @@ impl BoardsAdmin {
         }
 
         // Validate max depth (1-20 is reasonable range)
-        if max_depth_u32 < 1 || max_depth_u32 > 20 {
+        if !(1..=20).contains(&max_depth_u32) {
             panic!("Max reply depth must be between 1 and 20");
         }
 
@@ -3911,7 +3912,7 @@ impl BoardsAdmin {
     /// Set site name (registry admin only)
     pub fn set_site_name(env: Env, site_name: String, caller: Address) {
         Self::update_branding_field(&env, &caller, |b| {
-            if site_name.len() > 0 {
+            if !site_name.is_empty() {
                 b.site_name = site_name;
             }
         });
@@ -3920,7 +3921,7 @@ impl BoardsAdmin {
     /// Set tagline (registry admin only)
     pub fn set_tagline(env: Env, tagline: String, caller: Address) {
         Self::update_branding_field(&env, &caller, |b| {
-            if tagline.len() > 0 {
+            if !tagline.is_empty() {
                 b.tagline = tagline;
             }
         });
@@ -3929,7 +3930,7 @@ impl BoardsAdmin {
     /// Set primary color (registry admin only)
     pub fn set_primary_color(env: Env, primary_color: String, caller: Address) {
         Self::update_branding_field(&env, &caller, |b| {
-            if primary_color.len() > 0 {
+            if !primary_color.is_empty() {
                 b.primary_color = primary_color;
             }
         });
@@ -4002,18 +4003,18 @@ impl BoardsAdmin {
 
         // Update fields
         if let Some(s) = min_karma {
-            if s.len() > 0 {
+            if !s.is_empty() {
                 thresholds.min_karma = string_to_u32(&env, &s).expect("Invalid number") as i64;
             }
         }
         if let Some(s) = min_account_age_secs {
-            if s.len() > 0 {
+            if !s.is_empty() {
                 thresholds.min_account_age_secs =
                     string_to_u32(&env, &s).expect("Invalid number") as u64;
             }
         }
         if let Some(s) = min_post_count {
-            if s.len() > 0 {
+            if !s.is_empty() {
                 thresholds.min_post_count = string_to_u32(&env, &s).expect("Invalid number");
             }
         }
@@ -4021,12 +4022,12 @@ impl BoardsAdmin {
             thresholds.require_profile = s == String::from_str(&env, "true");
         }
         if let Some(s) = per_user_limit {
-            if s.len() > 0 {
+            if !s.is_empty() {
                 thresholds.per_user_limit = string_to_u32(&env, &s).expect("Invalid number");
             }
         }
         if let Some(s) = xlm_lock_stroops {
-            if s.len() > 0 {
+            if !s.is_empty() {
                 thresholds.xlm_lock_stroops =
                     string_to_u32(&env, &s).expect("Invalid number") as i128;
             }

@@ -221,7 +221,7 @@ impl BoardsContent {
             None => true,
             Some(s) => {
                 let none_str = String::from_str(&env, "none");
-                s.len() == 0 || s == &none_str
+                s.is_empty() || s == &none_str
             }
         };
 
@@ -372,6 +372,7 @@ impl BoardsContent {
     }
 
     /// Check if user can reply on this board
+    #[allow(dead_code)]
     fn check_can_reply(env: &Env, board_id: u64, user: &Address) {
         if !env.storage().instance().has(&ContentKey::Permissions) {
             return; // Skip if permissions not configured
@@ -1067,7 +1068,7 @@ impl BoardsContent {
 
         let is_first_flag = flags.is_empty();
         flags.push_back(flag);
-        let flag_count = flags.len() as u32;
+        let flag_count = flags.len();
 
         env.storage()
             .persistent()
@@ -1135,7 +1136,7 @@ impl BoardsContent {
 
         let is_first_flag = flags.is_empty();
         flags.push_back(flag);
-        let flag_count = flags.len() as u32;
+        let flag_count = flags.len();
 
         env.storage()
             .persistent()
@@ -1589,7 +1590,7 @@ impl BoardsContent {
         );
 
         // Store comment as thread body if provided
-        if comment.len() > 0 {
+        if !comment.is_empty() {
             let comment_len = comment.len() as usize;
             let comment_bytes = if comment_len <= 16384 {
                 let mut temp = [0u8; 16384];

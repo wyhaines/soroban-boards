@@ -249,7 +249,7 @@ impl BoardsPermissions {
         Self::remove_from_role_list(&env, board_id, &user, old_role);
 
         // Add to new role list
-        Self::add_to_role_list(&env, board_id, &user, role.clone());
+        Self::add_to_role_list(&env, board_id, &user, role);
 
         env.storage()
             .persistent()
@@ -354,7 +354,7 @@ impl BoardsPermissions {
         let is_banned = Self::is_banned(env.clone(), board_id, user);
 
         PermissionSet {
-            role: role.clone(),
+            role,
             can_view: !is_banned,
             can_post: !is_banned && role as u32 >= Role::Member as u32,
             can_moderate: !is_banned && role as u32 >= Role::Moderator as u32,
@@ -686,7 +686,7 @@ impl BoardsPermissions {
         Self::remove_from_role_list(&env, board_id, &user, current_role);
 
         // Add to new role list and set role
-        Self::add_to_role_list(&env, board_id, &user, role.clone());
+        Self::add_to_role_list(&env, board_id, &user, role);
         env.storage()
             .persistent()
             .set(&PermKey::BoardRole(board_id, user), &role);
@@ -949,7 +949,7 @@ impl BoardsPermissions {
         Self::remove_from_community_role_list(&env, community_id, &user, old_role);
 
         // Add to new role list
-        Self::add_to_community_role_list(&env, community_id, &user, role.clone());
+        Self::add_to_community_role_list(&env, community_id, &user, role);
 
         env.storage()
             .persistent()
@@ -1362,7 +1362,7 @@ impl BoardsPermissions {
         };
 
         PermissionSet {
-            role: effective_role.clone(),
+            role: effective_role,
             can_view: true,
             can_post: effective_role as u32 >= Role::Member as u32,
             can_moderate: effective_role as u32 >= Role::Moderator as u32,
@@ -1472,11 +1472,7 @@ impl BoardsPermissions {
         match env.storage().persistent().get(&PermKey::FirstSeen(user)) {
             Some(first_seen) => {
                 let now = env.ledger().timestamp();
-                if now > first_seen {
-                    now - first_seen
-                } else {
-                    0
-                }
+                now.saturating_sub(first_seen)
             }
             None => 0,
         }
@@ -1653,7 +1649,7 @@ impl BoardsPermissions {
         if env.storage().instance().has(&PermKey::SiteAdmins) {
             let existing: Vec<Address> =
                 env.storage().instance().get(&PermKey::SiteAdmins).unwrap();
-            if existing.len() > 0 {
+            if !existing.is_empty() {
                 panic!("Site admins already initialized");
             }
         }

@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 use soroban_chonk::prelude::*;
 use soroban_render_sdk::prelude::*;
@@ -891,7 +892,7 @@ Contact the site administrators for additional assistance."#;
     /// Validate slug format
     fn validate_slug(env: &Env, slug: &String) {
         let len = slug.len() as usize;
-        if len < 1 || len > 50 {
+        if !(1..=50).contains(&len) {
             panic!("Slug must be 1-50 characters");
         }
 
@@ -906,16 +907,15 @@ Contact the site administrators for additional assistance."#;
 
         // Must start with letter
         let first = buf[0];
-        if !((first >= b'a' && first <= b'z') || (first >= b'A' && first <= b'Z')) {
+        if !(first.is_ascii_lowercase() || first.is_ascii_uppercase()) {
             panic!("Slug must start with a letter");
         }
 
         // All characters must be alphanumeric or hyphen
-        for i in 0..copy_len {
-            let c = buf[i];
-            let valid = (c >= b'a' && c <= b'z')
-                || (c >= b'A' && c <= b'Z')
-                || (c >= b'0' && c <= b'9')
+        for &c in buf.iter().take(copy_len) {
+            let valid = c.is_ascii_lowercase()
+                || c.is_ascii_uppercase()
+                || c.is_ascii_digit()
                 || c == b'-';
             if !valid {
                 panic!("Slug can only contain letters, numbers, and hyphens");
@@ -936,9 +936,9 @@ Contact the site administrators for additional assistance."#;
         let copy_len = core::cmp::min(len, 256);
         s.copy_into_slice(&mut buf[..copy_len]);
 
-        for i in 0..copy_len {
-            if buf[i] >= b'A' && buf[i] <= b'Z' {
-                buf[i] = buf[i] - b'A' + b'a';
+        for c in buf.iter_mut().take(copy_len) {
+            if c.is_ascii_uppercase() {
+                *c = *c - b'A' + b'a';
             }
         }
 

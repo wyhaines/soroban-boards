@@ -391,7 +391,7 @@ impl BoardsTheme {
 
         // Append custom CSS from config if available
         let custom_css = Self::get_custom_css_from_config(&env);
-        if custom_css.len() > 0 {
+        if !custom_css.is_empty() {
             let mut result = base_css;
             result.append(&Bytes::from_slice(&env, b"\n/* Custom CSS */\n"));
             result.append(&custom_css);

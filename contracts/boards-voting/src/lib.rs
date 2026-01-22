@@ -33,6 +33,12 @@ impl VoteTally {
     }
 }
 
+impl Default for VoteTally {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// Configuration for voting on a board
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -178,7 +184,7 @@ impl BoardsVoting {
             .storage()
             .persistent()
             .get(&tally_key)
-            .unwrap_or_else(VoteTally::new);
+            .unwrap_or_default();
 
         // Set first vote timestamp if this is the first vote
         if tally.first_vote_at == 0 {
@@ -273,7 +279,7 @@ impl BoardsVoting {
             .storage()
             .persistent()
             .get(&tally_key)
-            .unwrap_or_else(VoteTally::new);
+            .unwrap_or_default();
 
         // Set first vote timestamp if this is the first vote
         if tally.first_vote_at == 0 {
@@ -327,7 +333,7 @@ impl BoardsVoting {
         env.storage()
             .persistent()
             .get(&VoteKey::ThreadTally(board_id, thread_id))
-            .unwrap_or_else(VoteTally::new)
+            .unwrap_or_default()
     }
 
     /// Get the tally for a reply
@@ -335,7 +341,7 @@ impl BoardsVoting {
         env.storage()
             .persistent()
             .get(&VoteKey::ReplyTally(board_id, thread_id, reply_id))
-            .unwrap_or_else(VoteTally::new)
+            .unwrap_or_default()
     }
 
     /// Get a user's vote on a thread

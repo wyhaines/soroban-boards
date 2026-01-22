@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 //! boards-config: Centralized configuration for Soroban Boards deployments
 //!
@@ -312,7 +313,7 @@ impl BoardsConfig {
         env.storage()
             .instance()
             .get(&ConfigKey::BoardThresholds)
-            .unwrap_or_else(|| CreationThresholds::permissive())
+            .unwrap_or_else(CreationThresholds::permissive)
     }
 
     /// Set board creation thresholds (admin only)
@@ -328,7 +329,7 @@ impl BoardsConfig {
         env.storage()
             .instance()
             .get(&ConfigKey::CommunityThresholds)
-            .unwrap_or_else(|| CreationThresholds::permissive())
+            .unwrap_or_else(CreationThresholds::permissive)
     }
 
     /// Set community creation thresholds (admin only)
@@ -508,7 +509,7 @@ impl BoardsConfig {
         env.storage()
             .instance()
             .get(&ConfigKey::DefaultVotingConfig)
-            .unwrap_or_else(|| DefaultVotingConfig::default_config())
+            .unwrap_or_else(DefaultVotingConfig::default_config)
     }
 
     /// Set default voting config (admin only)
@@ -633,7 +634,7 @@ impl BoardsConfig {
     /// Render logo HTML - for includes: {{include contract=CONFIG func="logo"}}
     pub fn render_logo(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let branding = Self::get_branding(env.clone());
-        if branding.logo_url.len() == 0 {
+        if branding.logo_url.is_empty() {
             return Bytes::new(&env);
         }
 
@@ -728,7 +729,7 @@ impl BoardsConfig {
         let mut md = MarkdownBuilder::new(&env);
 
         // Add favicon meta if set
-        if branding.favicon_url.len() > 0 {
+        if !branding.favicon_url.is_empty() {
             md = md
                 .raw_str("<meta name=\"favicon\" content=\"")
                 .text_string(&branding.favicon_url)
@@ -736,7 +737,7 @@ impl BoardsConfig {
         }
 
         // Add title meta (site name)
-        if branding.site_name.len() > 0 {
+        if !branding.site_name.is_empty() {
             md = md
                 .raw_str("<meta name=\"title\" content=\"")
                 .text_string(&branding.site_name)
@@ -744,7 +745,7 @@ impl BoardsConfig {
         }
 
         // Add theme-color meta (primary color)
-        if branding.primary_color.len() > 0 {
+        if !branding.primary_color.is_empty() {
             md = md
                 .raw_str("<meta name=\"theme-color\" content=\"")
                 .text_string(&branding.primary_color)

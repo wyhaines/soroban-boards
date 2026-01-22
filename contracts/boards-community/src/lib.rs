@@ -274,7 +274,7 @@ impl BoardsCommunity {
         let is_private_bool = is_private == String::from_str(&env, "true");
 
         // Parse is_listed string to bool (default to true)
-        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
+        let is_listed_bool = is_listed.is_empty() || is_listed != String::from_str(&env, "false");
 
         // Check name not already taken
         let name_lower = Self::to_lowercase(&env, &name);
@@ -606,7 +606,7 @@ impl BoardsCommunity {
                     )
                     .ok()
                     .and_then(|r| r.ok());
-                board_meta.map_or(false, |b| b.creator == caller)
+                board_meta.is_some_and(|b| b.creator == caller)
             } else {
                 false
             }
@@ -855,8 +855,8 @@ impl BoardsCommunity {
         let chars: [u8; 36] = *b"abcdefghijklmnopqrstuvwxyz0123456789";
         let mut suffix = [0u8; 4];
         let mut val = combined;
-        for i in 0..4 {
-            suffix[i] = chars[(val % 36) as usize];
+        for s in &mut suffix {
+            *s = chars[(val % 36) as usize];
             val /= 36;
         }
 
@@ -909,11 +909,7 @@ impl BoardsCommunity {
 
     /// Tell board contract to add this board to standalone slug index (returns new slug if conflict)
     fn request_add_standalone_slug(env: &Env, board_id: u64) -> Option<String> {
-        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
-        let registry = match registry_opt {
-            Some(r) => r,
-            None => return None,
-        };
+        let registry: Address = env.storage().instance().get(&CommunityKey::Registry)?;
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
         let board_contract_opt: Option<Address> = env
@@ -1406,7 +1402,7 @@ impl BoardsCommunity {
             .set(&CommunityKey::Community(community_id), &community);
 
         // Parse and update is_listed
-        let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
+        let is_listed_bool = is_listed.is_empty() || is_listed != String::from_str(&env, "false");
 
         env.storage().persistent().set(
             &CommunityKey::CommunityListed(community_id),
@@ -1743,7 +1739,7 @@ impl BoardsCommunity {
         // Board contract render signature: render(board_id: u64, path: Option<String>, viewer: Option<Address>, community_slug: Option<String>)
         // Pass the remaining path (e.g., "/t/0" or "") to board contract
         // Pass community slug so board can build correct paths without re-entrant calls
-        let path_opt = if remaining_path.len() > 0 {
+        let path_opt = if !remaining_path.is_empty() {
             Some(remaining_path)
         } else {
             None
@@ -1779,12 +1775,11 @@ impl BoardsCommunity {
 
     /// Helper to find next slash in a slice
     fn find_next_slash_in_slice(buf: &[u8], start: usize, end: usize) -> usize {
-        for i in start..end {
-            if buf[i] == b'/' {
-                return i;
-            }
-        }
-        end
+        buf[start..end]
+            .iter()
+            .position(|&b| b == b'/')
+            .map(|pos| pos + start)
+            .unwrap_or(end)
     }
 
     fn render_community_list(env: &Env, _viewer: Option<Address>) -> Bytes {
@@ -2654,7 +2649,7 @@ impl BoardsCommunity {
     /// Validate community name format
     fn validate_community_name(env: &Env, name: &String) {
         let len = name.len() as usize;
-        if len < 3 || len > 30 {
+        if !(3..=30).contains(&len) {
             panic!("Community name must be 3-30 characters");
         }
 
@@ -2664,14 +2659,13 @@ impl BoardsCommunity {
 
         // First character must be lowercase letter
         let first = buf[0];
-        if !(first >= b'a' && first <= b'z') {
+        if !first.is_ascii_lowercase() {
             panic!("Community name must start with lowercase letter");
         }
 
         // All characters must be lowercase alphanumeric or hyphen
-        for i in 0..copy_len {
-            let c = buf[i];
-            let valid = (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'-';
+        for &c in buf.iter().take(copy_len) {
+            let valid = c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-';
             if !valid {
                 panic!("Community name can only contain lowercase letters, numbers, and hyphens");
             }
@@ -2696,9 +2690,9 @@ impl BoardsCommunity {
         let copy_len = core::cmp::min(len, 256);
         s.copy_into_slice(&mut buf[..copy_len]);
 
-        for i in 0..copy_len {
-            if buf[i] >= b'A' && buf[i] <= b'Z' {
-                buf[i] = buf[i] - b'A' + b'a';
+        for c in buf.iter_mut().take(copy_len) {
+            if c.is_ascii_uppercase() {
+                *c = *c - b'A' + b'a';
             }
         }
 
@@ -2710,12 +2704,11 @@ impl BoardsCommunity {
     }
 
     fn find_next_slash(buf: &[u8], start: usize, end: usize) -> usize {
-        for i in start..end {
-            if buf[i] == b'/' {
-                return i;
-            }
-        }
-        end
+        buf[start..end]
+            .iter()
+            .position(|&b| b == b'/')
+            .map(|pos| pos + start)
+            .unwrap_or(end)
     }
 
     /// Upgrade the contract WASM

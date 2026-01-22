@@ -1,4 +1,5 @@
 #![no_std]
+#![allow(clippy::too_many_arguments)]
 
 //! boards-main: Application entry point for Soroban Boards
 //!
@@ -404,7 +405,7 @@ impl BoardsMain {
 
         // Convert slug to Option - empty string or "-" sentinel means auto-generate from name
         // (viewer SDK strips empty values, so "-" is used as sentinel in hidden form field)
-        let slug_opt: Option<String> = if slug.len() > 0 && slug != String::from_str(&env, "-") {
+        let slug_opt: Option<String> = if !slug.is_empty() && slug != String::from_str(&env, "-") {
             Some(slug)
         } else {
             None
@@ -880,7 +881,7 @@ impl BoardsMain {
                 .unwrap_or_else(|| Vec::new(env));
 
             for page in nav_pages.iter() {
-                let label = if page.nav_label.len() > 0 {
+                let label = if !page.nav_label.is_empty() {
                     page.nav_label.clone()
                 } else {
                     page.name.clone()
@@ -966,9 +967,8 @@ impl BoardsMain {
         s.copy_into_slice(&mut buf[..len]);
 
         let mut result: u64 = 0;
-        for i in 0..len {
-            let c = buf[i];
-            if c < b'0' || c > b'9' {
+        for &c in buf.iter().take(len) {
+            if !c.is_ascii_digit() {
                 return None;
             }
             result = result.checked_mul(10)?.checked_add((c - b'0') as u64)?;
@@ -2017,7 +2017,7 @@ impl BoardsMain {
         };
 
         // If we parsed as numeric ID, get the actual board slug for redirects
-        let actual_slug = if Self::try_parse_u64(&slug).is_some() {
+        let _actual_slug = if Self::try_parse_u64(&slug).is_some() {
             // Slug was a numeric ID - get the real slug from board contract
             let slug_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
             env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
@@ -2121,8 +2121,8 @@ impl BoardsMain {
 
         // Check if path starts with "/b/{slug}"
         if copy_len >= prefix_len
-            && &path_buf[0..3] == b"/b/"
-            && &path_buf[3..prefix_len] == &slug_buf[0..slug_copy_len]
+            && path_buf[0..3] == *b"/b/"
+            && path_buf[3..prefix_len] == slug_buf[0..slug_copy_len]
         {
             if copy_len == prefix_len {
                 // Exact match, no remaining path
@@ -2143,7 +2143,7 @@ impl BoardsMain {
         slug: &String,
     ) -> Option<String> {
         let remaining = Self::strip_board_slug_prefix(env, path, slug);
-        if remaining.len() == 0 {
+        if remaining.is_empty() {
             Some(String::from_str(env, "/"))
         } else {
             Some(Self::bytes_to_string(env, &remaining))
@@ -2195,7 +2195,7 @@ impl BoardsMain {
         p.copy_into_slice(&mut path_buf[0..copy_len]);
 
         // Check if path starts with prefix
-        if copy_len >= prefix_len && &path_buf[0..prefix_len] == &prefix[0..prefix_len] {
+        if copy_len >= prefix_len && path_buf[0..prefix_len] == prefix[0..prefix_len] {
             if copy_len == prefix_len {
                 // Exact match like "/b/0", return "/"
                 return Some(String::from_str(env, "/"));
@@ -2237,17 +2237,17 @@ impl BoardsMain {
         buffer[2] = b'0' + ((year / 10) % 10) as u8;
         buffer[3] = b'0' + (year % 10) as u8;
         buffer[4] = b'-';
-        buffer[5] = b'0' + ((month / 10) % 10) as u8;
-        buffer[6] = b'0' + (month % 10) as u8;
+        buffer[5] = b'0' + ((month / 10) % 10);
+        buffer[6] = b'0' + (month % 10);
         buffer[7] = b'-';
-        buffer[8] = b'0' + ((day / 10) % 10) as u8;
-        buffer[9] = b'0' + (day % 10) as u8;
+        buffer[8] = b'0' + ((day / 10) % 10);
+        buffer[9] = b'0' + (day % 10);
         buffer[10] = b' ';
-        buffer[11] = b'0' + ((hours / 10) % 10) as u8;
-        buffer[12] = b'0' + (hours % 10) as u8;
+        buffer[11] = b'0' + ((hours / 10) % 10);
+        buffer[12] = b'0' + (hours % 10);
         buffer[13] = b':';
-        buffer[14] = b'0' + ((minutes / 10) % 10) as u8;
-        buffer[15] = b'0' + (minutes % 10) as u8;
+        buffer[14] = b'0' + ((minutes / 10) % 10);
+        buffer[15] = b'0' + (minutes % 10);
         buffer[16] = b' ';
         buffer[17] = b'U';
         buffer[18] = b'T';
