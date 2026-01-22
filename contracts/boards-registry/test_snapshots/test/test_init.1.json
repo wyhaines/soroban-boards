@@ -40,7 +40,6 @@
         }
       ]
     ],
-    [],
     []
   ],
   "ledger": {
@@ -90,18 +89,6 @@
                               "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                             }
                           ]
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
-                              "symbol": "BoardContractCount"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u64": 0
                         }
                       },
                       {

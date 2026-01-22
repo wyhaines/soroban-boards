@@ -980,6 +980,19 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-pages contract
+    fn setup_pages(env: &Env) -> (BoardsPagesClient, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPages, ());
+        let client = BoardsPagesClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+        client.init(&registry);
+
+        (client, registry)
+    }
+
     #[test]
     fn test_init() {
         let env = Env::default();
@@ -1002,6 +1015,21 @@ mod test {
     }
 
     #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsPages, ());
+        let client = BoardsPagesClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        client.init(&registry);
+        // Second init should panic
+        client.init(&registry);
+    }
+
+    #[test]
     fn test_get_page_by_slug() {
         let env = Env::default();
         env.mock_all_auths();
@@ -1021,6 +1049,15 @@ mod test {
         let upper_slug = String::from_str(&env, "HELP");
         let page2 = client.get_page_by_slug(&upper_slug).unwrap();
         assert_eq!(page2.id, 0);
+    }
+
+    #[test]
+    fn test_get_page_by_slug_not_found() {
+        let env = Env::default();
+        let (client, _) = setup_pages(&env);
+
+        let slug = String::from_str(&env, "nonexistent");
+        assert!(client.get_page_by_slug(&slug).is_none());
     }
 
     #[test]
@@ -1055,4 +1092,54 @@ mod test {
         let content = client.get_page_content(&0);
         assert!(content.len() > 0);
     }
+
+    #[test]
+    fn test_get_page_by_id() {
+        let env = Env::default();
+        let (client, _) = setup_pages(&env);
+
+        // Get help page by ID
+        let page = client.get_page(&0);
+        assert!(page.is_some());
+        let page = page.unwrap();
+        assert_eq!(page.slug, String::from_str(&env, "help"));
+    }
+
+    #[test]
+    fn test_get_page_by_id_not_found() {
+        let env = Env::default();
+        let (client, _) = setup_pages(&env);
+
+        // Nonexistent page ID
+        assert!(client.get_page(&999).is_none());
+    }
+
+    // Note: create_page, update_page, delete_page require cross-contract calls
+    // to registry.is_admin() which need fully initialized dependency contracts.
+    // These tests are skipped as they would require a full integration test setup.
+
+    #[test]
+    fn test_render_help_page() {
+        let env = Env::default();
+        let (client, _) = setup_pages(&env);
+
+        let path = String::from_str(&env, "/help");
+        let html = client.render(&path, &None);
+        assert!(html.len() > 0);
+    }
+
+    #[test]
+    fn test_render_nonexistent_page() {
+        let env = Env::default();
+        let (client, _) = setup_pages(&env);
+
+        let path = String::from_str(&env, "/nonexistent");
+        let html = client.render(&path, &None);
+        // Should still return something (error message or redirect)
+        assert!(html.len() > 0);
+    }
+
+    // Note: update_page, update_page_content, delete_page
+    // require cross-contract calls to registry.is_admin()
+    // which need fully initialized dependency contracts to test.
 }

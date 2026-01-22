@@ -465,6 +465,25 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-registry contract with all dependencies
+    fn setup_registry(env: &Env) -> (BoardsRegistryClient, Address, Address, Address, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsRegistry, ());
+        let client = BoardsRegistryClient::new(env, &contract_id);
+
+        let admin = Address::generate(env);
+        let permissions = Address::generate(env);
+        let content = Address::generate(env);
+        let theme = Address::generate(env);
+        let admin_contract = Address::generate(env);
+
+        let admins = Vec::from_array(env, [admin.clone()]);
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
+
+        (client, contract_id, admin, permissions, content, theme, admin_contract)
+    }
+
     #[test]
     fn test_init() {
         let env = Env::default();
@@ -488,7 +507,8 @@ mod test {
     }
 
     #[test]
-    fn test_pause_and_unpause() {
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -496,13 +516,21 @@ mod test {
         let client = BoardsRegistryClient::new(&env, &contract_id);
 
         let admin = Address::generate(&env);
+        let admins = Vec::from_array(&env, [admin.clone()]);
         let permissions = Address::generate(&env);
         let content = Address::generate(&env);
         let theme = Address::generate(&env);
         let admin_contract = Address::generate(&env);
 
-        let admins = Vec::from_array(&env, [admin.clone()]);
         client.init(&admins, &permissions, &content, &theme, &admin_contract);
+        // Second init should panic
+        client.init(&admins, &permissions, &content, &theme, &admin_contract);
+    }
+
+    #[test]
+    fn test_pause_and_unpause() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
 
         // Verify initially not paused
         assert!(!client.is_paused());
@@ -519,19 +547,7 @@ mod test {
     #[test]
     fn test_get_contracts() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsRegistry, ());
-        let client = BoardsRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let theme = Address::generate(&env);
-        let admin_contract = Address::generate(&env);
-
-        let admins = Vec::from_array(&env, [admin.clone()]);
-        client.init(&admins, &permissions, &content, &theme, &admin_contract);
+        let (client, _, _, permissions, content, theme, admin_contract) = setup_registry(&env);
 
         let contracts = client.get_contracts();
         assert_eq!(contracts.permissions, permissions);
@@ -543,19 +559,7 @@ mod test {
     #[test]
     fn test_get_contract_by_alias() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsRegistry, ());
-        let client = BoardsRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let theme = Address::generate(&env);
-        let admin_contract = Address::generate(&env);
-
-        let admins = Vec::from_array(&env, [admin.clone()]);
-        client.init(&admins, &permissions, &content, &theme, &admin_contract);
+        let (client, contract_id, _, permissions, content, theme, admin_contract) = setup_registry(&env);
 
         // Test each alias
         assert_eq!(
@@ -589,19 +593,7 @@ mod test {
     #[test]
     fn test_set_contract() {
         let env = Env::default();
-        env.mock_all_auths();
-
-        let contract_id = env.register(BoardsRegistry, ());
-        let client = BoardsRegistryClient::new(&env, &contract_id);
-
-        let admin = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let theme = Address::generate(&env);
-        let admin_contract = Address::generate(&env);
-
-        let admins = Vec::from_array(&env, [admin.clone()]);
-        client.init(&admins, &permissions, &content, &theme, &admin_contract);
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
 
         // Register a new contract (e.g., profile service)
         let profile_contract = Address::generate(&env);
@@ -626,5 +618,116 @@ mod test {
             client.get_contract(&Symbol::new(&env, "perms")),
             Some(new_permissions)
         );
+    }
+
+    #[test]
+    fn test_add_admin() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
+
+        // Add a second admin
+        let new_admin = Address::generate(&env);
+        client.add_admin(&new_admin, &admin);
+
+        // Verify both are admins
+        assert!(client.is_admin(&admin));
+        assert!(client.is_admin(&new_admin));
+
+        // Verify admins list
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 2);
+    }
+
+    #[test]
+    fn test_remove_admin() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
+
+        // Add a second admin first
+        let new_admin = Address::generate(&env);
+        client.add_admin(&new_admin, &admin);
+        assert!(client.is_admin(&new_admin));
+
+        // Remove the second admin
+        client.remove_admin(&new_admin, &admin);
+        assert!(!client.is_admin(&new_admin));
+
+        // Original admin should still be admin
+        assert!(client.is_admin(&admin));
+    }
+
+    #[test]
+    #[should_panic(expected = "Cannot remove the last admin")]
+    fn test_cannot_remove_last_admin() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
+
+        // Try to remove the only admin - should panic
+        client.remove_admin(&admin, &admin);
+    }
+
+    #[test]
+    fn test_get_admins() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
+
+        // Initially should have one admin
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 1);
+        assert_eq!(admins.get(0).unwrap(), admin);
+    }
+
+    #[test]
+    fn test_is_admin_false_for_non_admin() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, _) = setup_registry(&env);
+
+        let random_user = Address::generate(&env);
+        assert!(!client.is_admin(&random_user));
+    }
+
+    #[test]
+    fn test_get_unknown_alias_returns_none() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, _) = setup_registry(&env);
+
+        assert_eq!(
+            client.get_contract_by_alias(&Symbol::new(&env, "nonexistent")),
+            None
+        );
+        assert_eq!(
+            client.get_contract(&Symbol::new(&env, "nonexistent")),
+            None
+        );
+    }
+
+    #[test]
+    fn test_render_aliases() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, _) = setup_registry(&env);
+
+        // render_aliases should return non-empty bytes
+        let aliases = client.render_aliases();
+        assert!(aliases.len() > 0);
+    }
+
+    #[test]
+    fn test_multiple_admins() {
+        let env = Env::default();
+        let (client, _, admin, _, _, _, _) = setup_registry(&env);
+
+        // Add multiple admins
+        let admin2 = Address::generate(&env);
+        let admin3 = Address::generate(&env);
+        client.add_admin(&admin2, &admin);
+        client.add_admin(&admin3, &admin);
+
+        // Verify all are admins
+        assert!(client.is_admin(&admin));
+        assert!(client.is_admin(&admin2));
+        assert!(client.is_admin(&admin3));
+
+        let admins = client.get_admins();
+        assert_eq!(admins.len(), 3);
     }
 }

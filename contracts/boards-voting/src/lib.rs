@@ -949,4 +949,111 @@ mod test {
             0
         );
     }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsVoting, ());
+        let client = BoardsVotingClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let permissions = Address::generate(&env);
+
+        client.init(&registry, &permissions);
+        // Second init should panic
+        client.init(&registry, &permissions);
+    }
+
+    #[test]
+    fn test_vote_idempotent() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_contract_id, client) = setup_contract(&env);
+
+        let voter = Address::generate(&env);
+        let board_id = 0u64;
+        let thread_id = 1u64;
+
+        // Cast upvote
+        client.vote_thread(&board_id, &thread_id, &VoteDirection::Up, &voter);
+
+        // Cast same vote again - should be idempotent
+        let tally = client.vote_thread(&board_id, &thread_id, &VoteDirection::Up, &voter);
+
+        // Should still be 1 upvote (not 2)
+        assert_eq!(tally.upvotes, 1);
+        assert_eq!(tally.downvotes, 0);
+        assert_eq!(tally.score, 1);
+    }
+
+    #[test]
+    fn test_get_user_karma_empty() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_contract_id, client) = setup_contract(&env);
+
+        let user = Address::generate(&env);
+
+        // User with no karma should return 0
+        assert_eq!(client.get_total_karma(&user), 0);
+        assert_eq!(client.get_board_karma(&0, &user), 0);
+    }
+
+    #[test]
+    fn test_karma_can_go_negative() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_contract_id, client) = setup_contract(&env);
+
+        let user = Address::generate(&env);
+        let updater = Address::generate(&env);
+        let board_id = 0u64;
+
+        // Start with some karma
+        client.update_karma(&board_id, &user, &5, &updater);
+        assert_eq!(client.get_board_karma(&board_id, &user), 5);
+
+        // Subtract more than current karma
+        client.update_karma(&board_id, &user, &-10, &updater);
+
+        // Karma should be negative
+        assert_eq!(client.get_board_karma(&board_id, &user), -5);
+        assert_eq!(client.get_total_karma(&user), -5);
+    }
+
+    #[test]
+    fn test_get_voting_config_default() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_contract_id, client) = setup_contract(&env);
+
+        // Get config for any board - should return defaults
+        let config = client.get_voting_config(&999);
+        assert!(config.enabled);
+        assert!(config.allow_downvotes);
+        assert!(config.karma_enabled);
+        assert_eq!(config.karma_multiplier, 1);
+    }
+
+    #[test]
+    fn test_get_reply_tally_no_votes() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let (_contract_id, client) = setup_contract(&env);
+
+        // Get tally for reply with no votes
+        let tally = client.get_reply_tally(&0, &999, &888);
+
+        assert_eq!(tally.upvotes, 0);
+        assert_eq!(tally.downvotes, 0);
+        assert_eq!(tally.score, 0);
+    }
 }

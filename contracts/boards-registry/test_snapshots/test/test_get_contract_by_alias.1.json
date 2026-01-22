@@ -100,18 +100,6 @@
                         "key": {
                           "vec": [
                             {
-                              "symbol": "BoardContractCount"
-                            }
-                          ]
-                        },
-                        "val": {
-                          "u64": 0
-                        }
-                      },
-                      {
-                        "key": {
-                          "vec": [
-                            {
                               "symbol": "Contract"
                             },
                             {

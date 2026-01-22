@@ -2379,6 +2379,26 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-main contract with all dependencies
+    fn setup_main(env: &Env) -> (BoardsMainClient, Address, Address, Address, Address, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsMain, ());
+        let client = BoardsMainClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+        let theme = Address::generate(env);
+        let permissions = Address::generate(env);
+        let content = Address::generate(env);
+        let admin = Address::generate(env);
+        let community = Address::generate(env);
+        let config = Address::generate(env);
+
+        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+
+        (client, registry, theme, permissions, content, admin, community, config)
+    }
+
     #[test]
     fn test_init() {
         let env = Env::default();
@@ -2402,4 +2422,68 @@ mod test {
         assert_eq!(client.get_community(), Some(community));
         assert_eq!(client.get_config(), Some(config));
     }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsMain, ());
+        let client = BoardsMainClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let theme = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let community = Address::generate(&env);
+        let config = Address::generate(&env);
+
+        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+        // Second init should panic
+        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+    }
+
+    #[test]
+    fn test_get_registry() {
+        let env = Env::default();
+        let (client, registry, _, _, _, _, _, _) = setup_main(&env);
+        assert_eq!(client.get_registry(), registry);
+    }
+
+    #[test]
+    fn test_get_theme() {
+        let env = Env::default();
+        let (client, _, theme, _, _, _, _, _) = setup_main(&env);
+        assert_eq!(client.get_theme(), theme);
+    }
+
+    #[test]
+    fn test_get_community() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, community, _) = setup_main(&env);
+        assert_eq!(client.get_community(), Some(community));
+    }
+
+    #[test]
+    fn test_get_config() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, _, config) = setup_main(&env);
+        assert_eq!(client.get_config(), Some(config));
+    }
+
+    #[test]
+    fn test_get_pages_initially_none() {
+        let env = Env::default();
+        let (client, _, _, _, _, _, _, _) = setup_main(&env);
+        // Pages is not set during init, should be None
+        assert_eq!(client.get_pages(), None);
+    }
+
+    // Note: set_pages, set_config, set_community, styles, render_styles
+    // require cross-contract calls to registry.is_admin() or theme.styles()
+    // which need fully initialized dependency contracts to test.
+    // These are integration-level tests that would require setting up
+    // the entire contract ecosystem.
 }

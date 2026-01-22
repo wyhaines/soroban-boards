@@ -2583,6 +2583,33 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-community contract with all dependencies
+    fn setup_community(env: &Env) -> (BoardsCommunityClient, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsCommunity, ());
+        let client = BoardsCommunityClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+        let permissions = Address::generate(env);
+        let theme = Address::generate(env);
+
+        client.init(&registry, &permissions, &theme);
+
+        (client, registry, permissions, theme)
+    }
+
+    /// Helper to create a public community
+    fn create_test_community(env: &Env, client: &BoardsCommunityClient, owner: &Address, name_str: &str) -> u64 {
+        let name = String::from_str(env, name_str);
+        let display_name = String::from_str(env, "Test Community");
+        let description = String::from_str(env, "Test description");
+        let is_private = String::from_str(env, "false");
+        let is_listed = String::from_str(env, "true");
+
+        client.create_community(&name, &display_name, &description, &is_private, &is_listed, owner)
+    }
+
     #[test]
     fn test_init() {
         let env = Env::default();
@@ -2597,6 +2624,24 @@ mod test {
 
         client.init(&registry, &permissions, &theme);
         assert_eq!(client.community_count(), 0);
+    }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsCommunity, ());
+        let client = BoardsCommunityClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let theme = Address::generate(&env);
+
+        client.init(&registry, &permissions, &theme);
+        // Second init should panic
+        client.init(&registry, &permissions, &theme);
     }
 
     #[test]
@@ -2769,4 +2814,186 @@ mod test {
         let random_user = Address::generate(&env);
         assert!(!client.is_member(&id, &random_user));
     }
+
+    #[test]
+    fn test_get_nonexistent_community() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        // Should return None for nonexistent community
+        assert!(client.get_community(&999).is_none());
+    }
+
+    #[test]
+    fn test_get_community_info() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+        let id = create_test_community(&env, &client, &owner, "info-test");
+
+        let info = client.get_community_info(&id);
+        assert!(info.is_some());
+        let info = info.unwrap();
+        assert_eq!(info.id, id);
+    }
+
+    #[test]
+    fn test_count_user_communities() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+
+        // Initially should be 0
+        assert_eq!(client.count_user_communities(&owner), 0);
+
+        // Create a community
+        create_test_community(&env, &client, &owner, "count-test-one");
+        assert_eq!(client.count_user_communities(&owner), 1);
+
+        // Create another
+        create_test_community(&env, &client, &owner, "count-test-two");
+        assert_eq!(client.count_user_communities(&owner), 2);
+    }
+
+    #[test]
+    fn test_set_and_get_config() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        // Initially no config
+        assert_eq!(client.get_config(), None);
+
+        // Set config
+        let config = Address::generate(&env);
+        client.set_config(&config);
+
+        assert_eq!(client.get_config(), Some(config));
+    }
+
+    #[test]
+    fn test_set_rules() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+        let id = create_test_community(&env, &client, &owner, "rules-test");
+
+        // Initially no rules
+        assert!(client.get_rules(&id).is_none());
+
+        // Set rules
+        let rules_text = String::from_str(&env, "Be respectful");
+        let rules = CommunityRules {
+            rules_text: rules_text.clone(),
+            auto_approve_members: true,
+            min_account_age_days: 7,
+        };
+        client.set_rules(&id, &rules, &owner);
+
+        let fetched = client.get_rules(&id).unwrap();
+        assert_eq!(fetched.rules_text, rules_text);
+        assert!(fetched.auto_approve_members);
+        assert_eq!(fetched.min_account_age_days, 7);
+    }
+
+    #[test]
+    fn test_update_community() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+        let name = String::from_str(&env, "update-test");
+        let display_name = String::from_str(&env, "Original Name");
+        let description = String::from_str(&env, "Original description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+
+        let id = client.create_community(&name, &display_name, &description, &is_private, &is_listed, &owner);
+
+        // Update the community
+        let new_display = String::from_str(&env, "Updated Name");
+        let new_desc = String::from_str(&env, "Updated description");
+        let new_private = String::from_str(&env, "false");
+        let new_listed = String::from_str(&env, "false");
+
+        client.update_community(&id, &new_display, &new_desc, &new_private, &new_listed, &owner);
+
+        let community = client.get_community(&id).unwrap();
+        assert_eq!(community.display_name, new_display);
+        assert_eq!(community.description, new_desc);
+    }
+
+    #[test]
+    fn test_get_community_boards_empty() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+        let id = create_test_community(&env, &client, &owner, "boards-empty");
+
+        // Should return empty vec for new community
+        let boards = client.get_community_boards(&id);
+        assert_eq!(boards.len(), 0);
+    }
+
+    #[test]
+    fn test_get_board_community_none() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        // Board that doesn't exist in any community
+        assert_eq!(client.get_board_community(&999), None);
+    }
+
+    #[test]
+    fn test_list_listed_communities() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+
+        // Create one listed community
+        let name1 = String::from_str(&env, "listed-one");
+        let display = String::from_str(&env, "Listed");
+        let desc = String::from_str(&env, "Description");
+        let is_private = String::from_str(&env, "false");
+        let is_listed = String::from_str(&env, "true");
+        client.create_community(&name1, &display, &desc, &is_private, &is_listed, &owner);
+
+        // Create one unlisted community
+        let name2 = String::from_str(&env, "unlisted-one");
+        let is_unlisted = String::from_str(&env, "false");
+        client.create_community(&name2, &display, &desc, &is_private, &is_unlisted, &owner);
+
+        // list_communities should return both
+        let all = client.list_communities(&0, &10);
+        assert_eq!(all.len(), 2);
+
+        // list_listed_communities should return only the listed one
+        let listed = client.list_listed_communities(&0, &10);
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed.get(0).unwrap().name, name1);
+    }
+
+    #[test]
+    fn test_get_admins_returns_empty_without_permissions() {
+        let env = Env::default();
+        let (client, _, _, _) = setup_community(&env);
+
+        let owner = Address::generate(&env);
+        let id = create_test_community(&env, &client, &owner, "admins-test");
+
+        // get_admins calls the permissions contract which isn't fully initialized
+        // In this test, it returns empty vec since permissions can't be invoked
+        let admins = client.get_admins(&id);
+        assert_eq!(admins.len(), 0);
+    }
+
+    // Note: add_board, remove_board, add_admin, remove_admin, request_join, accept_join,
+    // initiate_transfer, accept_transfer, delete_community, etc.
+    // require cross-contract calls to permissions and registry contracts.
+    // These are integration-level tests that would require setting up
+    // the entire contract ecosystem with real initialized contracts.
 }

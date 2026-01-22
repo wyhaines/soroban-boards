@@ -428,8 +428,26 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-theme contract with all dependencies
+    fn setup_theme(env: &Env) -> (BoardsThemeClient, Address, Address, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsTheme, ());
+        let client = BoardsThemeClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+        let permissions = Address::generate(env);
+        let content = Address::generate(env);
+        let admin = Address::generate(env);
+        let config = Address::generate(env);
+
+        client.init(&registry, &permissions, &content, &admin, &config);
+
+        (client, registry, permissions, content, admin, config)
+    }
+
     #[test]
-    fn test_styles() {
+    fn test_init() {
         let env = Env::default();
         env.mock_all_auths();
 
@@ -443,8 +461,99 @@ mod test {
         let config = Address::generate(&env);
         client.init(&registry, &permissions, &content, &admin, &config);
 
+        assert_eq!(client.get_registry(), registry);
+        assert_eq!(client.get_permissions(), permissions);
+        assert_eq!(client.get_content(), content);
+        assert_eq!(client.get_admin(), admin);
+        assert_eq!(client.get_config(), Some(config));
+    }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsTheme, ());
+        let client = BoardsThemeClient::new(&env, &contract_id);
+
+        let registry = Address::generate(&env);
+        let permissions = Address::generate(&env);
+        let content = Address::generate(&env);
+        let admin = Address::generate(&env);
+        let config = Address::generate(&env);
+
+        client.init(&registry, &permissions, &content, &admin, &config);
+        // Second init should panic
+        client.init(&registry, &permissions, &content, &admin, &config);
+    }
+
+    #[test]
+    fn test_styles() {
+        let env = Env::default();
+        let (client, _, _, _, _, config) = setup_theme(&env);
+
         let css = client.styles();
         assert!(css.len() > 0);
         assert_eq!(client.get_config(), Some(config));
     }
+
+    #[test]
+    fn test_render_styles() {
+        let env = Env::default();
+        let (client, _, _, _, _, _) = setup_theme(&env);
+
+        // render_styles should return same as styles
+        let css = client.render_styles(&None, &None);
+        assert!(css.len() > 0);
+    }
+
+    #[test]
+    fn test_get_registry() {
+        let env = Env::default();
+        let (client, registry, _, _, _, _) = setup_theme(&env);
+        assert_eq!(client.get_registry(), registry);
+    }
+
+    #[test]
+    fn test_get_permissions() {
+        let env = Env::default();
+        let (client, _, permissions, _, _, _) = setup_theme(&env);
+        assert_eq!(client.get_permissions(), permissions);
+    }
+
+    #[test]
+    fn test_get_content() {
+        let env = Env::default();
+        let (client, _, _, content, _, _) = setup_theme(&env);
+        assert_eq!(client.get_content(), content);
+    }
+
+    #[test]
+    fn test_get_admin() {
+        let env = Env::default();
+        let (client, _, _, _, admin, _) = setup_theme(&env);
+        assert_eq!(client.get_admin(), admin);
+    }
+
+    #[test]
+    fn test_get_config() {
+        let env = Env::default();
+        let (client, _, _, _, _, config) = setup_theme(&env);
+        assert_eq!(client.get_config(), Some(config));
+    }
+
+    #[test]
+    fn test_styles_contains_css() {
+        let env = Env::default();
+        let (client, _, _, _, _, _) = setup_theme(&env);
+
+        let css = client.styles();
+        // CSS should be reasonably sized (more than just a few bytes)
+        assert!(css.len() > 100);
+    }
+
+    // Note: set_config requires caller to be registry which needs
+    // a cross-contract call to verify. Skipping as it requires
+    // full integration setup.
 }

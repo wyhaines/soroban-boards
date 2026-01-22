@@ -4016,6 +4016,24 @@ mod test {
     use soroban_sdk::testutils::Address as _;
     use soroban_sdk::Env;
 
+    /// Helper to setup a boards-admin contract with all dependencies
+    fn setup_admin(env: &Env) -> (BoardsAdminClient, Address, Address, Address, Address, Address) {
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsAdmin, ());
+        let client = BoardsAdminClient::new(env, &contract_id);
+
+        let registry = Address::generate(env);
+        let permissions = Address::generate(env);
+        let content = Address::generate(env);
+        let theme = Address::generate(env);
+        let config = Address::generate(env);
+
+        client.init(&registry, &permissions, &content, &theme, &config);
+
+        (client, registry, permissions, content, theme, config)
+    }
+
     #[test]
     fn test_init() {
         let env = Env::default();
@@ -4060,24 +4078,85 @@ mod test {
     }
 
     #[test]
+    fn test_get_registry() {
+        let env = Env::default();
+        let (client, registry, _, _, _, _) = setup_admin(&env);
+        assert_eq!(client.get_registry(), registry);
+    }
+
+    #[test]
+    fn test_get_permissions() {
+        let env = Env::default();
+        let (client, _, permissions, _, _, _) = setup_admin(&env);
+        assert_eq!(client.get_permissions(), permissions);
+    }
+
+    #[test]
+    fn test_get_content() {
+        let env = Env::default();
+        let (client, _, _, content, _, _) = setup_admin(&env);
+        assert_eq!(client.get_content(), content);
+    }
+
+    #[test]
+    fn test_get_theme() {
+        let env = Env::default();
+        let (client, _, _, _, theme, _) = setup_admin(&env);
+        assert_eq!(client.get_theme(), theme);
+    }
+
+    #[test]
+    fn test_get_config() {
+        let env = Env::default();
+        let (client, _, _, _, _, config) = setup_admin(&env);
+        assert_eq!(client.get_config(), Some(config));
+    }
+
+    #[test]
     fn test_render_not_found() {
         let env = Env::default();
-        env.mock_all_auths();
+        let (client, _, _, _, _, _) = setup_admin(&env);
 
-        let contract_id = env.register(BoardsAdmin, ());
-        let client = BoardsAdminClient::new(&env, &contract_id);
-
-        let registry = Address::generate(&env);
-        let permissions = Address::generate(&env);
-        let content = Address::generate(&env);
-        let theme = Address::generate(&env);
-        let config = Address::generate(&env);
-
-        client.init(&registry, &permissions, &content, &theme, &config);
-
-        // Render unknown path
+        // Render unknown path should return "not found" content
         let path = String::from_str(&env, "/unknown");
         let html = client.render(&Some(path), &None);
         assert!(html.len() > 0);
     }
+
+    #[test]
+    fn test_render_no_path() {
+        let env = Env::default();
+        let (client, _, _, _, _, _) = setup_admin(&env);
+
+        // Render with no path (None)
+        let html = client.render(&None, &None);
+        assert!(html.len() > 0);
+    }
+
+    #[test]
+    fn test_render_empty_path() {
+        let env = Env::default();
+        let (client, _, _, _, _, _) = setup_admin(&env);
+
+        // Render with empty path
+        let path = String::from_str(&env, "");
+        let html = client.render(&Some(path), &None);
+        assert!(html.len() > 0);
+    }
+
+    #[test]
+    fn test_render_root_path() {
+        let env = Env::default();
+        let (client, _, _, _, _, _) = setup_admin(&env);
+
+        // Render with root path "/"
+        let path = String::from_str(&env, "/");
+        let html = client.render(&Some(path), &None);
+        assert!(html.len() > 0);
+    }
+
+    // Note: Admin actions like set_role, ban_user, rename_board, etc.
+    // require cross-contract calls to permissions, registry, and board contracts.
+    // These are integration-level tests that would require setting up
+    // the entire contract ecosystem with real initialized contracts.
 }

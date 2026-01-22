@@ -1056,4 +1056,95 @@ mod test {
         );
         assert!(result.passed);
     }
+
+    #[test]
+    #[should_panic(expected = "Already initialized")]
+    fn test_double_init() {
+        let (_, registry, client) = setup_test();
+        client.init(&registry);
+        // Second init should panic
+        client.init(&registry);
+    }
+
+    #[test]
+    fn test_get_custom_css_default() {
+        let (_, registry, client) = setup_test();
+        client.init(&registry);
+
+        // Default should be empty
+        let css = client.get_custom_css();
+        assert_eq!(css.len(), 0);
+    }
+
+    #[test]
+    fn test_get_xlm_lock_requirement_default() {
+        let (_, registry, client) = setup_test();
+        client.init(&registry);
+
+        // Default permissive thresholds should have 0 lock requirement
+        let requirement = client.get_xlm_lock_requirement(&CreationType::Board);
+        assert_eq!(requirement, 0);
+    }
+
+    #[test]
+    fn test_check_thresholds_account_age() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let contract_id = env.register(BoardsConfig, ());
+        let client = BoardsConfigClient::new(&env, &contract_id);
+        let registry = Address::generate(&env);
+        client.init(&registry);
+
+        let user = Address::generate(&env);
+
+        // Set thresholds with account age requirement
+        let thresholds = CreationThresholds {
+            min_karma: 0,
+            min_account_age_secs: 86400, // 1 day
+            min_post_count: 0,
+            require_profile: false,
+            per_user_limit: 0,
+            xlm_lock_stroops: 0,
+        };
+        env.as_contract(&contract_id, || {
+            env.storage()
+                .instance()
+                .set(&ConfigKey::BoardThresholds, &thresholds);
+        });
+
+        // User with insufficient account age should fail
+        let result = client.check_thresholds(
+            &CreationType::Board,
+            &user,
+            &0,
+            &0,
+            &3600, // only 1 hour old
+            &0,
+            &false,
+        );
+        assert!(!result.passed);
+        assert_eq!(result.reason, String::from_str(&env, "Account too new"));
+
+        // User with sufficient account age should pass
+        let result = client.check_thresholds(
+            &CreationType::Board,
+            &user,
+            &0,
+            &0,
+            &86400, // 1 day old
+            &0,
+            &false,
+        );
+        assert!(result.passed);
+    }
+
+    #[test]
+    fn test_thread_body_max_bytes_default() {
+        let (_, registry, client) = setup_test();
+        client.init(&registry);
+
+        // Default should be 16384 (16KB)
+        assert_eq!(client.get_thread_body_max_bytes(), 16384);
+    }
 }
