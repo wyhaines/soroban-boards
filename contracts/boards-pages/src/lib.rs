@@ -3,7 +3,8 @@
 use soroban_chonk::prelude::*;
 use soroban_render_sdk::prelude::*;
 use soroban_sdk::{
-    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
 };
 
 // Declare render capabilities
@@ -132,11 +133,15 @@ Contact the site administrators for additional assistance."#;
         };
 
         // Store page metadata
-        env.storage().persistent().set(&PagesKey::Page(page_id), &page);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::Page(page_id), &page);
 
         // Store slug lookup (lowercase)
         let slug_lower = Self::to_lowercase(env, &slug);
-        env.storage().persistent().set(&PagesKey::PageBySlug(slug_lower), &page_id);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::PageBySlug(slug_lower), &page_id);
 
         // Store content
         let content_bytes = Bytes::from_slice(env, help_content.as_bytes());
@@ -191,7 +196,11 @@ Contact the site administrators for additional assistance."#;
 
         // Check slug not already taken
         let slug_lower = Self::to_lowercase(&env, &slug);
-        if env.storage().persistent().has(&PagesKey::PageBySlug(slug_lower.clone())) {
+        if env
+            .storage()
+            .persistent()
+            .has(&PagesKey::PageBySlug(slug_lower.clone()))
+        {
             panic!("Page slug already exists");
         }
 
@@ -222,10 +231,14 @@ Contact the site administrators for additional assistance."#;
         };
 
         // Store page
-        env.storage().persistent().set(&PagesKey::Page(page_id), &page);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::Page(page_id), &page);
 
         // Store slug lookup
-        env.storage().persistent().set(&PagesKey::PageBySlug(slug_lower), &page_id);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::PageBySlug(slug_lower), &page_id);
 
         // Store content
         let content_len = content.len() as usize;
@@ -246,7 +259,9 @@ Contact the site administrators for additional assistance."#;
         chonk.write_chunked(content_bytes, 4096);
 
         // Update count
-        env.storage().instance().set(&PagesKey::PageCount, &(page_id + 1));
+        env.storage()
+            .instance()
+            .set(&PagesKey::PageCount, &(page_id + 1));
 
         page_id
     }
@@ -287,7 +302,9 @@ Contact the site administrators for additional assistance."#;
         page.updated_at = env.ledger().timestamp();
         page.author = caller;
 
-        env.storage().persistent().set(&PagesKey::Page(page_id), &page);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::Page(page_id), &page);
     }
 
     /// Update page content only
@@ -306,7 +323,9 @@ Contact the site administrators for additional assistance."#;
 
         page.updated_at = env.ledger().timestamp();
         page.author = caller;
-        env.storage().persistent().set(&PagesKey::Page(page_id), &page);
+        env.storage()
+            .persistent()
+            .set(&PagesKey::Page(page_id), &page);
 
         // Update content
         let content_len = content.len() as usize;
@@ -344,7 +363,9 @@ Contact the site administrators for additional assistance."#;
 
         // Remove slug lookup
         let slug_lower = Self::to_lowercase(&env, &page.slug);
-        env.storage().persistent().remove(&PagesKey::PageBySlug(slug_lower));
+        env.storage()
+            .persistent()
+            .remove(&PagesKey::PageBySlug(slug_lower));
 
         // Remove page metadata
         env.storage().persistent().remove(&PagesKey::Page(page_id));
@@ -354,7 +375,9 @@ Contact the site administrators for additional assistance."#;
             let chonk = Chonk::open(&env, chonk_key);
             chonk.clear();
         }
-        env.storage().persistent().remove(&PagesKey::PageContentChonk(page_id));
+        env.storage()
+            .persistent()
+            .remove(&PagesKey::PageContentChonk(page_id));
     }
 
     /// Get page by ID
@@ -395,7 +418,11 @@ Contact the site administrators for additional assistance."#;
 
         let mut pages = Vec::new(&env);
         for i in 0..count {
-            if let Some(page) = env.storage().persistent().get::<_, PageMeta>(&PagesKey::Page(i)) {
+            if let Some(page) = env
+                .storage()
+                .persistent()
+                .get::<_, PageMeta>(&PagesKey::Page(i))
+            {
                 pages.push_back(page);
             }
         }
@@ -414,7 +441,11 @@ Contact the site administrators for additional assistance."#;
         // Collect all nav pages
         let mut nav_pages: Vec<PageMeta> = Vec::new(&env);
         for i in 0..count {
-            if let Some(page) = env.storage().persistent().get::<_, PageMeta>(&PagesKey::Page(i)) {
+            if let Some(page) = env
+                .storage()
+                .persistent()
+                .get::<_, PageMeta>(&PagesKey::Page(i))
+            {
                 if page.is_visible && page.show_in_nav {
                     nav_pages.push_back(page);
                 }
@@ -576,7 +607,9 @@ Contact the site administrators for additional assistance."#;
         let mut builder = MarkdownBuilder::new(env);
         builder = builder.h1("Manage Pages");
 
-        builder = builder.raw_str("<p><a class=\"soroban-action\" href=\"render:/p/admin/new\">+ New Page</a></p>\n");
+        builder = builder.raw_str(
+            "<p><a class=\"soroban-action\" href=\"render:/p/admin/new\">+ New Page</a></p>\n",
+        );
         builder = builder.newline();
 
         if pages.is_empty() {
@@ -658,7 +691,8 @@ Contact the site administrators for additional assistance."#;
 
         // Back nav
         builder = builder.raw_str("<div class=\"back-nav\">");
-        builder = builder.raw_str("<a href=\"render:/p/admin\" class=\"back-link\">← Back to Pages</a>");
+        builder =
+            builder.raw_str("<a href=\"render:/p/admin\" class=\"back-link\">← Back to Pages</a>");
         builder = builder.raw_str("</div>\n");
         builder = builder.newline();
 
@@ -669,7 +703,8 @@ Contact the site administrators for additional assistance."#;
         builder = builder.raw_str("<input type=\"text\" name=\"slug\" placeholder=\"about-us\" pattern=\"[a-z0-9\\-]+\" />\n");
 
         builder = builder.raw_str("<label>Page Name (for admin list):</label>\n");
-        builder = builder.raw_str("<input type=\"text\" name=\"name\" placeholder=\"About Us\" />\n");
+        builder =
+            builder.raw_str("<input type=\"text\" name=\"name\" placeholder=\"About Us\" />\n");
 
         builder = builder.raw_str("<label>Navigation Label (leave empty to use name):</label>\n");
         builder = builder.raw_str("<input type=\"text\" name=\"nav_label\" placeholder=\"\" />\n");
@@ -678,20 +713,25 @@ Contact the site administrators for additional assistance."#;
         builder = builder.textarea_markdown("content", 10, "Write your page content here...");
 
         builder = builder.raw_str("<label>Navigation Order (lower = appears first):</label>\n");
-        builder = builder.raw_str("<input type=\"number\" name=\"nav_order\" value=\"100\" min=\"0\" max=\"9999\" />\n");
+        builder = builder.raw_str(
+            "<input type=\"number\" name=\"nav_order\" value=\"100\" min=\"0\" max=\"9999\" />\n",
+        );
 
         // Visibility checkboxes
-        builder = builder.raw_str("<input type=\"hidden\" name=\"is_visible\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"is_visible\" value=\"false\" />\n");
         builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_visible\" value=\"true\" checked /> Visible</label>\n");
 
-        builder = builder.raw_str("<input type=\"hidden\" name=\"show_in_nav\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"show_in_nav\" value=\"false\" />\n");
         builder = builder.raw_str("<label><input type=\"checkbox\" name=\"show_in_nav\" value=\"true\" checked /> Show in Navigation</label>\n");
 
         // Hidden fields
         builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
         builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
         builder = builder.raw_str("\" />\n");
-        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/p/admin\" />\n");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/p/admin\" />\n");
 
         builder = builder.newline();
         builder = builder.form_link_to("Create Page", "pages", "create_page");
@@ -737,7 +777,8 @@ Contact the site administrators for additional assistance."#;
 
         // Back nav
         builder = builder.raw_str("<div class=\"back-nav\">");
-        builder = builder.raw_str("<a href=\"render:/p/admin\" class=\"back-link\">← Back to Pages</a>");
+        builder =
+            builder.raw_str("<a href=\"render:/p/admin\" class=\"back-link\">← Back to Pages</a>");
         builder = builder.raw_str("</div>\n");
         builder = builder.newline();
 
@@ -772,15 +813,19 @@ Contact the site administrators for additional assistance."#;
         builder = builder.raw_str("\" min=\"0\" max=\"9999\" />\n");
 
         // Visibility checkboxes
-        builder = builder.raw_str("<input type=\"hidden\" name=\"is_visible\" value=\"false\" />\n");
-        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_visible\" value=\"true\"");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"is_visible\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<label><input type=\"checkbox\" name=\"is_visible\" value=\"true\"");
         if page.is_visible {
             builder = builder.raw_str(" checked");
         }
         builder = builder.raw_str(" /> Visible</label>\n");
 
-        builder = builder.raw_str("<input type=\"hidden\" name=\"show_in_nav\" value=\"false\" />\n");
-        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"show_in_nav\" value=\"true\"");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"show_in_nav\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<label><input type=\"checkbox\" name=\"show_in_nav\" value=\"true\"");
         if page.show_in_nav {
             builder = builder.raw_str(" checked");
         }
@@ -806,7 +851,8 @@ Contact the site administrators for additional assistance."#;
         builder = builder.raw_str("\" />\n");
 
         builder = builder.raw_str("<label>Content (Markdown):</label>\n");
-        builder = builder.raw_str("<textarea class=\"markdown-editor\" name=\"content\" rows=\"15\">");
+        builder =
+            builder.raw_str("<textarea class=\"markdown-editor\" name=\"content\" rows=\"15\">");
         builder = builder.text(content_str);
         builder = builder.raw_str("</textarea>\n");
 
@@ -833,7 +879,8 @@ Contact the site administrators for additional assistance."#;
         builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
         builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
         builder = builder.raw_str("\" />\n");
-        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/p/admin\" />\n");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/p/admin\" />\n");
 
         builder = builder.newline();
         builder = builder.form_link_to("Delete Page", "pages", "delete_page");
@@ -1074,7 +1121,10 @@ mod test {
         // Should return help page in nav
         let nav_pages = client.get_nav_pages();
         assert_eq!(nav_pages.len(), 1);
-        assert_eq!(nav_pages.get(0).unwrap().slug, String::from_str(&env, "help"));
+        assert_eq!(
+            nav_pages.get(0).unwrap().slug,
+            String::from_str(&env, "help")
+        );
     }
 
     #[test]

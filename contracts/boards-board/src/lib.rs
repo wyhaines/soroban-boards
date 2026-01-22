@@ -1,7 +1,10 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
+};
 
 // Declare render capabilities
 soroban_render!(markdown, styles);
@@ -162,12 +165,12 @@ pub struct VoteTally {
 #[derive(Clone)]
 pub struct FlairDef {
     pub id: u32,
-    pub name: String,       // max 32 chars
-    pub color: String,      // CSS text color (e.g., "#ffffff")
-    pub bg_color: String,   // CSS background color (e.g., "#ff4500")
-    pub required: bool,     // Must select flair when posting
-    pub mod_only: bool,     // Only moderators can assign
-    pub enabled: bool,      // Whether flair is active
+    pub name: String,     // max 32 chars
+    pub color: String,    // CSS text color (e.g., "#ffffff")
+    pub bg_color: String, // CSS background color (e.g., "#ff4500")
+    pub required: bool,   // Must select flair when posting
+    pub mod_only: bool,   // Only moderators can assign
+    pub enabled: bool,    // Whether flair is active
 }
 
 /// Crosspost reference from content contract
@@ -218,7 +221,9 @@ impl BoardsBoard {
 
         // Only set content if provided
         if let Some(content_addr) = content {
-            env.storage().instance().set(&BoardKey::Content, &content_addr);
+            env.storage()
+                .instance()
+                .set(&BoardKey::Content, &content_addr);
         }
 
         // Only set theme if provided
@@ -260,7 +265,9 @@ impl BoardsBoard {
             .get(&BoardKey::Registry)
             .expect("Not initialized");
         registry.require_auth();
-        env.storage().instance().set(&BoardKey::Permissions, &permissions);
+        env.storage()
+            .instance()
+            .set(&BoardKey::Permissions, &permissions);
     }
 
     /// Set voting contract address (for boards created before this was added)
@@ -309,13 +316,16 @@ impl BoardsBoard {
 
         // Verify caller is a registry admin
         let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
-        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+        let is_admin: bool =
+            env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
 
         if !is_admin {
             panic!("Only registry admin can set community");
         }
 
-        env.storage().instance().set(&BoardKey::Community, &community);
+        env.storage()
+            .instance()
+            .set(&BoardKey::Community, &community);
     }
 
     /// Create a new board in this contract.
@@ -412,8 +422,7 @@ impl BoardsBoard {
 
                 // Get user's account age from permissions
                 let user_account_age = if let Some(ref perms) = permissions {
-                    let age_args: Vec<Val> =
-                        Vec::from_array(&env, [caller.clone().into_val(&env)]);
+                    let age_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
                     env.try_invoke_contract::<u64, soroban_sdk::Error>(
                         perms,
                         &Symbol::new(&env, "get_account_age"),
@@ -433,7 +442,7 @@ impl BoardsBoard {
                         0u32.into_val(&env),           // CreationType::Board = 0
                         caller.clone().into_val(&env), // user
                         user_board_count.into_val(&env),
-                        0i64.into_val(&env),  // user_karma (TODO)
+                        0i64.into_val(&env), // user_karma (TODO)
                         user_account_age.into_val(&env),
                         0u32.into_val(&env),  // user_post_count (TODO)
                         false.into_val(&env), // has_profile (TODO)
@@ -515,9 +524,10 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .set(&BoardKey::BoardThreadCount(board_id), &0u64);
-        env.storage()
-            .persistent()
-            .set(&BoardKey::BoardPinnedThreads(board_id), &Vec::<u64>::new(&env));
+        env.storage().persistent().set(
+            &BoardKey::BoardPinnedThreads(board_id),
+            &Vec::<u64>::new(&env),
+        );
         env.storage()
             .persistent()
             .set(&BoardKey::BoardEditWindow(board_id), &86400u64);
@@ -527,9 +537,10 @@ impl BoardsBoard {
         env.storage()
             .persistent()
             .set(&BoardKey::BoardCreator(board_id), &caller.clone());
-        env.storage()
-            .persistent()
-            .set(&BoardKey::BoardCreatedAt(board_id), &env.ledger().timestamp());
+        env.storage().persistent().set(
+            &BoardKey::BoardCreatedAt(board_id),
+            &env.ledger().timestamp(),
+        );
 
         // Increment board count
         env.storage()
@@ -548,10 +559,8 @@ impl BoardsBoard {
 
         // Set caller as board owner in permissions
         if let Some(ref perms) = permissions {
-            let owner_args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let owner_args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 perms,
                 &Symbol::new(&env, "set_board_owner"),
@@ -568,17 +577,13 @@ impl BoardsBoard {
 
     /// Get board metadata by ID
     pub fn get_board(env: Env, board_id: u64) -> Option<BoardMeta> {
-        env.storage()
-            .persistent()
-            .get(&BoardKey::Board(board_id))
+        env.storage().persistent().get(&BoardKey::Board(board_id))
     }
 
     /// Get board ID by slug (for standalone boards).
     /// Returns None if slug not found.
     pub fn get_board_id_by_slug(env: Env, slug: String) -> Option<u64> {
-        env.storage()
-            .persistent()
-            .get(&BoardKey::BoardBySlug(slug))
+        env.storage().persistent().get(&BoardKey::BoardBySlug(slug))
     }
 
     /// Get board metadata by slug (for standalone boards).
@@ -747,7 +752,12 @@ impl BoardsBoard {
     /// Set the community slug for a board (called when board is added to a community).
     /// This stores the slug locally to avoid expensive cross-contract calls later.
     /// Only callable by community contract.
-    pub fn set_board_community_slug(env: Env, board_id: u64, community_slug: String, caller: Address) {
+    pub fn set_board_community_slug(
+        env: Env,
+        board_id: u64,
+        community_slug: String,
+        caller: Address,
+    ) {
         caller.require_auth();
 
         // Verify caller is community contract (via registry lookup)
@@ -822,7 +832,12 @@ impl BoardsBoard {
 
     /// Migration function: Set community slug for existing boards that were added to communities
     /// before this feature was implemented. Only callable by registry admins.
-    pub fn migrate_set_community_slug(env: Env, board_id: u64, community_slug: String, caller: Address) {
+    pub fn migrate_set_community_slug(
+        env: Env,
+        board_id: u64,
+        community_slug: String,
+        caller: Address,
+    ) {
         caller.require_auth();
 
         // Verify caller is a registry admin
@@ -885,7 +900,11 @@ impl BoardsBoard {
         let mut skipped = 0u64;
 
         for i in 0..count {
-            if let Some(board) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(i)) {
+            if let Some(board) = env
+                .storage()
+                .persistent()
+                .get::<_, BoardMeta>(&BoardKey::Board(i))
+            {
                 if board.is_listed {
                     if skipped < start {
                         skipped += 1;
@@ -942,10 +961,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -978,8 +995,12 @@ impl BoardsBoard {
             .unwrap_or(Vec::new(&env));
 
         flairs.push_back(flair);
-        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &flairs);
-        env.storage().persistent().set(&BoardKey::BoardNextFlairId(board_id), &(flair_id + 1));
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardFlairDefs(board_id), &flairs);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardNextFlairId(board_id), &(flair_id + 1));
 
         flair_id
     }
@@ -995,10 +1016,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1029,7 +1048,9 @@ impl BoardsBoard {
             panic!("Flair not found");
         }
 
-        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
     }
 
     /// Disable a flair (Admin+ only)
@@ -1043,10 +1064,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1076,7 +1095,9 @@ impl BoardsBoard {
             panic!("Flair not found");
         }
 
-        env.storage().persistent().set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardFlairDefs(board_id), &new_flairs);
     }
 
     /// List all flairs for a board
@@ -1125,7 +1146,13 @@ impl BoardsBoard {
     }
 
     /// Set thread flair (Moderator+ for mod_only flairs, thread creator for others)
-    pub fn set_thread_flair(env: Env, board_id: u64, thread_id: u64, flair_id: Option<u32>, caller: Address) {
+    pub fn set_thread_flair(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        flair_id: Option<u32>,
+        caller: Address,
+    ) {
         caller.require_auth();
 
         // Get thread
@@ -1168,10 +1195,8 @@ impl BoardsBoard {
                         .instance()
                         .get(&BoardKey::Permissions)
                         .unwrap();
-                    let args: Vec<Val> = Vec::from_array(
-                        &env,
-                        [board_id.into_val(&env), caller.into_val(&env)],
-                    );
+                    let args: Vec<Val> =
+                        Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
                     let fn_name = Symbol::new(&env, "can_moderate");
                     let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
                     if !can_moderate {
@@ -1187,10 +1212,8 @@ impl BoardsBoard {
                             .instance()
                             .get(&BoardKey::Permissions)
                             .unwrap();
-                        let args: Vec<Val> = Vec::from_array(
-                            &env,
-                            [board_id.into_val(&env), caller.into_val(&env)],
-                        );
+                        let args: Vec<Val> =
+                            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
                         let fn_name = Symbol::new(&env, "can_moderate");
                         let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
                         if !can_moderate {
@@ -1218,10 +1241,7 @@ impl BoardsBoard {
             .get(&BoardKey::Permissions)
             .expect("Not initialized");
 
-        let args: Vec<Val> = Vec::from_array(
-            env,
-            [board_id.into_val(env), user.into_val(env)],
-        );
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
         let fn_name = Symbol::new(env, "can_create_thread");
         let can_create: bool = env.invoke_contract(&permissions, &fn_name, args);
 
@@ -1238,10 +1258,7 @@ impl BoardsBoard {
             .get(&BoardKey::Permissions)
             .expect("Not initialized");
 
-        let args: Vec<Val> = Vec::from_array(
-            env,
-            [board_id.into_val(env), user.into_val(env)],
-        );
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
         let fn_name = Symbol::new(env, "can_moderate");
         let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
 
@@ -1277,10 +1294,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1288,18 +1303,28 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().set(&BoardKey::BoardListed(board_id), &is_listed);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardListed(board_id), &is_listed);
 
         // Update BoardMeta too
-        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+        if let Some(mut meta) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&BoardKey::Board(board_id))
+        {
             meta.is_listed = is_listed;
-            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &meta);
         }
     }
 
     /// Get board creator address
     pub fn get_creator(env: Env, board_id: u64) -> Option<Address> {
-        env.storage().persistent().get(&BoardKey::BoardCreator(board_id))
+        env.storage()
+            .persistent()
+            .get(&BoardKey::BoardCreator(board_id))
     }
 
     /// Get board creation timestamp
@@ -1319,12 +1344,20 @@ impl BoardsBoard {
             .get(&BoardKey::BoardThreadCount(board_id))
             .unwrap_or(0);
         let new_count = count + 1;
-        env.storage().persistent().set(&BoardKey::BoardThreadCount(board_id), &new_count);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardThreadCount(board_id), &new_count);
 
         // Update BoardMeta too
-        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+        if let Some(mut meta) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&BoardKey::Board(board_id))
+        {
             meta.thread_count = new_count;
-            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &meta);
         }
 
         new_count
@@ -1341,7 +1374,11 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Allow board creator or registry admin to set thread count
-        let is_registry_admin = if let Some(registry) = env.storage().instance().get::<_, Address>(&BoardKey::Registry) {
+        let is_registry_admin = if let Some(registry) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Registry)
+        {
             let args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
             env.invoke_contract::<bool>(&registry, &Symbol::new(&env, "is_admin"), args)
         } else {
@@ -1352,11 +1389,15 @@ impl BoardsBoard {
             panic!("Only board creator or registry admin can set thread count");
         }
 
-        env.storage().persistent().set(&BoardKey::BoardThreadCount(board_id), &count);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardThreadCount(board_id), &count);
 
         let mut updated_meta = meta;
         updated_meta.thread_count = count;
-        env.storage().persistent().set(&BoardKey::Board(board_id), &updated_meta);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::Board(board_id), &updated_meta);
     }
 
     /// Get reply chunk size for waterfall loading
@@ -1389,10 +1430,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1406,7 +1445,9 @@ impl BoardsBoard {
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
         config.reply_chunk_size = size;
-        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardConfig(board_id), &config);
     }
 
     /// Get maximum reply depth for nested replies
@@ -1434,10 +1475,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1451,7 +1490,9 @@ impl BoardsBoard {
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
         config.max_reply_depth = depth;
-        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardConfig(board_id), &config);
     }
 
     /// Get edit window in seconds (0 = no limit)
@@ -1474,10 +1515,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1485,7 +1524,9 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().set(&BoardKey::BoardEditWindow(board_id), &seconds);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardEditWindow(board_id), &seconds);
     }
 
     /// Check if board is read-only
@@ -1508,10 +1549,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1525,12 +1564,20 @@ impl BoardsBoard {
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
         config.is_readonly = is_readonly;
-        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardConfig(board_id), &config);
 
         // Update BoardMeta too
-        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+        if let Some(mut meta) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&BoardKey::Board(board_id))
+        {
             meta.is_readonly = is_readonly;
-            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &meta);
         }
     }
 
@@ -1554,10 +1601,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1571,12 +1616,20 @@ impl BoardsBoard {
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
         config.is_private = is_private;
-        env.storage().persistent().set(&BoardKey::BoardConfig(board_id), &config);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardConfig(board_id), &config);
 
         // Update BoardMeta too
-        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+        if let Some(mut meta) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&BoardKey::Board(board_id))
+        {
             meta.is_private = is_private;
-            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &meta);
         }
     }
 
@@ -1592,10 +1645,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1603,12 +1654,16 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().set(&BoardKey::BoardRules(board_id), &rules);
+        env.storage()
+            .persistent()
+            .set(&BoardKey::BoardRules(board_id), &rules);
     }
 
     /// Get board rules (returns None if no rules are set)
     pub fn get_rules(env: Env, board_id: u64) -> Option<String> {
-        env.storage().persistent().get(&BoardKey::BoardRules(board_id))
+        env.storage()
+            .persistent()
+            .get(&BoardKey::BoardRules(board_id))
     }
 
     /// Clear board rules (Admin+ only)
@@ -1622,10 +1677,8 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(
-                &env,
-                [board_id.into_val(&env), caller.into_val(&env)],
-            );
+            let args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
             let fn_name = Symbol::new(&env, "can_admin");
             let can_admin: bool = env.invoke_contract(&permissions, &fn_name, args);
             if !can_admin {
@@ -1633,7 +1686,9 @@ impl BoardsBoard {
             }
         }
 
-        env.storage().persistent().remove(&BoardKey::BoardRules(board_id));
+        env.storage()
+            .persistent()
+            .remove(&BoardKey::BoardRules(board_id));
     }
 
     /// Check if content is within the edit window
@@ -1657,7 +1712,13 @@ impl BoardsBoard {
     /// Create a new thread (returns thread ID)
     /// Note: Auth is handled by the calling contract (theme). When called directly
     /// (e.g., via CLI), callers should ensure proper authorization.
-    pub fn create_thread(env: Env, board_id: u64, title: String, flair_id: Option<String>, creator: Address) -> u64 {
+    pub fn create_thread(
+        env: Env,
+        board_id: u64,
+        title: String,
+        flair_id: Option<String>,
+        creator: Address,
+    ) -> u64 {
         // Note: require_auth() removed because this is called by the theme contract,
         // which already handles authentication. Cross-contract auth doesn't propagate
         // automatically in Soroban.
@@ -1689,8 +1750,14 @@ impl BoardsBoard {
                 flair_str.copy_into_slice(&mut buf[..len]);
 
                 // Check for "flair_" prefix (6 chars)
-                if len > 6 && buf[0] == b'f' && buf[1] == b'l' && buf[2] == b'a'
-                    && buf[3] == b'i' && buf[4] == b'r' && buf[5] == b'_' {
+                if len > 6
+                    && buf[0] == b'f'
+                    && buf[1] == b'l'
+                    && buf[2] == b'a'
+                    && buf[3] == b'i'
+                    && buf[4] == b'r'
+                    && buf[5] == b'_'
+                {
                     // Parse the number after "flair_"
                     let mut result: u32 = 0;
                     for i in 6..len {
@@ -1808,9 +1875,15 @@ impl BoardsBoard {
             .set(&BoardKey::BoardThreadCount(board_id), &(thread_id + 1));
 
         // Update BoardMeta thread count
-        if let Some(mut meta) = env.storage().persistent().get::<_, BoardMeta>(&BoardKey::Board(board_id)) {
+        if let Some(mut meta) = env
+            .storage()
+            .persistent()
+            .get::<_, BoardMeta>(&BoardKey::Board(board_id))
+        {
             meta.thread_count = thread_id + 1;
-            env.storage().persistent().set(&BoardKey::Board(board_id), &meta);
+            env.storage()
+                .persistent()
+                .set(&BoardKey::Board(board_id), &meta);
         }
 
         thread_id
@@ -1824,8 +1897,15 @@ impl BoardsBoard {
     }
 
     /// Get thread title and author (for crossposting)
-    pub fn get_thread_title_and_author(env: Env, board_id: u64, thread_id: u64) -> Option<(String, Address)> {
-        let thread: Option<ThreadMeta> = env.storage().persistent().get(&BoardKey::BoardThread(board_id, thread_id));
+    pub fn get_thread_title_and_author(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+    ) -> Option<(String, Address)> {
+        let thread: Option<ThreadMeta> = env
+            .storage()
+            .persistent()
+            .get(&BoardKey::BoardThread(board_id, thread_id));
         thread.map(|t| (t.title, t.creator))
     }
 
@@ -1847,7 +1927,11 @@ impl BoardsBoard {
                 break;
             }
             let idx = actual_start - i;
-            if let Some(thread) = env.storage().persistent().get(&BoardKey::BoardThread(board_id, idx)) {
+            if let Some(thread) = env
+                .storage()
+                .persistent()
+                .get(&BoardKey::BoardThread(board_id, idx))
+            {
                 threads.push_back(thread);
             }
         }
@@ -1983,7 +2067,11 @@ impl BoardsBoard {
 
         let mut threads = Vec::new(&env);
         for id in pinned_ids.iter() {
-            if let Some(thread) = env.storage().persistent().get(&BoardKey::BoardThread(board_id, id)) {
+            if let Some(thread) = env
+                .storage()
+                .persistent()
+                .get(&BoardKey::BoardThread(board_id, id))
+            {
                 threads.push_back(thread);
             }
         }
@@ -2133,10 +2221,8 @@ impl BoardsBoard {
                     .instance()
                     .get(&BoardKey::Permissions)
                     .unwrap();
-                let args: Vec<Val> = Vec::from_array(
-                    &env,
-                    [board_id.into_val(&env), caller.into_val(&env)],
-                );
+                let args: Vec<Val> =
+                    Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
                 let fn_name = Symbol::new(&env, "can_moderate");
                 env.invoke_contract(&permissions, &fn_name, args)
             } else {
@@ -2156,7 +2242,13 @@ impl BoardsBoard {
     }
 
     /// Edit thread title (author or moderator)
-    pub fn edit_thread_title(env: Env, board_id: u64, thread_id: u64, new_title: String, caller: Address) {
+    pub fn edit_thread_title(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        new_title: String,
+        caller: Address,
+    ) {
         caller.require_auth();
 
         if let Some(mut thread) = env
@@ -2172,10 +2264,8 @@ impl BoardsBoard {
                     .instance()
                     .get(&BoardKey::Permissions)
                     .unwrap();
-                let args: Vec<Val> = Vec::from_array(
-                    &env,
-                    [board_id.into_val(&env), caller.into_val(&env)],
-                );
+                let args: Vec<Val> =
+                    Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
                 let fn_name = Symbol::new(&env, "can_moderate");
                 env.invoke_contract(&permissions, &fn_name, args)
             } else {
@@ -2218,21 +2308,33 @@ impl BoardsBoard {
     /// board_id is now passed as a parameter
     /// community_slug: If board is in a community, pass the community's URL slug here
     ///                 to enable proper path building without re-entrant calls
-    pub fn render(env: Env, board_id: u64, path: Option<String>, viewer: Option<Address>, community_slug: Option<String>) -> Bytes {
+    pub fn render(
+        env: Env,
+        board_id: u64,
+        path: Option<String>,
+        viewer: Option<Address>,
+        community_slug: Option<String>,
+    ) -> Bytes {
         // Store community_slug in temp storage for use during this render
         // This avoids re-entrant calls back to community contract
         if let Some(ref slug) = community_slug {
-            env.storage().temporary().set(&BoardKey::RenderCommunitySlug, slug);
+            env.storage()
+                .temporary()
+                .set(&BoardKey::RenderCommunitySlug, slug);
         } else {
             // Clear any stale value
-            env.storage().temporary().remove(&BoardKey::RenderCommunitySlug);
+            env.storage()
+                .temporary()
+                .remove(&BoardKey::RenderCommunitySlug);
         }
 
         Router::new(&env, path.clone())
             // Board view (thread list)
             .handle(b"/", |_| Self::render_board(&env, board_id, &viewer))
             // Create thread form
-            .or_handle(b"/new", |_| Self::render_create_thread(&env, board_id, &viewer))
+            .or_handle(b"/new", |_| {
+                Self::render_create_thread(&env, board_id, &viewer)
+            })
             // Thread reply form (must be before thread view)
             .or_handle(b"/t/{tid}/reply", |req| {
                 let thread_id = req.get_var_u32(b"tid").unwrap_or(0) as u64;
@@ -2279,18 +2381,23 @@ impl BoardsBoard {
 
     /// Render navigation bar via include from main contract.
     /// Uses {{include}} tag for deferred loading - no cross-contract call overhead.
-    fn render_nav<'a>(env: &'a Env, board_id: u64, _viewer: &Option<Address>) -> MarkdownBuilder<'a> {
+    fn render_nav<'a>(
+        env: &'a Env,
+        board_id: u64,
+        _viewer: &Option<Address>,
+    ) -> MarkdownBuilder<'a> {
         let aliases = Self::fetch_aliases(env);
 
         // Get board metadata for slug-based return path
-        let board_meta: Option<BoardMeta> = env
-            .storage()
-            .persistent()
-            .get(&BoardKey::Board(board_id));
+        let board_meta: Option<BoardMeta> =
+            env.storage().persistent().get(&BoardKey::Board(board_id));
 
         // Build include tag with return path for this board
         // Format: {{include contract=@main func="render_nav_include" viewer return_path="@main:{base_path}"}}
-        let mut include_tag = Bytes::from_slice(env, b"{{include contract=@main func=\"render_nav_include\" viewer return_path=\"@main:");
+        let mut include_tag = Bytes::from_slice(
+            env,
+            b"{{include contract=@main func=\"render_nav_include\" viewer return_path=\"@main:",
+        );
 
         if let Some(meta) = board_meta {
             include_tag.append(&Self::build_board_base_path(env, board_id, &meta.slug));
@@ -2302,13 +2409,17 @@ impl BoardsBoard {
         include_tag.append(&Bytes::from_slice(env, b"\"}}"));
 
         MarkdownBuilder::new(env)
-            .raw(aliases)  // Emit aliases for include resolution
+            .raw(aliases) // Emit aliases for include resolution
             .raw(include_tag)
     }
 
     /// Render back navigation with optional community link
     /// Shows "← Community Name" if board is in a community, plus "← Home"
-    fn render_back_nav<'a>(env: &'a Env, mut md: MarkdownBuilder<'a>, board_id: u64) -> MarkdownBuilder<'a> {
+    fn render_back_nav<'a>(
+        env: &'a Env,
+        mut md: MarkdownBuilder<'a>,
+        board_id: u64,
+    ) -> MarkdownBuilder<'a> {
         md = md.div_start("back-nav");
 
         // Check if board is in a community
@@ -2317,18 +2428,24 @@ impl BoardsBoard {
             let mut display_buf = [0u8; 64];
             let display_len = community.display_name.len() as usize;
             let display_copy_len = core::cmp::min(display_len, 60);
-            community.display_name.copy_into_slice(&mut display_buf[0..display_copy_len]);
-            let display = core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
+            community
+                .display_name
+                .copy_into_slice(&mut display_buf[0..display_copy_len]);
+            let display =
+                core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
 
             // Build community name for URL
             let mut name_buf = [0u8; 32];
             let name_len = community.name.len() as usize;
             let name_copy_len = core::cmp::min(name_len, 32);
-            community.name.copy_into_slice(&mut name_buf[0..name_copy_len]);
+            community
+                .name
+                .copy_into_slice(&mut name_buf[0..name_copy_len]);
             let name = core::str::from_utf8(&name_buf[0..name_copy_len]).unwrap_or("");
 
             // Community link
-            md = md.raw_str("<a href=\"render:/c/")
+            md = md
+                .raw_str("<a href=\"render:/c/")
                 .raw_str(name)
                 .raw_str("\" class=\"back-link back-community\">← ")
                 .raw_str(display)
@@ -2359,15 +2476,10 @@ impl BoardsBoard {
     ) -> MarkdownBuilder<'a> {
         // Get vote tally if voting contract is available
         let score = if let Some(voting) = voting_contract {
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread.id.into_val(env),
-            ]);
-            let tally: VoteTally = env.invoke_contract(
-                voting,
-                &Symbol::new(env, "get_thread_tally"),
-                args,
-            );
+            let args: Vec<Val> =
+                Vec::from_array(env, [board_id.into_val(env), thread.id.into_val(env)]);
+            let tally: VoteTally =
+                env.invoke_contract(voting, &Symbol::new(env, "get_thread_tally"), args);
             Some(tally.score)
         } else {
             None
@@ -2378,12 +2490,14 @@ impl BoardsBoard {
 
         // Vote score display (if voting enabled)
         if let Some(s) = score {
-            md = md.raw_str("<span class=\"vote-score-compact\">")
-                .number(s as u32)  // Display score (handle negatives in CSS)
+            md = md
+                .raw_str("<span class=\"vote-score-compact\">")
+                .number(s as u32) // Display score (handle negatives in CSS)
                 .raw_str("</span>");
         }
 
-        md = md.raw_str("<a href=\"render:")
+        md = md
+            .raw_str("<a href=\"render:")
             .raw(base_path.clone())
             .raw_str("/t/")
             .number(thread.id as u32)
@@ -2394,7 +2508,8 @@ impl BoardsBoard {
             for i in 0..flairs.len() {
                 let flair = flairs.get(i).unwrap();
                 if flair.id == flair_id && flair.enabled {
-                    md = md.raw_str("<span class=\"flair\" style=\"color:")
+                    md = md
+                        .raw_str("<span class=\"flair\" style=\"color:")
                         .text_string(&flair.color)
                         .raw_str(";background:")
                         .text_string(&flair.bg_color)
@@ -2406,7 +2521,8 @@ impl BoardsBoard {
             }
         }
 
-        md = md.raw_str("<span class=\"thread-card-title\">")
+        md = md
+            .raw_str("<span class=\"thread-card-title\">")
             .text_string(&thread.title)
             .raw_str("</span><span class=\"thread-card-meta\">");
         if thread.is_hidden {
@@ -2443,10 +2559,14 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Get viewer role (needed for private board check, admin button, and hidden thread filtering)
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
             } else {
                 Role::Guest
@@ -2471,14 +2591,17 @@ impl BoardsBoard {
             if let Some(ref perms_addr) = perms_addr_opt {
                 // If not a member, show access denied
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
 
         let mut md = Self::render_nav(env, board_id, viewer);
         md = Self::render_back_nav(env, md, board_id);
-        md = md.div_start("page-header")
+        md = md
+            .div_start("page-header")
             .raw_str("<h1>")
             .text_string(&config.name)
             .raw_str("</h1>")
@@ -2497,9 +2620,14 @@ impl BoardsBoard {
         }
 
         // Show board rules if set
-        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::BoardRules(board_id)) {
+        if let Some(rules) = env
+            .storage()
+            .persistent()
+            .get::<_, String>(&BoardKey::BoardRules(board_id))
+        {
             if rules.len() > 0 {
-                md = md.div_start("board-rules")
+                md = md
+                    .div_start("board-rules")
                     .raw_str("<details><summary><strong>Board Rules</strong></summary>")
                     .div_start("rules-content")
                     .text_string(&rules)
@@ -2514,7 +2642,8 @@ impl BoardsBoard {
             && !config.is_readonly
             && (viewer_role as u32) >= (Role::Member as u32);
         if can_create {
-            md = md.raw_str("<a href=\"render:")
+            md = md
+                .raw_str("<a href=\"render:")
                 .raw(base_path.clone())
                 .raw_str("/new\" class=\"action-btn\">+ New Thread</a>")
                 .newline();
@@ -2522,7 +2651,8 @@ impl BoardsBoard {
 
         // Show settings button for Admin+ users (uses numeric ID for admin routes)
         if (viewer_role as u32) >= (Role::Admin as u32) {
-            md = md.raw_str("<a href=\"render:/admin/b/")
+            md = md
+                .raw_str("<a href=\"render:/admin/b/")
                 .number(board_id as u32)
                 .raw_str("/settings\" class=\"action-btn action-btn-secondary\">⚙ Settings</a>")
                 .newline();
@@ -2532,7 +2662,8 @@ impl BoardsBoard {
 
         // Sort order selector (if voting contract is configured)
         if voting_contract.is_some() {
-            md = md.div_start("sort-selector")
+            md = md
+                .div_start("sort-selector")
                 .raw_str("<span class=\"sort-label\">Sort:</span>")
                 // Hot is the default when voting is available
                 .raw_str("<a href=\"render:")
@@ -2560,7 +2691,8 @@ impl BoardsBoard {
             .unwrap_or(0);
 
         if thread_count == 0 {
-            md = md.div_end()
+            md = md
+                .div_end()
                 .paragraph("No threads yet. Be the first to post!");
         } else {
             // Get pinned threads list
@@ -2579,12 +2711,24 @@ impl BoardsBoard {
                     break;
                 }
                 let thread_id = pinned_threads.get(i).unwrap();
-                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
+                if let Some(thread) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
+                {
                     // Skip hidden threads for non-moderators
                     if thread.is_hidden && !viewer_can_moderate {
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &base_path, &thread, &voting_contract, &flairs);
+                    md = Self::render_thread_card(
+                        env,
+                        md,
+                        board_id,
+                        &base_path,
+                        &thread,
+                        &voting_contract,
+                        &flairs,
+                    );
                     shown += 1;
                 }
             }
@@ -2593,7 +2737,11 @@ impl BoardsBoard {
             let start_idx = thread_count - 1;
             let mut idx = start_idx;
             while shown < limit && idx < thread_count {
-                if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, idx)) {
+                if let Some(thread) = env
+                    .storage()
+                    .persistent()
+                    .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, idx))
+                {
                     // Skip pinned threads (already shown above)
                     if thread.is_pinned {
                         if idx > 0 {
@@ -2612,7 +2760,15 @@ impl BoardsBoard {
                         }
                         continue;
                     }
-                    md = Self::render_thread_card(env, md, board_id, &base_path, &thread, &voting_contract, &flairs);
+                    md = Self::render_thread_card(
+                        env,
+                        md,
+                        board_id,
+                        &base_path,
+                        &thread,
+                        &voting_contract,
+                        &flairs,
+                    );
                     shown += 1;
                 }
                 if idx > 0 {
@@ -2637,7 +2793,8 @@ impl BoardsBoard {
     ) -> Bytes {
         let mut md = Self::render_nav(env, board_id, viewer);
         md = Self::render_back_nav(env, md, board_id);
-        md = md.div_start("page-header")
+        md = md
+            .div_start("page-header")
             .raw_str("<h1>")
             .text_string(&config.name)
             .raw_str("</h1>")
@@ -2651,13 +2808,17 @@ impl BoardsBoard {
             .newline();
 
         if viewer.is_none() {
-            md = md.warning("This is a private board. Please connect your wallet to request access.");
+            md = md
+                .warning("This is a private board. Please connect your wallet to request access.");
         } else {
             // Check if user has a pending invite request
-            let has_request_args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                viewer.as_ref().unwrap().into_val(env),
-            ]);
+            let has_request_args: Vec<Val> = Vec::from_array(
+                env,
+                [
+                    board_id.into_val(env),
+                    viewer.as_ref().unwrap().into_val(env),
+                ],
+            );
             let has_request: bool = env.invoke_contract(
                 perms_addr,
                 &Symbol::new(env, "has_invite_request"),
@@ -2724,11 +2885,16 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Get permissions contract and viewer role early for private board check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let (viewer_role, is_moderator) = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-                let role: Role = env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args);
+                let role_args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role: Role =
+                    env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args);
                 let can_mod = (role as u32) >= (Role::Moderator as u32);
                 (role, can_mod)
             } else {
@@ -2742,7 +2908,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -2758,7 +2926,11 @@ impl BoardsBoard {
             .h1("New Thread");
 
         // Show rules reminder if rules are set
-        if let Some(rules) = env.storage().persistent().get::<_, String>(&BoardKey::BoardRules(board_id)) {
+        if let Some(rules) = env
+            .storage()
+            .persistent()
+            .get::<_, String>(&BoardKey::BoardRules(board_id))
+        {
             if rules.len() > 0 {
                 md = md.div_start("rules-reminder")
                     .raw_str("<details open><summary><strong>Before posting, please read the board rules:</strong></summary>")
@@ -2825,12 +2997,14 @@ impl BoardsBoard {
         }
 
         if has_visible_flairs {
-            md = md.raw_str("<div class=\"flair-selector\">\n")
+            md = md
+                .raw_str("<div class=\"flair-selector\">\n")
                 .raw_str("<label>Flair");
             if flair_required {
                 md = md.raw_str(" <span class=\"required\">*</span>");
             }
-            md = md.raw_str(":</label>\n")
+            md = md
+                .raw_str(":</label>\n")
                 .raw_str("<select name=\"flair_id\">\n")
                 .raw_str("<option value=\"none\">-- Select flair --</option>\n");
 
@@ -2838,7 +3012,8 @@ impl BoardsBoard {
                 let flair = flairs.get(i).unwrap();
                 if flair.enabled && (!flair.mod_only || is_moderator) {
                     // Use "flair_N" format to prevent viewer from converting to integer
-                    md = md.raw_str("<option value=\"flair_")
+                    md = md
+                        .raw_str("<option value=\"flair_")
                         .number(flair.id)
                         .raw_str("\" style=\"color:")
                         .text_string(&flair.color)
@@ -2860,7 +3035,8 @@ impl BoardsBoard {
             md = md.raw_str("<input type=\"hidden\" name=\"flair_id\" value=\"none\" />\n");
         }
 
-        md = md.textarea_markdown("body", 10, "Write your post content here...")
+        md = md
+            .textarea_markdown("body", 10, "Write your post content here...")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -2908,10 +3084,14 @@ impl BoardsBoard {
             .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id));
 
         // Get viewer role for hidden thread check and moderator controls
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
             } else {
                 Role::Guest
@@ -2925,7 +3105,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -2967,7 +3149,8 @@ impl BoardsBoard {
                 for i in 0..flairs.len() {
                     let flair = flairs.get(i).unwrap();
                     if flair.id == flair_id && flair.enabled {
-                        md = md.raw_str("<span class=\"flair\" style=\"color:")
+                        md = md
+                            .raw_str("<span class=\"flair\" style=\"color:")
                             .text_string(&flair.color)
                             .raw_str(";background:")
                             .text_string(&flair.bg_color)
@@ -2979,14 +3162,15 @@ impl BoardsBoard {
                 }
             }
 
-            md = md.text_string(&t.title)
-                .raw_str("</h1>\n");
+            md = md.text_string(&t.title).raw_str("</h1>\n");
 
             // Show author (with return path so "Go Back" returns here)
-            let return_path = Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
+            let return_path =
+                Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
             md = md.raw_str("<div class=\"thread-meta\">by ");
             md = Self::render_author(env, md, &t.creator, &profile_contract, Some(return_path));
-            md = md.raw_str(" · ")
+            md = md
+                .raw_str(" · ")
                 .raw(Self::format_timestamp(env, t.created_at))
                 .raw_str("</div>\n");
         } else {
@@ -3012,7 +3196,8 @@ impl BoardsBoard {
         }
 
         // Check if this is a crosspost and show header
-        let crosspost_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let crosspost_args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
         let crosspost_ref: Option<CrosspostRef> = env
             .try_invoke_contract::<Option<CrosspostRef>, soroban_sdk::Error>(
                 &content,
@@ -3034,11 +3219,15 @@ impl BoardsBoard {
             } else {
                 // Fallback to numeric ID if board not found (shouldn't happen)
                 let mut path = Bytes::from_slice(env, b"/b/");
-                path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, xpost.original_board_id as u32));
+                path.append(&soroban_render_sdk::bytes::u32_to_bytes(
+                    env,
+                    xpost.original_board_id as u32,
+                ));
                 path
             };
 
-            md = md.div_start("crosspost-header")
+            md = md
+                .div_start("crosspost-header")
                 .raw_str("<span class=\"crosspost-badge\">⤴ Crosspost</span> ")
                 .raw_str("Originally posted in [")
                 .raw(original_base_path.clone())
@@ -3048,22 +3237,26 @@ impl BoardsBoard {
                 .number(xpost.original_thread_id as u32)
                 .raw_str(") by ");
             // Show original author (return path goes back to current thread)
-            let return_path = Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
-            md = Self::render_author(env, md, &xpost.original_author, &profile_contract, Some(return_path.clone()));
-            md = md.div_end()
-                .newline();
+            let return_path =
+                Self::build_thread_return_path(env, board_id, &board_meta.slug, thread_id);
+            md = Self::render_author(
+                env,
+                md,
+                &xpost.original_author,
+                &profile_contract,
+                Some(return_path.clone()),
+            );
+            md = md.div_end().newline();
         }
 
         // Thread body in a container
         md = md.div_start("thread-body");
 
         // Get thread body from content contract
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
-        let body: Bytes = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_thread_body"),
-            args.clone(),
-        );
+        let args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let body: Bytes =
+            env.invoke_contract(&content, &Symbol::new(env, "get_thread_body"), args.clone());
 
         if body.len() > 0 {
             md = md.raw(body);
@@ -3071,30 +3264,27 @@ impl BoardsBoard {
             md = md.italic("No content");
         }
 
-        md = md.div_end()
-            .newline();
+        md = md.div_end().newline();
 
         // Vote buttons (if voting contract is configured and user is logged in)
         let voting_contract: Option<Address> = env.storage().instance().get(&BoardKey::Voting);
         if let Some(ref voting) = voting_contract {
             // Get thread vote tally
-            let tally_args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-            ]);
-            let tally: VoteTally = env.invoke_contract(
-                voting,
-                &Symbol::new(env, "get_thread_tally"),
-                tally_args,
-            );
+            let tally_args: Vec<Val> =
+                Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+            let tally: VoteTally =
+                env.invoke_contract(voting, &Symbol::new(env, "get_thread_tally"), tally_args);
 
             // Get viewer's current vote (if logged in)
             let viewer_vote = if let Some(ref user) = viewer {
-                let vote_args: Vec<Val> = Vec::from_array(env, [
-                    board_id.into_val(env),
-                    thread_id.into_val(env),
-                    user.into_val(env),
-                ]);
+                let vote_args: Vec<Val> = Vec::from_array(
+                    env,
+                    [
+                        board_id.into_val(env),
+                        thread_id.into_val(env),
+                        user.into_val(env),
+                    ],
+                );
                 env.invoke_contract::<VoteDirection>(
                     voting,
                     &Symbol::new(env, "get_user_thread_vote"),
@@ -3108,19 +3298,25 @@ impl BoardsBoard {
 
             // Upvote button
             if viewer.is_some() {
-                let up_class = if viewer_vote == VoteDirection::Up { "vote-up vote-active" } else { "vote-up" };
-                md = md.raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
+                let up_class = if viewer_vote == VoteDirection::Up {
+                    "vote-up vote-active"
+                } else {
+                    "vote-up"
+                };
+                md = md
+                    .raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
                     .number(board_id as u32)
                     .raw_str(",&quot;thread_id&quot;:")
                     .number(thread_id as u32)
                     .raw_str(",&quot;direction&quot;:");
                 // Toggle: if already up, set to none; otherwise set to up
                 if viewer_vote == VoteDirection::Up {
-                    md = md.raw_str("0");  // None
+                    md = md.raw_str("0"); // None
                 } else {
-                    md = md.raw_str("1");  // Up
+                    md = md.raw_str("1"); // Up
                 }
-                md = md.raw_str("}\" class=\"")
+                md = md
+                    .raw_str("}\" class=\"")
                     .raw_str(up_class)
                     .raw_str("\">▲</a>");
             } else {
@@ -3128,38 +3324,45 @@ impl BoardsBoard {
             }
 
             // Score display
-            md = md.raw_str("<span class=\"vote-score\">")
+            md = md
+                .raw_str("<span class=\"vote-score\">")
                 .number(tally.score as u32)
                 .raw_str("</span>");
 
             // Downvote button
             if viewer.is_some() {
-                let down_class = if viewer_vote == VoteDirection::Down { "vote-down vote-active" } else { "vote-down" };
-                md = md.raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
+                let down_class = if viewer_vote == VoteDirection::Down {
+                    "vote-down vote-active"
+                } else {
+                    "vote-down"
+                };
+                md = md
+                    .raw_str("<a href=\"tx:@voting:vote_thread {&quot;board_id&quot;:")
                     .number(board_id as u32)
                     .raw_str(",&quot;thread_id&quot;:")
                     .number(thread_id as u32)
                     .raw_str(",&quot;direction&quot;:");
                 // Toggle: if already down, set to none; otherwise set to down
                 if viewer_vote == VoteDirection::Down {
-                    md = md.raw_str("0");  // None
+                    md = md.raw_str("0"); // None
                 } else {
-                    md = md.raw_str("2");  // Down
+                    md = md.raw_str("2"); // Down
                 }
-                md = md.raw_str("}\" class=\"")
+                md = md
+                    .raw_str("}\" class=\"")
                     .raw_str(down_class)
                     .raw_str("\">▼</a>");
             } else {
                 md = md.raw_str("<span class=\"vote-down vote-disabled\">▼</span>");
             }
 
-            md = md.div_end()
-                .newline();
+            md = md.div_end().newline();
         }
 
         // Thread actions (only show if viewer is logged in and posting is allowed)
         if viewer.is_some() && can_post {
-            md = md.div_start("thread-actions")
+            md = md
+                .div_start("thread-actions")
                 .raw_str("[Reply to Thread](render:")
                 .raw(base_path.clone())
                 .raw_str("/t/")
@@ -3169,10 +3372,12 @@ impl BoardsBoard {
             // Show edit button if user can edit
             if let Some(ref t) = thread {
                 let (is_author, is_moderator) = Self::can_edit(env, board_id, &t.creator, viewer);
-                let can_edit_time = is_moderator || Self::is_within_edit_window(env, board_id, t.created_at);
+                let can_edit_time =
+                    is_moderator || Self::is_within_edit_window(env, board_id, t.created_at);
 
                 if (is_author || is_moderator) && can_edit_time {
-                    md = md.text(" ")
+                    md = md
+                        .text(" ")
                         .raw_str("[Edit](render:")
                         .raw(base_path.clone())
                         .raw_str("/t/")
@@ -3183,7 +3388,8 @@ impl BoardsBoard {
 
             // Crosspost button (only if not already a crosspost)
             if crosspost_ref.is_none() {
-                md = md.text(" ")
+                md = md
+                    .text(" ")
                     .raw_str("[Crosspost](render:/crosspost?from_board=")
                     .text_string(&board_meta.slug)
                     .raw_str("&from_thread=")
@@ -3191,7 +3397,8 @@ impl BoardsBoard {
                     .raw_str(")");
 
                 // Show crosspost count if any
-                let xpost_count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+                let xpost_count_args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
                 let xpost_count: u32 = env
                     .try_invoke_contract::<u32, soroban_sdk::Error>(
                         &content,
@@ -3203,7 +3410,8 @@ impl BoardsBoard {
                     .unwrap_or(0);
 
                 if xpost_count > 0 {
-                    md = md.raw_str(" <span class=\"crosspost-count\">")
+                    md = md
+                        .raw_str(" <span class=\"crosspost-count\">")
                         .number(xpost_count)
                         .raw_str(" crosspost");
                     if xpost_count > 1 {
@@ -3213,15 +3421,15 @@ impl BoardsBoard {
                 }
             }
 
-            md = md.div_end()
-                .newline();
+            md = md.div_end().newline();
         }
 
         // Moderator controls (only show for moderator+ users)
         // Uses raw HTML links since we're inside a div (markdown not processed in HTML blocks)
         if viewer_can_moderate {
             if let Some(ref user) = viewer {
-                md = md.div_start("mod-actions")
+                md = md
+                    .div_start("mod-actions")
                     .raw_str("<strong>Mod Actions:</strong> ")
                     // Hidden fields for all actions
                     .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
@@ -3262,17 +3470,15 @@ impl BoardsBoard {
         md = md.raw_str("<h2>Replies</h2>\n");
 
         // Fetch reply count
-        let reply_count: u64 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply_count"),
-            args,
-        );
+        let reply_count: u64 =
+            env.invoke_contract(&content, &Symbol::new(env, "get_reply_count"), args);
 
         if reply_count == 0 {
             md = md.paragraph("No replies yet. Be the first to respond!");
         } else {
             // Use waterfall loading with slug-based path
-            md = md.raw_str("{{render path=\"")
+            md = md
+                .raw_str("{{render path=\"")
                 .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -3283,7 +3489,13 @@ impl BoardsBoard {
     }
 
     /// Render a batch of top-level replies
-    fn render_replies_batch(env: &Env, board_id: u64, thread_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
+    fn render_replies_batch(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        start: u32,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let content: Address = env
             .storage()
             .instance()
@@ -3311,13 +3523,21 @@ impl BoardsBoard {
             .persistent()
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
-        let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
+        let chunk_size = if config.reply_chunk_size == 0 {
+            6
+        } else {
+            config.reply_chunk_size
+        };
 
         // Get viewer role for permission check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
             } else {
                 Role::Guest
@@ -3330,7 +3550,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -3345,20 +3567,21 @@ impl BoardsBoard {
         let can_post = !config.is_readonly && !is_locked && viewer_can_post;
 
         // Get total reply count
-        let count_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
-        let total_count: u64 = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply_count"),
-            count_args,
-        );
+        let count_args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let total_count: u64 =
+            env.invoke_contract(&content, &Symbol::new(env, "get_reply_count"), count_args);
 
         // Fetch this batch of replies
-        let list_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            start.into_val(env),
-            chunk_size.into_val(env),
-        ]);
+        let list_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                start.into_val(env),
+                chunk_size.into_val(env),
+            ],
+        );
         let replies: Vec<ReplyMeta> = env.invoke_contract(
             &content,
             &Symbol::new(env, "list_top_level_replies"),
@@ -3369,14 +3592,28 @@ impl BoardsBoard {
 
         for i in 0..replies.len() {
             if let Some(reply) = replies.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &reply, board_id, thread_id, &base_path, &board_meta.slug, viewer, can_post, &profile_contract, &voting_contract);
+                md = Self::render_reply_item_waterfall(
+                    env,
+                    md,
+                    &content,
+                    &reply,
+                    board_id,
+                    thread_id,
+                    &base_path,
+                    &board_meta.slug,
+                    viewer,
+                    can_post,
+                    &profile_contract,
+                    &voting_contract,
+                );
             }
         }
 
         // If more replies exist, add continuation with slug-based path
         let next_start = start + chunk_size;
         if (next_start as u64) < total_count {
-            md = md.raw_str("{{render path=\"")
+            md = md
+                .raw_str("{{render path=\"")
                 .raw(base_path)
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -3389,7 +3626,14 @@ impl BoardsBoard {
     }
 
     /// Render a batch of children for a reply
-    fn render_children_batch(env: &Env, board_id: u64, thread_id: u64, parent_id: u64, start: u32, viewer: &Option<Address>) -> Bytes {
+    fn render_children_batch(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        parent_id: u64,
+        start: u32,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let content: Address = env
             .storage()
             .instance()
@@ -3417,13 +3661,21 @@ impl BoardsBoard {
             .persistent()
             .get(&BoardKey::BoardConfig(board_id))
             .expect("Board not found");
-        let chunk_size = if config.reply_chunk_size == 0 { 6 } else { config.reply_chunk_size };
+        let chunk_size = if config.reply_chunk_size == 0 {
+            6
+        } else {
+            config.reply_chunk_size
+        };
 
         // Get viewer role for permission check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), args)
             } else {
                 Role::Guest
@@ -3436,7 +3688,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -3451,11 +3705,14 @@ impl BoardsBoard {
         let can_post = !config.is_readonly && !is_locked && viewer_can_post;
 
         // Get total children count
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            parent_id.into_val(env),
-        ]);
+        let count_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                parent_id.into_val(env),
+            ],
+        );
         let total_count: u32 = env.invoke_contract(
             &content,
             &Symbol::new(env, "get_children_count"),
@@ -3463,13 +3720,16 @@ impl BoardsBoard {
         );
 
         // Fetch this batch of children
-        let list_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            parent_id.into_val(env),
-            start.into_val(env),
-            chunk_size.into_val(env),
-        ]);
+        let list_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                parent_id.into_val(env),
+                start.into_val(env),
+                chunk_size.into_val(env),
+            ],
+        );
         let children: Vec<ReplyMeta> = env.invoke_contract(
             &content,
             &Symbol::new(env, "list_children_replies"),
@@ -3480,14 +3740,28 @@ impl BoardsBoard {
 
         for i in 0..children.len() {
             if let Some(child) = children.get(i) {
-                md = Self::render_reply_item_waterfall(env, md, &content, &child, board_id, thread_id, &base_path, &board_meta.slug, viewer, can_post, &profile_contract, &voting_contract);
+                md = Self::render_reply_item_waterfall(
+                    env,
+                    md,
+                    &content,
+                    &child,
+                    board_id,
+                    thread_id,
+                    &base_path,
+                    &board_meta.slug,
+                    viewer,
+                    can_post,
+                    &profile_contract,
+                    &voting_contract,
+                );
             }
         }
 
         // If more children exist, add continuation with slug-based path
         let next_start = start + chunk_size;
         if next_start < total_count {
-            md = md.raw_str("{{render path=\"")
+            md = md
+                .raw_str("{{render path=\"")
                 .raw(base_path)
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -3522,7 +3796,8 @@ impl BoardsBoard {
         let return_path = Self::build_thread_return_path(env, board_id, board_slug, thread_id);
         md = md.div_start("reply-header");
         md = Self::render_author(env, md, &reply.creator, profile_contract, Some(return_path));
-        md = md.raw_str(" · Reply #")
+        md = md
+            .raw_str(" · Reply #")
             .number(reply.id as u32)
             .raw_str(" · ")
             .raw(Self::format_timestamp(env, reply.created_at))
@@ -3530,52 +3805,55 @@ impl BoardsBoard {
 
         // Reply content
         if reply.is_hidden {
-            md = md.div_start("reply-content reply-hidden")
+            md = md
+                .div_start("reply-content reply-hidden")
                 .text("[This reply has been hidden by a moderator]")
                 .div_end();
         } else if reply.is_deleted {
-            md = md.div_start("reply-content reply-deleted")
+            md = md
+                .div_start("reply-content reply-deleted")
                 .text("[This reply has been deleted]")
                 .div_end();
         } else {
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                reply.id.into_val(env),
-            ]);
-            let content_bytes: Bytes = env.invoke_contract(
-                content,
-                &Symbol::new(env, "get_reply_content"),
-                args,
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [
+                    board_id.into_val(env),
+                    thread_id.into_val(env),
+                    reply.id.into_val(env),
+                ],
             );
+            let content_bytes: Bytes =
+                env.invoke_contract(content, &Symbol::new(env, "get_reply_content"), args);
 
-            md = md.div_start("reply-content")
-                .raw(content_bytes)
-                .div_end();
+            md = md.div_start("reply-content").raw(content_bytes).div_end();
         }
 
         // Vote buttons for reply (if voting contract is configured)
         if let Some(ref voting) = voting_contract {
             // Get reply vote tally
-            let tally_args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                thread_id.into_val(env),
-                reply.id.into_val(env),
-            ]);
-            let tally: VoteTally = env.invoke_contract(
-                voting,
-                &Symbol::new(env, "get_reply_tally"),
-                tally_args,
-            );
-
-            // Get viewer's current vote (if logged in)
-            let viewer_vote = if let Some(ref user) = viewer {
-                let vote_args: Vec<Val> = Vec::from_array(env, [
+            let tally_args: Vec<Val> = Vec::from_array(
+                env,
+                [
                     board_id.into_val(env),
                     thread_id.into_val(env),
                     reply.id.into_val(env),
-                    user.into_val(env),
-                ]);
+                ],
+            );
+            let tally: VoteTally =
+                env.invoke_contract(voting, &Symbol::new(env, "get_reply_tally"), tally_args);
+
+            // Get viewer's current vote (if logged in)
+            let viewer_vote = if let Some(ref user) = viewer {
+                let vote_args: Vec<Val> = Vec::from_array(
+                    env,
+                    [
+                        board_id.into_val(env),
+                        thread_id.into_val(env),
+                        reply.id.into_val(env),
+                        user.into_val(env),
+                    ],
+                );
                 env.invoke_contract::<VoteDirection>(
                     voting,
                     &Symbol::new(env, "get_user_reply_vote"),
@@ -3589,8 +3867,13 @@ impl BoardsBoard {
 
             // Upvote button
             if viewer.is_some() {
-                let up_class = if viewer_vote == VoteDirection::Up { "vote-up vote-active" } else { "vote-up" };
-                md = md.raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
+                let up_class = if viewer_vote == VoteDirection::Up {
+                    "vote-up vote-active"
+                } else {
+                    "vote-up"
+                };
+                md = md
+                    .raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
                     .number(board_id as u32)
                     .raw_str(",&quot;thread_id&quot;:")
                     .number(thread_id as u32)
@@ -3602,7 +3885,8 @@ impl BoardsBoard {
                 } else {
                     md = md.raw_str("1");
                 }
-                md = md.raw_str("}\" class=\"")
+                md = md
+                    .raw_str("}\" class=\"")
                     .raw_str(up_class)
                     .raw_str("\">▲</a>");
             } else {
@@ -3610,14 +3894,20 @@ impl BoardsBoard {
             }
 
             // Score
-            md = md.raw_str("<span class=\"vote-score-inline\">")
+            md = md
+                .raw_str("<span class=\"vote-score-inline\">")
                 .number(tally.score as u32)
                 .raw_str("</span>");
 
             // Downvote button
             if viewer.is_some() {
-                let down_class = if viewer_vote == VoteDirection::Down { "vote-down vote-active" } else { "vote-down" };
-                md = md.raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
+                let down_class = if viewer_vote == VoteDirection::Down {
+                    "vote-down vote-active"
+                } else {
+                    "vote-down"
+                };
+                md = md
+                    .raw_str("<a href=\"tx:@voting:vote_reply {&quot;board_id&quot;:")
                     .number(board_id as u32)
                     .raw_str(",&quot;thread_id&quot;:")
                     .number(thread_id as u32)
@@ -3629,7 +3919,8 @@ impl BoardsBoard {
                 } else {
                     md = md.raw_str("2");
                 }
-                md = md.raw_str("}\" class=\"")
+                md = md
+                    .raw_str("}\" class=\"")
                     .raw_str(down_class)
                     .raw_str("\">▼</a>");
             } else {
@@ -3644,7 +3935,8 @@ impl BoardsBoard {
 
         // Only show Reply button if posting is allowed
         if viewer.is_some() && can_post {
-            md = md.raw_str("[Reply](render:")
+            md = md
+                .raw_str("[Reply](render:")
                 .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -3654,11 +3946,14 @@ impl BoardsBoard {
 
             // Show edit button if user can edit (and reply is not deleted)
             if !reply.is_deleted {
-                let (is_author, is_moderator) = Self::can_edit(env, board_id, &reply.creator, viewer);
-                let can_edit_time = is_moderator || Self::is_within_edit_window(env, board_id, reply.created_at);
+                let (is_author, is_moderator) =
+                    Self::can_edit(env, board_id, &reply.creator, viewer);
+                let can_edit_time =
+                    is_moderator || Self::is_within_edit_window(env, board_id, reply.created_at);
 
                 if (is_author || is_moderator) && can_edit_time {
-                    md = md.text(" ")
+                    md = md
+                        .text(" ")
                         .raw_str("[Edit](render:")
                         .raw(base_path.clone())
                         .raw_str("/t/")
@@ -3672,7 +3967,8 @@ impl BoardsBoard {
 
         // Flag button is always available to logged in users
         if viewer.is_some() {
-            md = md.text(" ")
+            md = md
+                .text(" ")
                 .raw_str("[Flag](tx:@content:flag_reply {\"board_id\":")
                 .number(board_id as u32)
                 .raw_str(",\"thread_id\":")
@@ -3685,20 +3981,21 @@ impl BoardsBoard {
         md = md.div_end();
 
         // Get children count
-        let count_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            reply.id.into_val(env),
-        ]);
-        let children_count: u32 = env.invoke_contract(
-            content,
-            &Symbol::new(env, "get_children_count"),
-            count_args,
+        let count_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                reply.id.into_val(env),
+            ],
         );
+        let children_count: u32 =
+            env.invoke_contract(content, &Symbol::new(env, "get_children_count"), count_args);
 
         // If has children, embed continuation for waterfall loading with slug-based path
         if children_count > 0 {
-            md = md.raw_str("{{render path=\"")
+            md = md
+                .raw_str("{{render path=\"")
                 .raw(base_path.clone())
                 .raw_str("/t/")
                 .number(thread_id as u32)
@@ -3712,7 +4009,13 @@ impl BoardsBoard {
     }
 
     /// Render reply form
-    fn render_reply_form(env: &Env, board_id: u64, thread_id: u64, parent_reply_id: Option<u64>, viewer: &Option<Address>) -> Bytes {
+    fn render_reply_form(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        parent_reply_id: Option<u64>,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         // Get board metadata for slug-based URLs
         let board_meta: BoardMeta = env
             .storage()
@@ -3731,10 +4034,14 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Get permissions contract and viewer role early for private board check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role_args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
             } else {
                 Role::Guest
@@ -3747,7 +4054,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -3777,7 +4086,11 @@ impl BoardsBoard {
         }
 
         // Check if thread is locked
-        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
+        if let Some(thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
+        {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be posted.");
                 return Self::render_footer_into(env, md).build();
@@ -3797,17 +4110,21 @@ impl BoardsBoard {
 
         // Calculate parent_id and depth
         let (parent_id, depth): (u64, u32) = if let Some(pid) = parent_reply_id {
-            if let Some(content_addr) = env.storage().instance().get::<_, Address>(&BoardKey::Content) {
-                let args: Vec<Val> = Vec::from_array(env, [
-                    board_id.into_val(env),
-                    thread_id.into_val(env),
-                    pid.into_val(env),
-                ]);
-                let parent_reply: Option<ReplyMeta> = env.invoke_contract(
-                    &content_addr,
-                    &Symbol::new(env, "get_reply"),
-                    args,
+            if let Some(content_addr) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&BoardKey::Content)
+            {
+                let args: Vec<Val> = Vec::from_array(
+                    env,
+                    [
+                        board_id.into_val(env),
+                        thread_id.into_val(env),
+                        pid.into_val(env),
+                    ],
                 );
+                let parent_reply: Option<ReplyMeta> =
+                    env.invoke_contract(&content_addr, &Symbol::new(env, "get_reply"), args);
                 match parent_reply {
                     Some(reply) => (pid, reply.depth + 1),
                     None => (pid, 1),
@@ -3856,7 +4173,12 @@ impl BoardsBoard {
     }
 
     /// Check if user can edit content (author or moderator)
-    fn can_edit(env: &Env, board_id: u64, creator: &Address, viewer: &Option<Address>) -> (bool, bool) {
+    fn can_edit(
+        env: &Env,
+        board_id: u64,
+        creator: &Address,
+        viewer: &Option<Address>,
+    ) -> (bool, bool) {
         let viewer = match viewer {
             Some(v) => v,
             None => return (false, false),
@@ -3871,12 +4193,10 @@ impl BoardsBoard {
                 .instance()
                 .get(&BoardKey::Permissions)
                 .unwrap();
-            let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), viewer.into_val(env)]);
-            let can_moderate: bool = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "can_moderate"),
-                args,
-            );
+            let args: Vec<Val> =
+                Vec::from_array(env, [board_id.into_val(env), viewer.into_val(env)]);
+            let can_moderate: bool =
+                env.invoke_contract(&permissions, &Symbol::new(env, "can_moderate"), args);
             can_moderate
         } else {
             false
@@ -3886,7 +4206,12 @@ impl BoardsBoard {
     }
 
     /// Render edit thread form
-    fn render_edit_thread(env: &Env, board_id: u64, thread_id: u64, viewer: &Option<Address>) -> Bytes {
+    fn render_edit_thread(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         // Get board metadata for slug-based URLs
         let board_meta: BoardMeta = env
             .storage()
@@ -3905,10 +4230,14 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Get permissions contract and viewer role early for private board check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role_args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
             } else {
                 Role::Guest
@@ -3921,7 +4250,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -3955,7 +4286,11 @@ impl BoardsBoard {
         }
 
         // Get thread metadata
-        let thread = match env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
+        let thread = match env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
+        {
             Some(t) => t,
             None => {
                 md = md.warning("Thread not found.");
@@ -3978,18 +4313,18 @@ impl BoardsBoard {
         }
 
         // Check edit window (only applies to non-moderators)
-        if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, thread.created_at) {
+        if is_author
+            && !is_moderator
+            && !Self::is_within_edit_window(env, board_id, thread.created_at)
+        {
             md = md.warning("The edit window has expired for this thread.");
             return Self::render_footer_into(env, md).build();
         }
 
         // Get current thread body
-        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
-        let body: Bytes = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_thread_body"),
-            args,
-        );
+        let args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let body: Bytes = env.invoke_contract(&content, &Symbol::new(env, "get_thread_body"), args);
 
         // Convert Bytes to escaped string for textarea
         // Note: We need to include the body content in a way the form can use
@@ -4020,7 +4355,8 @@ impl BoardsBoard {
             md = md.raw(body);
         }
 
-        md = md.raw_str("</textarea>\n")
+        md = md
+            .raw_str("</textarea>\n")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -4039,7 +4375,13 @@ impl BoardsBoard {
     }
 
     /// Render edit reply form
-    fn render_edit_reply(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, viewer: &Option<Address>) -> Bytes {
+    fn render_edit_reply(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         // Get board metadata for slug-based URLs
         let board_meta: BoardMeta = env
             .storage()
@@ -4058,10 +4400,14 @@ impl BoardsBoard {
             .expect("Board not found");
 
         // Get permissions contract and viewer role early for private board check
-        let perms_addr_opt = env.storage().instance().get::<_, Address>(&BoardKey::Permissions);
+        let perms_addr_opt = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&BoardKey::Permissions);
         let viewer_role = if let Some(ref perms_addr) = perms_addr_opt {
             if let Some(user) = viewer {
-                let role_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
+                let role_args: Vec<Val> =
+                    Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
                 env.invoke_contract(perms_addr, &Symbol::new(env, "get_role"), role_args)
             } else {
                 Role::Guest
@@ -4074,7 +4420,9 @@ impl BoardsBoard {
         if config.is_private {
             if let Some(ref perms_addr) = perms_addr_opt {
                 if (viewer_role as u32) < (Role::Member as u32) {
-                    return Self::render_private_board_message(env, board_id, &config, viewer, perms_addr);
+                    return Self::render_private_board_message(
+                        env, board_id, &config, viewer, perms_addr,
+                    );
                 }
             }
         }
@@ -4103,7 +4451,11 @@ impl BoardsBoard {
         }
 
         // Check if thread is locked
-        if let Some(thread) = env.storage().persistent().get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id)) {
+        if let Some(thread) = env
+            .storage()
+            .persistent()
+            .get::<_, ThreadMeta>(&BoardKey::BoardThread(board_id, thread_id))
+        {
             if thread.is_locked {
                 md = md.warning("This thread is locked. Replies cannot be edited.");
                 return Self::render_footer_into(env, md).build();
@@ -4116,16 +4468,16 @@ impl BoardsBoard {
         }
 
         // Get reply metadata from content contract
-        let args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            thread_id.into_val(env),
-            reply_id.into_val(env),
-        ]);
-        let reply: Option<ReplyMeta> = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply"),
-            args.clone(),
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                thread_id.into_val(env),
+                reply_id.into_val(env),
+            ],
         );
+        let reply: Option<ReplyMeta> =
+            env.invoke_contract(&content, &Symbol::new(env, "get_reply"), args.clone());
 
         let reply = match reply {
             Some(r) => r,
@@ -4150,17 +4502,17 @@ impl BoardsBoard {
         }
 
         // Check edit window (only applies to non-moderators)
-        if is_author && !is_moderator && !Self::is_within_edit_window(env, board_id, reply.created_at) {
+        if is_author
+            && !is_moderator
+            && !Self::is_within_edit_window(env, board_id, reply.created_at)
+        {
             md = md.warning("The edit window has expired for this reply.");
             return Self::render_footer_into(env, md).build();
         }
 
         // Get current reply content
-        let reply_content: Bytes = env.invoke_contract(
-            &content,
-            &Symbol::new(env, "get_reply_content"),
-            args,
-        );
+        let reply_content: Bytes =
+            env.invoke_contract(&content, &Symbol::new(env, "get_reply_content"), args);
 
         md = md
             .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"")
@@ -4185,7 +4537,8 @@ impl BoardsBoard {
             md = md.raw(reply_content);
         }
 
-        md = md.raw_str("</textarea>\n")
+        md = md
+            .raw_str("</textarea>\n")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"caller\" value=\"")
             .text_string(&viewer.as_ref().unwrap().to_string())
@@ -4228,10 +4581,7 @@ impl BoardsBoard {
 
     /// Get profile contract from registry (if available)
     fn get_profile_contract(env: &Env) -> Option<Address> {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&BoardKey::Registry)?;
+        let registry: Address = env.storage().instance().get(&BoardKey::Registry)?;
 
         // Look up profile contract from registry using get_contract
         let args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
@@ -4284,11 +4634,12 @@ impl BoardsBoard {
 
         // Fetch community metadata
         let meta_args: Vec<Val> = Vec::from_array(env, [community_id.into_val(env)]);
-        let community_meta_result = env.try_invoke_contract::<Option<CommunityInfo>, soroban_sdk::Error>(
-            &community_contract,
-            &Symbol::new(env, "get_community_info"),
-            meta_args,
-        );
+        let community_meta_result = env
+            .try_invoke_contract::<Option<CommunityInfo>, soroban_sdk::Error>(
+                &community_contract,
+                &Symbol::new(env, "get_community_info"),
+                meta_args,
+            );
 
         match community_meta_result {
             Ok(Ok(Some(meta))) => Some(meta),
@@ -4312,10 +4663,8 @@ impl BoardsBoard {
                 // Use the return path variant if we have a return path
                 let rendered: Bytes = match return_path {
                     Some(path) => {
-                        let args: Vec<Val> = Vec::from_array(
-                            env,
-                            [creator.into_val(env), path.into_val(env)],
-                        );
+                        let args: Vec<Val> =
+                            Vec::from_array(env, [creator.into_val(env), path.into_val(env)]);
                         env.invoke_contract(
                             profile_addr,
                             &Symbol::new(env, "render_profile_compact_return"),
@@ -4351,12 +4700,18 @@ impl BoardsBoard {
     /// Falls back to querying community contract if not in temp storage.
     fn build_board_base_path(env: &Env, _board_id: u64, board_slug: &String) -> Bytes {
         // First check temp storage for community slug (set during render)
-        let community_slug_opt: Option<String> = env.storage().temporary().get(&BoardKey::RenderCommunitySlug);
+        let community_slug_opt: Option<String> = env
+            .storage()
+            .temporary()
+            .get(&BoardKey::RenderCommunitySlug);
 
         if let Some(community_slug) = community_slug_opt {
             // Community board: /c/{community_slug}/b/{board_slug}
             let mut path = Bytes::from_slice(env, b"/c/");
-            path.append(&soroban_render_sdk::bytes::string_to_bytes(env, &community_slug));
+            path.append(&soroban_render_sdk::bytes::string_to_bytes(
+                env,
+                &community_slug,
+            ));
             path.append(&Bytes::from_slice(env, b"/b/"));
             path.append(&soroban_render_sdk::bytes::string_to_bytes(env, board_slug));
             path
@@ -4369,12 +4724,20 @@ impl BoardsBoard {
     }
 
     /// Build a return path for the current thread view (using slugs)
-    fn build_thread_return_path(env: &Env, board_id: u64, board_slug: &String, thread_id: u64) -> Bytes {
+    fn build_thread_return_path(
+        env: &Env,
+        board_id: u64,
+        board_slug: &String,
+        thread_id: u64,
+    ) -> Bytes {
         // Build cross-contract return path: @main:{base_path}/t/{thread_id}
         let mut path = Bytes::from_slice(env, b"@main:");
         path.append(&Self::build_board_base_path(env, board_id, board_slug));
         path.append(&Bytes::from_slice(env, b"/t/"));
-        path.append(&soroban_render_sdk::bytes::u32_to_bytes(env, thread_id as u32));
+        path.append(&soroban_render_sdk::bytes::u32_to_bytes(
+            env,
+            thread_id as u32,
+        ));
         path
     }
 
@@ -4516,9 +4879,7 @@ impl BoardsBoard {
         // All characters must be lowercase alphanumeric or hyphen
         for i in 0..copy_len {
             let c = buf[i];
-            let valid = (c >= b'a' && c <= b'z')
-                || (c >= b'0' && c <= b'9')
-                || c == b'-';
+            let valid = (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'-';
             if !valid {
                 panic!("Board slug can only contain lowercase letters, numbers, and hyphens");
             }
@@ -4612,10 +4973,7 @@ impl BoardsBoard {
             val /= 36;
         }
 
-        String::from_str(
-            env,
-            core::str::from_utf8(&suffix).unwrap_or("0000"),
-        )
+        String::from_str(env, core::str::from_utf8(&suffix).unwrap_or("0000"))
     }
 
     /// Check if a slug is available for standalone boards.
@@ -4694,10 +5052,7 @@ impl BoardsBoard {
             n /= 10;
         }
 
-        String::from_str(
-            env,
-            core::str::from_utf8(&buf[pos..]).unwrap_or("0"),
-        )
+        String::from_str(env, core::str::from_utf8(&buf[pos..]).unwrap_or("0"))
     }
 }
 
@@ -4996,14 +5351,32 @@ mod test {
         let thread_id = client.create_thread(&board_id, &title, &None, &creator);
 
         // Initially 0 replies
-        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 0);
+        assert_eq!(
+            client
+                .get_thread(&board_id, &thread_id)
+                .unwrap()
+                .reply_count,
+            0
+        );
 
         // Increment reply count
         client.increment_reply_count(&board_id, &thread_id);
-        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 1);
+        assert_eq!(
+            client
+                .get_thread(&board_id, &thread_id)
+                .unwrap()
+                .reply_count,
+            1
+        );
 
         client.increment_reply_count(&board_id, &thread_id);
-        assert_eq!(client.get_thread(&board_id, &thread_id).unwrap().reply_count, 2);
+        assert_eq!(
+            client
+                .get_thread(&board_id, &thread_id)
+                .unwrap()
+                .reply_count,
+            2
+        );
     }
 
     #[test]
@@ -5067,7 +5440,14 @@ mod test {
         let slug = String::from_str(&env, "test-board");
         let caller = Address::generate(&env);
 
-        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+        let board_id = client.create_board_with_slug(
+            &name,
+            &desc,
+            &is_private,
+            &is_listed,
+            &Some(slug.clone()),
+            &caller,
+        );
         assert_eq!(board_id, 0);
 
         let board = client.get_board(&board_id).unwrap();
@@ -5093,7 +5473,8 @@ mod test {
         let caller = Address::generate(&env);
 
         // Pass None for slug to auto-generate
-        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &None, &caller);
+        let board_id =
+            client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &None, &caller);
 
         let board = client.get_board(&board_id).unwrap();
         // Slug should be derived from name: "my-awesome-board"
@@ -5119,7 +5500,14 @@ mod test {
         let slug = String::from_str(&env, "lookup-test");
         let caller = Address::generate(&env);
 
-        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+        let board_id = client.create_board_with_slug(
+            &name,
+            &desc,
+            &is_private,
+            &is_listed,
+            &Some(slug.clone()),
+            &caller,
+        );
 
         // Look up by slug
         let found_board = client.get_board_by_slug(&slug);
@@ -5150,13 +5538,27 @@ mod test {
         // Create first board with slug "general"
         let name1 = String::from_str(&env, "General");
         let slug1 = String::from_str(&env, "general");
-        let board1_id = client.create_board_with_slug(&name1, &desc, &is_private, &is_listed, &Some(slug1.clone()), &caller);
+        let board1_id = client.create_board_with_slug(
+            &name1,
+            &desc,
+            &is_private,
+            &is_listed,
+            &Some(slug1.clone()),
+            &caller,
+        );
         let board1 = client.get_board(&board1_id).unwrap();
         assert_eq!(board1.slug, slug1);
 
         // Create second board with same slug - should get suffix
         let name2 = String::from_str(&env, "General 2");
-        let board2_id = client.create_board_with_slug(&name2, &desc, &is_private, &is_listed, &Some(slug1.clone()), &caller);
+        let board2_id = client.create_board_with_slug(
+            &name2,
+            &desc,
+            &is_private,
+            &is_listed,
+            &Some(slug1.clone()),
+            &caller,
+        );
         let board2 = client.get_board(&board2_id).unwrap();
         // Slug should NOT equal "general" - it should have a suffix
         assert!(board2.slug != slug1);
@@ -5229,7 +5631,14 @@ mod test {
         let slug = String::from_str(&env, "meta-test");
         let caller = Address::generate(&env);
 
-        let board_id = client.create_board_with_slug(&name, &desc, &is_private, &is_listed, &Some(slug.clone()), &caller);
+        let board_id = client.create_board_with_slug(
+            &name,
+            &desc,
+            &is_private,
+            &is_listed,
+            &Some(slug.clone()),
+            &caller,
+        );
 
         // Get board and verify slug is in metadata
         let board = client.get_board(&board_id).unwrap();

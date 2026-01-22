@@ -518,10 +518,8 @@ impl BoardsVoting {
 
         // Get caller's permissions
         use soroban_sdk::{IntoVal, Symbol, Val};
-        let args: Vec<Val> = Vec::from_array(
-            env,
-            [board_id.into_val(env), caller.clone().into_val(env)],
-        );
+        let args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), caller.clone().into_val(env)]);
         let perms: PermissionSet =
             env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
 
@@ -707,13 +705,7 @@ mod test {
         let reply_id = 2u64;
 
         // Cast upvote on reply
-        let tally = client.vote_reply(
-            &board_id,
-            &thread_id,
-            &reply_id,
-            &VoteDirection::Up,
-            &voter,
-        );
+        let tally = client.vote_reply(&board_id, &thread_id, &reply_id, &VoteDirection::Up, &voter);
 
         assert_eq!(tally.upvotes, 1);
         assert_eq!(tally.downvotes, 0);

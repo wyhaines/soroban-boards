@@ -20,7 +20,9 @@
 //! - Content storage → boards-content
 //! - Permissions/roles → boards-permissions
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Symbol, Val, Vec,
+};
 
 // Note: Board contract mapping (BoardContract, BoardContractCount, BoardWasmHash) removed.
 // Boards are now stored in a single boards-board contract, accessed via the "board" alias.
@@ -102,10 +104,9 @@ impl BoardsRegistry {
             &RegistryKey::Contract(Symbol::new(&env, "content")),
             &content,
         );
-        env.storage().instance().set(
-            &RegistryKey::Contract(Symbol::new(&env, "theme")),
-            &theme,
-        );
+        env.storage()
+            .instance()
+            .set(&RegistryKey::Contract(Symbol::new(&env, "theme")), &theme);
         env.storage().instance().set(
             &RegistryKey::Contract(Symbol::new(&env, "admin")),
             &admin_contract,
@@ -147,9 +148,7 @@ impl BoardsRegistry {
         }
 
         // Look up in generic contract storage
-        env.storage()
-            .instance()
-            .get(&RegistryKey::Contract(alias))
+        env.storage().instance().get(&RegistryKey::Contract(alias))
     }
 
     /// Get a contract address by alias (convenience wrapper).
@@ -328,7 +327,9 @@ impl BoardsRegistry {
             panic!("Address is not an admin");
         }
 
-        env.storage().instance().set(&RegistryKey::Admins, &new_admins);
+        env.storage()
+            .instance()
+            .set(&RegistryKey::Admins, &new_admins);
     }
 
     /// Add an admin directly to local storage (bypasses permissions contract).
@@ -407,17 +408,18 @@ impl BoardsRegistry {
 
     /// Upgrade another contract (admin only, proxies to contract's upgrade function)
     /// This allows the registry admin to upgrade any contract that trusts the registry.
-    pub fn upgrade_contract(env: Env, contract_id: Address, new_wasm_hash: BytesN<32>, caller: Address) {
+    pub fn upgrade_contract(
+        env: Env,
+        contract_id: Address,
+        new_wasm_hash: BytesN<32>,
+        caller: Address,
+    ) {
         Self::require_admin_auth(&env, &caller);
 
         // Call the target contract's upgrade function
         // The target contract will verify that we (the registry) are calling it
         let args: Vec<Val> = Vec::from_array(&env, [new_wasm_hash.into_val(&env)]);
-        env.invoke_contract::<()>(
-            &contract_id,
-            &Symbol::new(&env, "upgrade"),
-            args,
-        );
+        env.invoke_contract::<()>(&contract_id, &Symbol::new(&env, "upgrade"), args);
     }
 
     // =========================================================================
@@ -466,7 +468,17 @@ mod test {
     use soroban_sdk::Env;
 
     /// Helper to setup a boards-registry contract with all dependencies
-    fn setup_registry(env: &Env) -> (BoardsRegistryClient, Address, Address, Address, Address, Address, Address) {
+    fn setup_registry(
+        env: &Env,
+    ) -> (
+        BoardsRegistryClient,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         env.mock_all_auths();
 
         let contract_id = env.register(BoardsRegistry, ());
@@ -481,7 +493,15 @@ mod test {
         let admins = Vec::from_array(env, [admin.clone()]);
         client.init(&admins, &permissions, &content, &theme, &admin_contract);
 
-        (client, contract_id, admin, permissions, content, theme, admin_contract)
+        (
+            client,
+            contract_id,
+            admin,
+            permissions,
+            content,
+            theme,
+            admin_contract,
+        )
     }
 
     #[test]
@@ -559,7 +579,8 @@ mod test {
     #[test]
     fn test_get_contract_by_alias() {
         let env = Env::default();
-        let (client, contract_id, _, permissions, content, theme, admin_contract) = setup_registry(&env);
+        let (client, contract_id, _, permissions, content, theme, admin_contract) =
+            setup_registry(&env);
 
         // Test each alias
         assert_eq!(
@@ -695,10 +716,7 @@ mod test {
             client.get_contract_by_alias(&Symbol::new(&env, "nonexistent")),
             None
         );
-        assert_eq!(
-            client.get_contract(&Symbol::new(&env, "nonexistent")),
-            None
-        );
+        assert_eq!(client.get_contract(&Symbol::new(&env, "nonexistent")), None);
     }
 
     #[test]

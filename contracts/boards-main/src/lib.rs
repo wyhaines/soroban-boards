@@ -170,17 +170,30 @@ pub struct BoardsMain;
 #[contractimpl]
 impl BoardsMain {
     /// Initialize the main contract with service contract addresses
-    pub fn init(env: Env, registry: Address, theme: Address, permissions: Address, content: Address, admin: Address, community: Address, config: Address) {
+    pub fn init(
+        env: Env,
+        registry: Address,
+        theme: Address,
+        permissions: Address,
+        content: Address,
+        admin: Address,
+        community: Address,
+        config: Address,
+    ) {
         if env.storage().instance().has(&MainKey::Registry) {
             panic!("Already initialized");
         }
 
         env.storage().instance().set(&MainKey::Registry, &registry);
         env.storage().instance().set(&MainKey::Theme, &theme);
-        env.storage().instance().set(&MainKey::Permissions, &permissions);
+        env.storage()
+            .instance()
+            .set(&MainKey::Permissions, &permissions);
         env.storage().instance().set(&MainKey::Content, &content);
         env.storage().instance().set(&MainKey::Admin, &admin);
-        env.storage().instance().set(&MainKey::Community, &community);
+        env.storage()
+            .instance()
+            .set(&MainKey::Community, &community);
         env.storage().instance().set(&MainKey::Config, &config);
     }
 
@@ -201,7 +214,8 @@ impl BoardsMain {
             .expect("Not initialized");
 
         let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
-        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+        let is_admin: bool =
+            env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
 
         if !is_admin {
             panic!("Only registry admin can set config");
@@ -212,9 +226,7 @@ impl BoardsMain {
 
     /// Get community contract address
     pub fn get_community(env: Env) -> Option<Address> {
-        env.storage()
-            .instance()
-            .get(&MainKey::Community)
+        env.storage().instance().get(&MainKey::Community)
     }
 
     /// Proxy function to create a community
@@ -237,14 +249,17 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            name.into_val(&env),
-            display_name.into_val(&env),
-            description.into_val(&env),
-            is_private.into_val(&env),
-            is_listed.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                name.into_val(&env),
+                display_name.into_val(&env),
+                description.into_val(&env),
+                is_private.into_val(&env),
+                is_listed.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
 
         env.invoke_contract(&community, &Symbol::new(&env, "create_community"), args)
     }
@@ -267,25 +282,23 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            display_name.into_val(&env),
-            description.into_val(&env),
-            is_private.into_val(&env),
-            is_listed.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                community_id.into_val(&env),
+                display_name.into_val(&env),
+                description.into_val(&env),
+                is_private.into_val(&env),
+                is_listed.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "update_community"), args);
     }
 
     /// Proxy function to initiate ownership transfer
-    pub fn initiate_transfer(
-        env: Env,
-        community_id: u64,
-        new_owner: Address,
-        caller: Address,
-    ) {
+    pub fn initiate_transfer(env: Env, community_id: u64, new_owner: Address, caller: Address) {
         caller.require_auth();
 
         let community: Address = env
@@ -294,11 +307,14 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            new_owner.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                community_id.into_val(&env),
+                new_owner.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "initiate_transfer"), args);
     }
@@ -313,10 +329,8 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> =
+            Vec::from_array(&env, [community_id.into_val(&env), caller.into_val(&env)]);
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "cancel_transfer"), args);
     }
@@ -331,10 +345,8 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> =
+            Vec::from_array(&env, [community_id.into_val(&env), caller.into_val(&env)]);
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "accept_transfer"), args);
     }
@@ -349,10 +361,8 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> =
+            Vec::from_array(&env, [community_id.into_val(&env), caller.into_val(&env)]);
 
         env.invoke_contract::<()>(&community, &Symbol::new(&env, "delete_community"), args);
     }
@@ -383,7 +393,8 @@ impl BoardsMain {
             .expect("Not initialized");
 
         // Get board contract via registry alias
-        let alias_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
+        let alias_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
         let board_contract: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(&env, "get_contract_by_alias"),
@@ -400,15 +411,22 @@ impl BoardsMain {
         };
 
         // Delegate to boards-board.create_board_with_slug()
-        let create_args: Vec<Val> = Vec::from_array(&env, [
-            name.into_val(&env),
-            description.into_val(&env),
-            is_private.into_val(&env),
-            is_listed.into_val(&env),
-            slug_opt.into_val(&env),
-            caller.clone().into_val(&env),
-        ]);
-        let board_id: u64 = env.invoke_contract(&board_contract, &Symbol::new(&env, "create_board_with_slug"), create_args);
+        let create_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                name.into_val(&env),
+                description.into_val(&env),
+                is_private.into_val(&env),
+                is_listed.into_val(&env),
+                slug_opt.into_val(&env),
+                caller.clone().into_val(&env),
+            ],
+        );
+        let board_id: u64 = env.invoke_contract(
+            &board_contract,
+            &Symbol::new(&env, "create_board_with_slug"),
+            create_args,
+        );
 
         // If community is specified, add board to community
         let community_id_parsed = string_to_u64(&env, &community);
@@ -419,12 +437,19 @@ impl BoardsMain {
                 .get(&MainKey::Community)
                 .expect("Community contract not initialized");
 
-            let add_args: Vec<Val> = Vec::from_array(&env, [
-                cid.into_val(&env),
-                board_id.into_val(&env),
-                caller.into_val(&env),
-            ]);
-            env.invoke_contract::<()>(&community_contract, &Symbol::new(&env, "add_board"), add_args);
+            let add_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    cid.into_val(&env),
+                    board_id.into_val(&env),
+                    caller.into_val(&env),
+                ],
+            );
+            env.invoke_contract::<()>(
+                &community_contract,
+                &Symbol::new(&env, "add_board"),
+                add_args,
+            );
         }
 
         board_id
@@ -442,13 +467,16 @@ impl BoardsMain {
             .expect("Not initialized");
 
         let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
-        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+        let is_admin: bool =
+            env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
 
         if !is_admin {
             panic!("Only registry admin can set community");
         }
 
-        env.storage().instance().set(&MainKey::Community, &community);
+        env.storage()
+            .instance()
+            .set(&MainKey::Community, &community);
     }
 
     /// Get pages contract address
@@ -468,7 +496,8 @@ impl BoardsMain {
             .expect("Not initialized");
 
         let admin_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
-        let is_admin: bool = env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
+        let is_admin: bool =
+            env.invoke_contract(&registry, &Symbol::new(&env, "is_admin"), admin_args);
 
         if !is_admin {
             panic!("Only registry admin can set pages");
@@ -512,17 +541,25 @@ impl BoardsMain {
             .or_handle(b"/account", |_| Self::render_account(&env, &viewer))
             // Create board form (supports ?community=ID query param)
             // Router automatically strips query params for matching, so /create matches /create?community=5
-            .or_handle(b"/create", |req| Self::render_create_board_from_request(&env, &req, &viewer))
+            .or_handle(b"/create", |req| {
+                Self::render_create_board_from_request(&env, &req, &viewer)
+            })
             // Help page - delegate to pages contract (shows /p/help)
             .or_handle(b"/help", |_| {
                 // Delegate to pages contract with /help path
                 Self::delegate_to_pages(&env, &Some(String::from_str(&env, "/help")), &viewer)
             })
             // Crosspost form
-            .or_handle(b"/crosspost*", |_| Self::render_crosspost(&env, &path, &viewer))
+            .or_handle(b"/crosspost*", |_| {
+                Self::render_crosspost(&env, &path, &viewer)
+            })
             // Community routes - delegate to community contract
-            .or_handle(b"/communities", |_| Self::delegate_to_community(&env, &String::from_str(&env, "/"), &viewer))
-            .or_handle(b"/new", |_| Self::delegate_to_community(&env, &String::from_str(&env, "/new"), &viewer))
+            .or_handle(b"/communities", |_| {
+                Self::delegate_to_community(&env, &String::from_str(&env, "/"), &viewer)
+            })
+            .or_handle(b"/new", |_| {
+                Self::delegate_to_community(&env, &String::from_str(&env, "/new"), &viewer)
+            })
             .or_handle(b"/c/{name}/*", |req| {
                 let name = req.get_var(b"name").unwrap_or(Bytes::new(&env));
                 Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
@@ -532,14 +569,30 @@ impl BoardsMain {
                 Self::delegate_to_community_by_name(&env, &name, &path, &viewer)
             })
             // Admin routes - delegate to admin contract (keep numeric IDs for admin)
-            .or_handle(b"/admin/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/admin/settings/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/admin/*", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/members", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/banned", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/flags", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/settings", |_| Self::delegate_to_admin(&env, &path, &viewer))
-            .or_handle(b"/b/{id}/invites", |_| Self::delegate_to_admin(&env, &path, &viewer))
+            .or_handle(b"/admin/settings", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/admin/settings/*", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/admin/*", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/b/{id}/members", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/b/{id}/banned", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/b/{id}/flags", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/b/{id}/settings", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
+            .or_handle(b"/b/{id}/invites", |_| {
+                Self::delegate_to_admin(&env, &path, &viewer)
+            })
             // Pages routes - delegate to pages contract
             .or_handle(b"/p/*", |_| Self::delegate_to_pages(&env, &path, &viewer))
             .or_handle(b"/p", |_| Self::delegate_to_pages(&env, &path, &viewer))
@@ -659,22 +712,38 @@ impl BoardsMain {
         if let Some(config) = env.storage().instance().get::<_, Address>(&MainKey::Config) {
             add_alias(&mut result, b"config", &config);
         }
-        if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+        if let Some(registry) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MainKey::Registry)
+        {
             add_alias(&mut result, b"registry", &registry);
         }
         if let Some(theme) = env.storage().instance().get::<_, Address>(&MainKey::Theme) {
             add_alias(&mut result, b"theme", &theme);
         }
-        if let Some(perms) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+        if let Some(perms) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MainKey::Permissions)
+        {
             add_alias(&mut result, b"perms", &perms);
         }
-        if let Some(content) = env.storage().instance().get::<_, Address>(&MainKey::Content) {
+        if let Some(content) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MainKey::Content)
+        {
             add_alias(&mut result, b"content", &content);
         }
         if let Some(admin) = env.storage().instance().get::<_, Address>(&MainKey::Admin) {
             add_alias(&mut result, b"admin", &admin);
         }
-        if let Some(community) = env.storage().instance().get::<_, Address>(&MainKey::Community) {
+        if let Some(community) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MainKey::Community)
+        {
             add_alias(&mut result, b"community", &community);
         }
         if let Some(pages) = env.storage().instance().get::<_, Address>(&MainKey::Pages) {
@@ -682,34 +751,56 @@ impl BoardsMain {
         }
 
         // Look up additional aliases from registry (board, voting, profile)
-        if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+        if let Some(registry) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&MainKey::Registry)
+        {
             // Board contract
-            let board_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-            if let Some(board) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-                &registry,
-                &Symbol::new(env, "get_contract_by_alias"),
-                board_args,
-            ).ok().and_then(|r| r.ok()).flatten() {
+            let board_args: Vec<Val> =
+                Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+            if let Some(board) = env
+                .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "get_contract_by_alias"),
+                    board_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten()
+            {
                 add_alias(&mut result, b"board", &board);
             }
 
             // Voting contract
-            let voting_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "voting").into_val(env)]);
-            if let Some(voting) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-                &registry,
-                &Symbol::new(env, "get_contract_by_alias"),
-                voting_args,
-            ).ok().and_then(|r| r.ok()).flatten() {
+            let voting_args: Vec<Val> =
+                Vec::from_array(env, [Symbol::new(env, "voting").into_val(env)]);
+            if let Some(voting) = env
+                .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "get_contract_by_alias"),
+                    voting_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten()
+            {
                 add_alias(&mut result, b"voting", &voting);
             }
 
             // Profile contract
-            let profile_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
-            if let Some(profile) = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-                &registry,
-                &Symbol::new(env, "get_contract_by_alias"),
-                profile_args,
-            ).ok().and_then(|r| r.ok()).flatten() {
+            let profile_args: Vec<Val> =
+                Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
+            if let Some(profile) = env
+                .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                    &registry,
+                    &Symbol::new(env, "get_contract_by_alias"),
+                    profile_args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten()
+            {
                 add_alias(&mut result, b"profile", &profile);
             }
         }
@@ -728,9 +819,7 @@ impl BoardsMain {
         let aliases_tag = Self::emit_aliases(env);
 
         // Start with meta and aliases, then add nav content
-        let mut md = MarkdownBuilder::new(env)
-            .raw(meta_include)
-            .raw(aliases_tag);
+        let mut md = MarkdownBuilder::new(env).raw(meta_include).raw(aliases_tag);
 
         // Build return path for profile links: {CONTRACT_ID}:/
         let self_addr = env.current_contract_address();
@@ -796,7 +885,8 @@ impl BoardsMain {
                 } else {
                     page.name.clone()
                 };
-                md = md.raw_str("<a href=\"render:/p/")
+                md = md
+                    .raw_str("<a href=\"render:/p/")
                     .text_string(&page.slug)
                     .raw_str("\">")
                     .text_string(&label)
@@ -830,10 +920,8 @@ impl BoardsMain {
         };
 
         if let Some(profile_addr) = profile_opt {
-            let args: Vec<Val> = Vec::from_array(env, [
-                viewer.into_val(env),
-                return_path_bytes.into_val(env),
-            ]);
+            let args: Vec<Val> =
+                Vec::from_array(env, [viewer.into_val(env), return_path_bytes.into_val(env)]);
             let profile_link: Bytes = env.invoke_contract(
                 &profile_addr,
                 &Symbol::new(env, "render_nav_link_return"),
@@ -891,9 +979,7 @@ impl BoardsMain {
     /// Append footer to builder - uses include for progressive loading
     fn render_footer_into<'a>(env: &'a Env, md: MarkdownBuilder<'a>) -> MarkdownBuilder<'a> {
         let footer_include = Self::config_include(env, b"footer_text");
-        md.div_start("footer")
-            .raw(footer_include)
-            .div_end()
+        md.div_start("footer").raw(footer_include).div_end()
     }
 
     // ========================================================================
@@ -913,13 +999,13 @@ impl BoardsMain {
         let tagline_include = Self::config_include(env, b"tagline");
 
         let mut md = Self::render_nav(env, viewer)
-            .newline()  // Blank line after nav-bar div for markdown parsing
+            .newline() // Blank line after nav-bar div for markdown parsing
             .raw_str("<h1>")
             .raw(site_name_include)
             .raw_str("</h1>\n<p>")
             .raw(tagline_include)
             .raw_str("</p>\n")
-            .newline();  // Blank line before callout for markdown parsing
+            .newline(); // Blank line before callout for markdown parsing
 
         // Show connection status
         if viewer.is_some() {
@@ -929,18 +1015,16 @@ impl BoardsMain {
         }
 
         // === Communities Section ===
-        md = md.newline()
-            .h2("Communities");
+        md = md.newline().h2("Communities");
 
         // Get community contract
-        let community_contract_opt: Option<Address> = env
-            .storage()
-            .instance()
-            .get(&MainKey::Community);
+        let community_contract_opt: Option<Address> =
+            env.storage().instance().get(&MainKey::Community);
 
         if let Some(ref community_contract) = community_contract_opt {
             // Fetch listed communities
-            let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
+            let list_args: Vec<Val> =
+                Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
             let communities: Vec<CommunityMeta> = env.invoke_contract(
                 community_contract,
                 &Symbol::new(env, "list_listed_communities"),
@@ -964,7 +1048,11 @@ impl BoardsMain {
             md = md.newline();
             if let Some(ref v) = viewer {
                 // Check if user can create communities
-                if let Some(permissions) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+                if let Some(permissions) = env
+                    .storage()
+                    .instance()
+                    .get::<_, Address>(&MainKey::Permissions)
+                {
                     let can_create_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
                     let can_create: CanCreateResult = env
                         .try_invoke_contract::<CanCreateResult, soroban_sdk::Error>(
@@ -972,11 +1060,13 @@ impl BoardsMain {
                             &Symbol::new(env, "can_create_community"),
                             can_create_args,
                         )
-                        .unwrap_or_else(|_| Ok(CanCreateResult {
-                            allowed: true,
-                            is_bypass: false,
-                            reason: String::from_str(env, ""),
-                        }))
+                        .unwrap_or_else(|_| {
+                            Ok(CanCreateResult {
+                                allowed: true,
+                                is_bypass: false,
+                                reason: String::from_str(env, ""),
+                            })
+                        })
                         .unwrap_or_else(|_| CanCreateResult {
                             allowed: true,
                             is_bypass: false,
@@ -989,7 +1079,8 @@ impl BoardsMain {
                             md = md.raw_str(" <span class=\"badge-admin\">Admin</span>");
                         }
                     } else {
-                        md = md.raw_str("<span class=\"action-disabled\" title=\"")
+                        md = md
+                            .raw_str("<span class=\"action-disabled\" title=\"")
                             .text_string(&can_create.reason)
                             .raw_str("\">+ Create New Community</span>");
                     }
@@ -1006,11 +1097,11 @@ impl BoardsMain {
         }
 
         // === Standalone Boards Section ===
-        md = md.newline()
-            .h2("Standalone Boards");
+        md = md.newline().h2("Standalone Boards");
 
         // Get board contract via registry alias
-        let board_alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
+        let board_alias_args: Vec<Val> =
+            Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
         let board_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(env, "get_contract_by_alias"),
@@ -1019,7 +1110,8 @@ impl BoardsMain {
 
         if let Some(board_contract) = board_contract_opt {
             // Get listed boards directly from board contract
-            let list_args: Vec<Val> = Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
+            let list_args: Vec<Val> =
+                Vec::from_array(env, [0u64.into_val(env), 50u64.into_val(env)]);
             let listed_boards: Vec<BoardMeta> = env
                 .try_invoke_contract::<Vec<BoardMeta>, soroban_sdk::Error>(
                     &board_contract,
@@ -1034,7 +1126,9 @@ impl BoardsMain {
             let mut standalone_boards: Vec<BoardMeta> = Vec::new(env);
             for board in listed_boards.iter() {
                 // Check if board is in a community
-                let community_id: Option<u64> = if let Some(ref community_contract) = community_contract_opt {
+                let community_id: Option<u64> = if let Some(ref community_contract) =
+                    community_contract_opt
+                {
                     let community_args: Vec<Val> = Vec::from_array(env, [board.id.into_val(env)]);
                     env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
                         community_contract,
@@ -1068,7 +1162,8 @@ impl BoardsMain {
                 md = md.raw_str("<div class=\"board-list\">\n");
                 for board in sorted_boards.iter() {
                     // Board card with link wrapper - use slug-based URL: /b/{slug}
-                    md = md.raw_str("<a href=\"render:/b/")
+                    md = md
+                        .raw_str("<a href=\"render:/b/")
                         .text_string(&board.slug)
                         .raw_str("\" class=\"board-card\"><span class=\"board-card-title\">")
                         .text_string(&board.name)
@@ -1093,7 +1188,11 @@ impl BoardsMain {
         md = md.newline();
         if let Some(ref v) = viewer {
             // Check if user can create boards
-            if let Some(permissions) = env.storage().instance().get::<_, Address>(&MainKey::Permissions) {
+            if let Some(permissions) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&MainKey::Permissions)
+            {
                 let can_create_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
                 let can_create: CanCreateResult = env
                     .try_invoke_contract::<CanCreateResult, soroban_sdk::Error>(
@@ -1101,11 +1200,13 @@ impl BoardsMain {
                         &Symbol::new(env, "can_create_board"),
                         can_create_args,
                     )
-                    .unwrap_or_else(|_| Ok(CanCreateResult {
-                        allowed: false,
-                        is_bypass: false,
-                        reason: String::from_str(env, "Permission check unavailable"),
-                    }))
+                    .unwrap_or_else(|_| {
+                        Ok(CanCreateResult {
+                            allowed: false,
+                            is_bypass: false,
+                            reason: String::from_str(env, "Permission check unavailable"),
+                        })
+                    })
                     .unwrap_or_else(|_| CanCreateResult {
                         allowed: false,
                         is_bypass: false,
@@ -1118,7 +1219,8 @@ impl BoardsMain {
                         md = md.raw_str(" <span class=\"badge-admin\">Admin</span>");
                     }
                 } else {
-                    md = md.raw_str("<span class=\"action-disabled\" title=\"")
+                    md = md
+                        .raw_str("<span class=\"action-disabled\" title=\"")
                         .text_string(&can_create.reason)
                         .raw_str("\">+ Create New Board</span>");
                 }
@@ -1133,7 +1235,11 @@ impl BoardsMain {
 
         // Check if viewer is a site admin before showing admin links
         let is_admin = if let Some(ref user) = viewer {
-            if let Some(registry) = env.storage().instance().get::<_, Address>(&MainKey::Registry) {
+            if let Some(registry) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&MainKey::Registry)
+            {
                 let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
                 env.try_invoke_contract::<bool, soroban_sdk::Error>(
                     &registry,
@@ -1165,9 +1271,13 @@ impl BoardsMain {
     }
 
     /// Render create board form using Router Request (new version with query param support)
-    fn render_create_board_from_request(env: &Env, req: &Request, viewer: &Option<Address>) -> Bytes {
+    fn render_create_board_from_request(
+        env: &Env,
+        req: &Request,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let mut md = Self::render_nav(env, viewer)
-            .newline()  // Blank line after nav-bar for markdown parsing
+            .newline() // Blank line after nav-bar for markdown parsing
             .h1("Create New Board");
 
         if viewer.is_none() {
@@ -1212,7 +1322,8 @@ impl BoardsMain {
             }
             md = md.raw_str("\" />\n");
 
-            md = md.raw_str("<div class=\"form-group\">\n")
+            md = md
+                .raw_str("<div class=\"form-group\">\n")
                 .raw_str("<label>Community (optional):</label>\n")
                 .raw_str("<select name=\"community\">\n")
                 .raw_str("<option value=\"none\">None (standalone board)</option>\n");
@@ -1266,7 +1377,7 @@ impl BoardsMain {
     /// Render My Account page
     fn render_account(env: &Env, viewer: &Option<Address>) -> Bytes {
         let mut md = Self::render_nav(env, viewer)
-            .newline()  // Blank line after nav-bar for markdown parsing
+            .newline() // Blank line after nav-bar for markdown parsing
             .h1("My Account");
 
         let Some(user) = viewer else {
@@ -1289,7 +1400,8 @@ impl BoardsMain {
         );
 
         // Get profile contract (if available)
-        let profile_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
+        let profile_args: Vec<Val> =
+            Vec::from_array(env, [Symbol::new(env, "profile").into_val(env)]);
         let profile_opt: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(env, "get_contract_by_alias"),
@@ -1317,10 +1429,8 @@ impl BoardsMain {
             let mut return_path = self_id_str;
             return_path.append(&Bytes::from_slice(env, b":/account"));
 
-            let args: Vec<Val> = Vec::from_array(env, [
-                viewer.into_val(env),
-                return_path.into_val(env),
-            ]);
+            let args: Vec<Val> =
+                Vec::from_array(env, [viewer.into_val(env), return_path.into_val(env)]);
 
             // Call render_nav_link_return - it returns either:
             // - "Create Profile" link if no profile
@@ -1371,7 +1481,11 @@ impl BoardsMain {
                 .flatten();
 
             if let Some(first_seen) = first_seen_opt {
-                md = md.text("**First Seen:** ").raw(Self::format_timestamp(env, first_seen)).newline().newline();
+                md = md
+                    .text("**First Seen:** ")
+                    .raw(Self::format_timestamp(env, first_seen))
+                    .newline()
+                    .newline();
 
                 // Format account age nicely
                 let days = account_age_secs / 86400;
@@ -1388,14 +1502,21 @@ impl BoardsMain {
                 md = md.number(minutes as u32).text(" minutes");
                 md = md.newline().newline();
             } else {
-                md = md.text("**Account Age:** New account (not yet recorded)").newline().newline();
+                md = md
+                    .text("**Account Age:** New account (not yet recorded)")
+                    .newline()
+                    .newline();
             }
         } else {
-            md = md.text("*Account statistics not available*").newline().newline();
+            md = md
+                .text("*Account statistics not available*")
+                .newline()
+                .newline();
         }
 
         // === Quick Links Section ===
-        md = md.h2("Quick Links")
+        md = md
+            .h2("Quick Links")
             .raw_str("<div class=\"quick-links\">\n")
             .render_link("Home", "/")
             .render_link("Communities", "/communities")
@@ -1450,7 +1571,8 @@ impl BoardsMain {
         };
 
         // Get thread title from original board
-        let thread_args: Vec<Val> = Vec::from_array(env, [from_board.into_val(env), from_thread.into_val(env)]);
+        let thread_args: Vec<Val> =
+            Vec::from_array(env, [from_board.into_val(env), from_thread.into_val(env)]);
         let thread_info: Option<(String, Address)> = env
             .try_invoke_contract::<Option<(String, Address)>, soroban_sdk::Error>(
                 &board_contract,
@@ -1499,14 +1621,16 @@ impl BoardsMain {
                 continue;
             }
 
-            md = md.raw_str("<option value=\"")
+            md = md
+                .raw_str("<option value=\"")
                 .number(board.id as u32)
                 .raw_str("\">")
                 .text_string(&board.name)
                 .raw_str("</option>\n");
         }
 
-        md = md.raw_str("</select>\n")
+        md = md
+            .raw_str("</select>\n")
             .raw_str("</div>\n")
             .newline()
             // Optional comment
@@ -1553,7 +1677,10 @@ impl BoardsMain {
             // Find from_board=
             if let Some(start) = path_str.find("from_board=") {
                 let start = start + 11;
-                let end = path_str[start..].find('&').map(|i| start + i).unwrap_or(path_len);
+                let end = path_str[start..]
+                    .find('&')
+                    .map(|i| start + i)
+                    .unwrap_or(path_len);
                 if let Ok(val) = path_str[start..end].parse::<u64>() {
                     from_board = val;
                 }
@@ -1562,7 +1689,10 @@ impl BoardsMain {
             // Find from_thread=
             if let Some(start) = path_str.find("from_thread=") {
                 let start = start + 12;
-                let end = path_str[start..].find('&').map(|i| start + i).unwrap_or(path_len);
+                let end = path_str[start..]
+                    .find('&')
+                    .map(|i| start + i)
+                    .unwrap_or(path_len);
                 if let Ok(val) = path_str[start..end].parse::<u64>() {
                     from_thread = val;
                 }
@@ -1603,10 +1733,7 @@ impl BoardsMain {
             .get(&MainKey::Community)
             .expect("Community contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(env, [
-            path.into_val(env),
-            viewer.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(env, [path.into_val(env), viewer.into_val(env)]);
         let content: Bytes = env.invoke_contract(&community, &Symbol::new(env, "render"), args);
 
         // Wrap with nav and footer for consistent UI
@@ -1615,7 +1742,12 @@ impl BoardsMain {
 
     /// Delegate rendering to the community contract with the full path
     /// for community-specific routes like /c/{name}/*
-    fn delegate_to_community_by_name(env: &Env, _name: &Bytes, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+    fn delegate_to_community_by_name(
+        env: &Env,
+        _name: &Bytes,
+        path: &Option<String>,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let community: Address = env
             .storage()
             .instance()
@@ -1628,10 +1760,10 @@ impl BoardsMain {
             None => String::from_str(env, "/"),
         };
 
-        let args: Vec<Val> = Vec::from_array(env, [
-            community_path.clone().into_val(env),
-            viewer.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [community_path.clone().into_val(env), viewer.into_val(env)],
+        );
         let content: Bytes = env.invoke_contract(&community, &Symbol::new(env, "render"), args);
 
         // Check if this is a board route (/c/{name}/b/*)
@@ -1670,7 +1802,7 @@ impl BoardsMain {
     /// Wrap content with navigation bar and footer for consistent UI
     fn wrap_with_nav_footer(env: &Env, viewer: &Option<Address>, content: Bytes) -> Bytes {
         let md = Self::render_nav(env, viewer)
-            .newline()  // Blank line after nav-bar for markdown parsing
+            .newline() // Blank line after nav-bar for markdown parsing
             .raw(content);
         Self::render_footer_into(env, md).build()
     }
@@ -1695,10 +1827,7 @@ impl BoardsMain {
         // Strip "/p" prefix, pass rest to pages contract
         let pages_path = Self::strip_pages_prefix(env, path);
 
-        let args: Vec<Val> = Vec::from_array(env, [
-            pages_path.into_val(env),
-            viewer.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(env, [pages_path.into_val(env), viewer.into_val(env)]);
         let content: Bytes = env.invoke_contract(&pages, &Symbol::new(env, "render"), args);
 
         // Wrap with nav and footer for consistent UI
@@ -1745,17 +1874,19 @@ impl BoardsMain {
             .get(&MainKey::Admin)
             .expect("Admin contract not initialized");
 
-        let args: Vec<Val> = Vec::from_array(env, [
-            path.into_val(env),
-            viewer.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(env, [path.into_val(env), viewer.into_val(env)]);
         env.invoke_contract(&admin, &Symbol::new(env, "render"), args)
     }
 
     /// Delegate rendering to the board contract by numeric ID
     /// (Kept for backwards compatibility during migration)
     #[allow(dead_code)]
-    fn delegate_to_board(env: &Env, board_id: u64, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+    fn delegate_to_board(
+        env: &Env,
+        board_id: u64,
+        path: &Option<String>,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let registry: Address = env
             .storage()
             .instance()
@@ -1786,12 +1917,15 @@ impl BoardsMain {
         let community_slug = Self::get_board_community_slug(env, board_id);
 
         // Call render with board_id, path, viewer, and community_slug
-        let args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            relative_path.into_val(env),
-            viewer.into_val(env),
-            community_slug.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                relative_path.into_val(env),
+                viewer.into_val(env),
+                community_slug.into_val(env),
+            ],
+        );
         env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
     }
 
@@ -1817,7 +1951,10 @@ impl BoardsMain {
                 &board_contract,
                 &Symbol::new(env, "get_board_community_slug"),
                 args,
-            ).ok().and_then(|r| r.ok()).flatten()
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
         } else {
             None
         }
@@ -1826,7 +1963,12 @@ impl BoardsMain {
     /// Delegate rendering to the board contract using slug lookup.
     /// For community boards accessed via /b/{slug}, redirects to canonical /c/{community}/b/{slug} URL.
     /// For standalone boards, delegates directly to the board contract.
-    fn delegate_to_board_by_slug(env: &Env, slug_bytes: &Bytes, path: &Option<String>, viewer: &Option<Address>) -> Bytes {
+    fn delegate_to_board_by_slug(
+        env: &Env,
+        slug_bytes: &Bytes,
+        path: &Option<String>,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let registry: Address = env
             .storage()
             .instance()
@@ -1853,19 +1995,18 @@ impl BoardsMain {
         let slug = Self::bytes_to_string(env, slug_bytes);
 
         // Try to parse as numeric ID first, then fall back to slug lookup
-        let board_id_opt: Option<u64> = Self::try_parse_u64(&slug)
-            .or_else(|| {
-                // Not a numeric ID, try slug lookup
-                let lookup_args: Vec<Val> = Vec::from_array(env, [slug.clone().into_val(env)]);
-                env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
-                    &board_contract,
-                    &Symbol::new(env, "get_board_id_by_slug"),
-                    lookup_args,
-                )
-                .ok()
-                .and_then(|r| r.ok())
-                .flatten()
-            });
+        let board_id_opt: Option<u64> = Self::try_parse_u64(&slug).or_else(|| {
+            // Not a numeric ID, try slug lookup
+            let lookup_args: Vec<Val> = Vec::from_array(env, [slug.clone().into_val(env)]);
+            env.try_invoke_contract::<Option<u64>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_board_id_by_slug"),
+                lookup_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten()
+        });
 
         let Some(board_id) = board_id_opt else {
             return MarkdownBuilder::new(env)
@@ -1893,7 +2034,8 @@ impl BoardsMain {
         };
 
         // Check if board is in a community
-        let community_contract_opt: Option<Address> = env.storage().instance().get(&MainKey::Community);
+        let community_contract_opt: Option<Address> =
+            env.storage().instance().get(&MainKey::Community);
 
         if let Some(ref community_contract) = community_contract_opt {
             let community_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env)]);
@@ -1925,12 +2067,15 @@ impl BoardsMain {
                     let relative_path = Self::strip_board_slug_prefix_as_option(env, path, &slug);
                     let community_slug: Option<String> = Some(community.name);
 
-                    let args: Vec<Val> = Vec::from_array(env, [
-                        board_id.into_val(env),
-                        relative_path.into_val(env),
-                        viewer.into_val(env),
-                        community_slug.into_val(env),
-                    ]);
+                    let args: Vec<Val> = Vec::from_array(
+                        env,
+                        [
+                            board_id.into_val(env),
+                            relative_path.into_val(env),
+                            viewer.into_val(env),
+                            community_slug.into_val(env),
+                        ],
+                    );
                     return env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args);
                 }
             }
@@ -1940,12 +2085,15 @@ impl BoardsMain {
         let relative_path = Self::strip_board_slug_prefix_as_option(env, path, &slug);
         let community_slug: Option<String> = None;
 
-        let args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            relative_path.into_val(env),
-            viewer.into_val(env),
-            community_slug.into_val(env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                relative_path.into_val(env),
+                viewer.into_val(env),
+                community_slug.into_val(env),
+            ],
+        );
         env.invoke_contract(&board_contract, &Symbol::new(env, "render"), args)
     }
 
@@ -1989,7 +2137,11 @@ impl BoardsMain {
     }
 
     /// Strip the `/b/{slug}` prefix from a path to get remaining path as Option<String>
-    fn strip_board_slug_prefix_as_option(env: &Env, path: &Option<String>, slug: &String) -> Option<String> {
+    fn strip_board_slug_prefix_as_option(
+        env: &Env,
+        path: &Option<String>,
+        slug: &String,
+    ) -> Option<String> {
         let remaining = Self::strip_board_slug_prefix(env, path, slug);
         if remaining.len() == 0 {
             Some(String::from_str(env, "/"))
@@ -2145,7 +2297,11 @@ impl BoardsMain {
         }
 
         // Compare byte by byte up to the shorter length
-        let min_len = if a_copy_len < b_copy_len { a_copy_len } else { b_copy_len };
+        let min_len = if a_copy_len < b_copy_len {
+            a_copy_len
+        } else {
+            b_copy_len
+        };
 
         for i in 0..min_len {
             // Convert to lowercase for comparison
@@ -2273,14 +2429,20 @@ impl BoardsMain {
     }
 
     /// Render a single community card (same format as communities page).
-    fn render_community_card<'a>(_env: &'a Env, mut md: MarkdownBuilder<'a>, community: &CommunityMeta) -> MarkdownBuilder<'a> {
+    fn render_community_card<'a>(
+        _env: &'a Env,
+        mut md: MarkdownBuilder<'a>,
+        community: &CommunityMeta,
+    ) -> MarkdownBuilder<'a> {
         // Build the URL for the link
         let mut url_buf = [0u8; 64];
         let prefix = b"render:/c/";
         url_buf[0..10].copy_from_slice(prefix);
         let name_len = community.name.len() as usize;
         let name_copy_len = if name_len > 50 { 50 } else { name_len };
-        community.name.copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
+        community
+            .name
+            .copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
         let url = core::str::from_utf8(&url_buf[0..10 + name_copy_len]).unwrap_or("");
 
         // Wrap entire card in an <a> tag like board-card
@@ -2322,10 +2484,8 @@ impl BoardsMain {
     pub fn get_chunk(env: Env, collection: Symbol, index: u32) -> Option<Bytes> {
         let config_opt: Option<Address> = env.storage().instance().get(&MainKey::Config);
         if let Some(config) = config_opt {
-            let args: Vec<Val> = Vec::from_array(&env, [
-                collection.into_val(&env),
-                index.into_val(&env),
-            ]);
+            let args: Vec<Val> =
+                Vec::from_array(&env, [collection.into_val(&env), index.into_val(&env)]);
             env.try_invoke_contract::<Option<Bytes>, soroban_sdk::Error>(
                 &config,
                 &Symbol::new(&env, "get_chunk"),
@@ -2380,7 +2540,18 @@ mod test {
     use soroban_sdk::Env;
 
     /// Helper to setup a boards-main contract with all dependencies
-    fn setup_main(env: &Env) -> (BoardsMainClient, Address, Address, Address, Address, Address, Address, Address) {
+    fn setup_main(
+        env: &Env,
+    ) -> (
+        BoardsMainClient,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         env.mock_all_auths();
 
         let contract_id = env.register(BoardsMain, ());
@@ -2394,9 +2565,26 @@ mod test {
         let community = Address::generate(env);
         let config = Address::generate(env);
 
-        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+        client.init(
+            &registry,
+            &theme,
+            &permissions,
+            &content,
+            &admin,
+            &community,
+            &config,
+        );
 
-        (client, registry, theme, permissions, content, admin, community, config)
+        (
+            client,
+            registry,
+            theme,
+            permissions,
+            content,
+            admin,
+            community,
+            config,
+        )
     }
 
     #[test]
@@ -2415,7 +2603,15 @@ mod test {
         let community = Address::generate(&env);
         let config = Address::generate(&env);
 
-        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+        client.init(
+            &registry,
+            &theme,
+            &permissions,
+            &content,
+            &admin,
+            &community,
+            &config,
+        );
 
         assert_eq!(client.get_registry(), registry);
         assert_eq!(client.get_theme(), theme);
@@ -2440,9 +2636,25 @@ mod test {
         let community = Address::generate(&env);
         let config = Address::generate(&env);
 
-        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+        client.init(
+            &registry,
+            &theme,
+            &permissions,
+            &content,
+            &admin,
+            &community,
+            &config,
+        );
         // Second init should panic
-        client.init(&registry, &theme, &permissions, &content, &admin, &community, &config);
+        client.init(
+            &registry,
+            &theme,
+            &permissions,
+            &content,
+            &admin,
+            &community,
+            &config,
+        );
     }
 
     #[test]

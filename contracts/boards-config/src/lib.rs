@@ -200,7 +200,9 @@ impl BoardsConfig {
             panic!("Already initialized");
         }
 
-        env.storage().instance().set(&ConfigKey::Registry, &registry);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::Registry, &registry);
 
         // Set all default values
         Self::set_default_values(&env);
@@ -208,14 +210,16 @@ impl BoardsConfig {
 
     fn set_default_values(env: &Env) {
         // Board thresholds - initially permissive
-        env.storage()
-            .instance()
-            .set(&ConfigKey::BoardThresholds, &CreationThresholds::permissive());
+        env.storage().instance().set(
+            &ConfigKey::BoardThresholds,
+            &CreationThresholds::permissive(),
+        );
 
         // Community thresholds - initially permissive
-        env.storage()
-            .instance()
-            .set(&ConfigKey::CommunityThresholds, &CreationThresholds::permissive());
+        env.storage().instance().set(
+            &ConfigKey::CommunityThresholds,
+            &CreationThresholds::permissive(),
+        );
 
         // Branding
         let branding = Branding {
@@ -226,13 +230,23 @@ impl BoardsConfig {
             footer_text: String::from_str(env, "Powered by Soroban Render on Stellar"),
             primary_color: String::from_str(env, "#7857e1"),
         };
-        env.storage().instance().set(&ConfigKey::Branding, &branding);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::Branding, &branding);
 
         // Operational settings
-        env.storage().instance().set(&ConfigKey::MaxReplyDepth, &10u32);
-        env.storage().instance().set(&ConfigKey::ReplyChunkSize, &6u32);
-        env.storage().instance().set(&ConfigKey::DefaultEditWindow, &86400u64);
-        env.storage().instance().set(&ConfigKey::ThreadBodyMaxBytes, &16384u32);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::MaxReplyDepth, &10u32);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ReplyChunkSize, &6u32);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::DefaultEditWindow, &86400u64);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ThreadBodyMaxBytes, &16384u32);
         env.storage().instance().set(
             &ConfigKey::BoardNameLimits,
             &NameLimits {
@@ -249,9 +263,10 @@ impl BoardsConfig {
         );
 
         // Voting defaults
-        env.storage()
-            .instance()
-            .set(&ConfigKey::DefaultVotingConfig, &DefaultVotingConfig::default_config());
+        env.storage().instance().set(
+            &ConfigKey::DefaultVotingConfig,
+            &DefaultVotingConfig::default_config(),
+        );
     }
 
     // =========================================================================
@@ -330,14 +345,17 @@ impl BoardsConfig {
 
     /// Get branding configuration
     pub fn get_branding(env: Env) -> Branding {
-        env.storage().instance().get(&ConfigKey::Branding).unwrap_or_else(|| Branding {
-            site_name: String::from_str(&env, "Soroban Boards"),
-            tagline: String::from_str(&env, "Decentralized discussion forums on Stellar"),
-            logo_url: String::from_str(&env, ""),
-            favicon_url: String::from_str(&env, ""),
-            footer_text: String::from_str(&env, "Powered by Soroban Render on Stellar"),
-            primary_color: String::from_str(&env, "#7857e1"),
-        })
+        env.storage()
+            .instance()
+            .get(&ConfigKey::Branding)
+            .unwrap_or_else(|| Branding {
+                site_name: String::from_str(&env, "Soroban Boards"),
+                tagline: String::from_str(&env, "Decentralized discussion forums on Stellar"),
+                logo_url: String::from_str(&env, ""),
+                favicon_url: String::from_str(&env, ""),
+                footer_text: String::from_str(&env, "Powered by Soroban Render on Stellar"),
+                primary_color: String::from_str(&env, "#7857e1"),
+            })
     }
 
     /// Set branding configuration (admin only)
@@ -356,7 +374,9 @@ impl BoardsConfig {
         tagline_chonk.clear();
         tagline_chonk.write_chunked(tagline_bytes, 1024);
 
-        env.storage().instance().set(&ConfigKey::Branding, &branding);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::Branding, &branding);
     }
 
     /// Get custom CSS overrides
@@ -388,7 +408,9 @@ impl BoardsConfig {
     /// Set maximum reply depth (admin only)
     pub fn set_max_reply_depth(env: Env, depth: u32, caller: Address) {
         Self::require_admin(&env, &caller);
-        env.storage().instance().set(&ConfigKey::MaxReplyDepth, &depth);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::MaxReplyDepth, &depth);
     }
 
     /// Get reply chunk size for pagination
@@ -402,7 +424,9 @@ impl BoardsConfig {
     /// Set reply chunk size (admin only)
     pub fn set_reply_chunk_size(env: Env, size: u32, caller: Address) {
         Self::require_admin(&env, &caller);
-        env.storage().instance().set(&ConfigKey::ReplyChunkSize, &size);
+        env.storage()
+            .instance()
+            .set(&ConfigKey::ReplyChunkSize, &size);
     }
 
     /// Get default edit window in seconds
@@ -537,7 +561,9 @@ impl BoardsConfig {
         }
 
         // Check account age requirement
-        if thresholds.min_account_age_secs > 0 && user_account_age_secs < thresholds.min_account_age_secs {
+        if thresholds.min_account_age_secs > 0
+            && user_account_age_secs < thresholds.min_account_age_secs
+        {
             return ThresholdResult {
                 passed: false,
                 reason: String::from_str(&env, "Account too new"),
@@ -593,21 +619,13 @@ impl BoardsConfig {
     // =========================================================================
 
     /// Render site name - for includes: {{include contract=CONFIG func="site_name"}}
-    pub fn render_site_name(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_site_name(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let branding = Self::get_branding(env.clone());
         string_to_bytes(&env, &branding.site_name)
     }
 
     /// Render tagline - for includes: {{include contract=CONFIG func="tagline"}}
-    pub fn render_tagline(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_tagline(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let branding = Self::get_branding(env.clone());
         string_to_bytes(&env, &branding.tagline)
     }
@@ -630,18 +648,15 @@ impl BoardsConfig {
 
     /// Render footer text - for includes: {{include contract=CONFIG func="footer_text"}}
     /// Returns a continuation tag for progressive loading from chonk storage
-    pub fn render_footer_text(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_footer_text(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let footer_chonk = Chonk::open(&env, Symbol::new(&env, "footer"));
         let count = footer_chonk.count();
 
         if count > 0 {
             // Return continuation tag for progressive loading
             // {{continue collection="footer" from=0 total=N}}
-            let mut result = Bytes::from_slice(&env, b"{{continue collection=\"footer\" from=0 total=");
+            let mut result =
+                Bytes::from_slice(&env, b"{{continue collection=\"footer\" from=0 total=");
             result.append(&u32_to_bytes(&env, count));
             result.append(&Bytes::from_slice(&env, b"}}"));
             result
@@ -672,11 +687,7 @@ impl BoardsConfig {
     }
 
     /// Render header (site name as h1 + tagline) - for includes: {{include contract=CONFIG func="header"}}
-    pub fn render_header(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_header(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let branding = Self::get_branding(env.clone());
 
         // Build: "# site_name\n\ntagline\n\n"
@@ -692,11 +703,7 @@ impl BoardsConfig {
     }
 
     /// Render custom CSS - for theme to include
-    pub fn render_custom_css(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_custom_css(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         Self::get_custom_css(env)
     }
 
@@ -716,11 +723,7 @@ impl BoardsConfig {
     /// - `<meta name="favicon" content="URL">` - sets the page favicon
     /// - `<meta name="title" content="...">` - sets the page title
     /// - `<meta name="theme-color" content="...">` - sets the browser theme color
-    pub fn render_meta(
-        env: Env,
-        _path: Option<String>,
-        _viewer: Option<Address>,
-    ) -> Bytes {
+    pub fn render_meta(env: Env, _path: Option<String>, _viewer: Option<Address>) -> Bytes {
         let branding = Self::get_branding(env.clone());
         let mut md = MarkdownBuilder::new(&env);
 
@@ -885,10 +888,10 @@ mod test {
         let result = client.check_thresholds(
             &CreationType::Board,
             &user,
-            &0,   // user_creation_count
-            &0,   // user_karma
-            &0,   // user_account_age_secs
-            &0,   // user_post_count
+            &0,     // user_creation_count
+            &0,     // user_karma
+            &0,     // user_account_age_secs
+            &0,     // user_post_count
             &false, // has_profile
         );
         assert!(result.passed);
@@ -978,29 +981,18 @@ mod test {
         });
 
         // User with 2 communities should pass
-        let result = client.check_thresholds(
-            &CreationType::Community,
-            &user,
-            &2,
-            &0,
-            &0,
-            &0,
-            &false,
-        );
+        let result =
+            client.check_thresholds(&CreationType::Community, &user, &2, &0, &0, &0, &false);
         assert!(result.passed);
 
         // User with 3 communities should fail
-        let result = client.check_thresholds(
-            &CreationType::Community,
-            &user,
-            &3,
-            &0,
-            &0,
-            &0,
-            &false,
-        );
+        let result =
+            client.check_thresholds(&CreationType::Community, &user, &3, &0, &0, &0, &false);
         assert!(!result.passed);
-        assert_eq!(result.reason, String::from_str(&env, "Creation limit reached"));
+        assert_eq!(
+            result.reason,
+            String::from_str(&env, "Creation limit reached")
+        );
     }
 
     #[test]

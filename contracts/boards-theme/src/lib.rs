@@ -12,7 +12,9 @@
 //! - get_* functions - contract address getters
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Vec,
+};
 
 // Declare render capabilities
 soroban_render!(markdown, styles);
@@ -39,12 +41,21 @@ pub struct BoardsTheme;
 #[contractimpl]
 impl BoardsTheme {
     /// Initialize the theme contract
-    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, admin: Address, config: Address) {
+    pub fn init(
+        env: Env,
+        registry: Address,
+        permissions: Address,
+        content: Address,
+        admin: Address,
+        config: Address,
+    ) {
         if env.storage().instance().has(&ThemeKey::Registry) {
             panic!("Already initialized");
         }
         env.storage().instance().set(&ThemeKey::Registry, &registry);
-        env.storage().instance().set(&ThemeKey::Permissions, &permissions);
+        env.storage()
+            .instance()
+            .set(&ThemeKey::Permissions, &permissions);
         env.storage().instance().set(&ThemeKey::Content, &content);
         env.storage().instance().set(&ThemeKey::Admin, &admin);
         env.storage().instance().set(&ThemeKey::Config, &config);
@@ -398,7 +409,13 @@ impl BoardsTheme {
             let result = env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
                 &config,
                 &Symbol::new(env, "render_custom_css"),
-                Vec::from_array(env, [Option::<String>::None.into_val(env), Option::<Address>::None.into_val(env)]),
+                Vec::from_array(
+                    env,
+                    [
+                        Option::<String>::None.into_val(env),
+                        Option::<Address>::None.into_val(env),
+                    ],
+                ),
             );
             if let Ok(Ok(css)) = result {
                 return css;
@@ -429,7 +446,16 @@ mod test {
     use soroban_sdk::Env;
 
     /// Helper to setup a boards-theme contract with all dependencies
-    fn setup_theme(env: &Env) -> (BoardsThemeClient, Address, Address, Address, Address, Address) {
+    fn setup_theme(
+        env: &Env,
+    ) -> (
+        BoardsThemeClient,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         env.mock_all_auths();
 
         let contract_id = env.register(BoardsTheme, ());

@@ -1,6 +1,8 @@
 #![no_std]
 
-use soroban_sdk::{contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+};
 
 /// Role levels (hierarchical - higher includes lower permissions)
 #[contracttype]
@@ -65,9 +67,9 @@ pub struct CommunityBan {
 #[contracttype]
 #[derive(Clone)]
 pub struct UserFlair {
-    pub text: String,       // max 24 chars
-    pub color: String,      // CSS text color
-    pub bg_color: String,   // CSS background color
+    pub text: String,     // max 24 chars
+    pub color: String,    // CSS text color
+    pub bg_color: String, // CSS background color
     pub granted_by: Address,
     pub granted_at: u64,
 }
@@ -636,13 +638,7 @@ impl BoardsPermissions {
     /// - Moderator+ can invite as Member or Guest
     /// - Admin+ can invite as Moderator
     /// - Owner can invite as Admin or Owner
-    pub fn invite_member(
-        env: Env,
-        board_id: u64,
-        user: Address,
-        role: Role,
-        caller: Address,
-    ) {
+    pub fn invite_member(env: Env, board_id: u64, user: Address, role: Role, caller: Address) {
         caller.require_auth();
 
         let caller_role = Self::get_role(env.clone(), board_id, caller.clone());
@@ -884,9 +880,10 @@ impl BoardsPermissions {
         env.storage()
             .persistent()
             .set(&PermKey::CommunityOwner(community_id), &owner);
-        env.storage()
-            .persistent()
-            .set(&PermKey::CommunityRole(community_id, owner.clone()), &Role::Owner);
+        env.storage().persistent().set(
+            &PermKey::CommunityRole(community_id, owner.clone()),
+            &Role::Owner,
+        );
     }
 
     /// Get community owner
@@ -1255,12 +1252,7 @@ impl BoardsPermissions {
     }
 
     /// Remove board role override for a user
-    pub fn remove_board_role_override(
-        env: Env,
-        board_id: u64,
-        user: Address,
-        caller: Address,
-    ) {
+    pub fn remove_board_role_override(env: Env, board_id: u64, user: Address, caller: Address) {
         caller.require_auth();
 
         let caller_board_role = Self::get_role(env.clone(), board_id, caller);
@@ -1579,15 +1571,9 @@ impl BoardsPermissions {
             .expect("Not initialized");
 
         // Delegate to registry - it handles auth checks
-        let args: Vec<Val> = Vec::from_array(&env, [
-            new_admin.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &registry,
-            &Symbol::new(&env, "add_admin"),
-            args,
-        );
+        let args: Vec<Val> =
+            Vec::from_array(&env, [new_admin.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&registry, &Symbol::new(&env, "add_admin"), args);
     }
 
     /// Remove a site admin. Delegates to registry.remove_admin.
@@ -1603,15 +1589,11 @@ impl BoardsPermissions {
             .expect("Not initialized");
 
         // Delegate to registry - it handles auth checks
-        let args: Vec<Val> = Vec::from_array(&env, [
-            admin_to_remove.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &registry,
-            &Symbol::new(&env, "remove_admin"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [admin_to_remove.into_val(&env), caller.into_val(&env)],
         );
+        env.invoke_contract::<()>(&registry, &Symbol::new(&env, "remove_admin"), args);
     }
 
     // ============================================================
@@ -1669,11 +1651,8 @@ impl BoardsPermissions {
     pub fn migrate_site_admins(env: Env, admins: Vec<Address>) {
         // Only allow migration if not already initialized
         if env.storage().instance().has(&PermKey::SiteAdmins) {
-            let existing: Vec<Address> = env
-                .storage()
-                .instance()
-                .get(&PermKey::SiteAdmins)
-                .unwrap();
+            let existing: Vec<Address> =
+                env.storage().instance().get(&PermKey::SiteAdmins).unwrap();
             if existing.len() > 0 {
                 panic!("Site admins already initialized");
             }
@@ -1747,7 +1726,8 @@ impl BoardsPermissions {
         };
 
         // Get config contract from registry using get_contract_by_alias
-        let config_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
+        let config_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
         let config: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -1776,7 +1756,8 @@ impl BoardsPermissions {
         let user_post_count = Self::get_post_count(env.clone(), user.clone());
 
         // Get user's karma from voting contract
-        let voting_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
+        let voting_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
         let voting: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -1802,7 +1783,8 @@ impl BoardsPermissions {
         };
 
         // Get user's profile status from profile contract (if registered)
-        let profile_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
+        let profile_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
         let profile_contract: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -1903,7 +1885,8 @@ impl BoardsPermissions {
         };
 
         // Get config contract from registry using get_contract_by_alias
-        let config_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
+        let config_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "config").into_val(&env)]);
         let config: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -1934,7 +1917,8 @@ impl BoardsPermissions {
         let user_post_count = Self::get_post_count(env.clone(), user.clone());
 
         // Get user's karma from voting contract
-        let voting_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
+        let voting_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "voting").into_val(&env)]);
         let voting: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -1960,7 +1944,8 @@ impl BoardsPermissions {
         };
 
         // Get user's profile status from profile contract (if registered)
-        let profile_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
+        let profile_args: Vec<Val> =
+            Vec::from_array(&env, [Symbol::new(&env, "profile").into_val(&env)]);
         let profile_contract: Option<Address> = env
             .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
                 &registry,
@@ -3025,7 +3010,10 @@ mod test {
         client.set_board_role_override(&0, &user, &Role::Member, &owner);
 
         // Check override exists
-        assert_eq!(client.get_board_role_override(&0, &user), Some(Role::Member));
+        assert_eq!(
+            client.get_board_role_override(&0, &user),
+            Some(Role::Member)
+        );
 
         // Remove override
         client.remove_board_role_override(&0, &user, &owner);

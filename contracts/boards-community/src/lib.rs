@@ -1,7 +1,9 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, Env, IntoVal, String, Symbol, Val, Vec,
+};
 
 // Declare render capabilities
 soroban_render!(markdown);
@@ -179,10 +181,16 @@ impl BoardsCommunity {
             panic!("Already initialized");
         }
 
-        env.storage().instance().set(&CommunityKey::Registry, &registry);
-        env.storage().instance().set(&CommunityKey::Permissions, &permissions);
+        env.storage()
+            .instance()
+            .set(&CommunityKey::Registry, &registry);
+        env.storage()
+            .instance()
+            .set(&CommunityKey::Permissions, &permissions);
         env.storage().instance().set(&CommunityKey::Theme, &theme);
-        env.storage().instance().set(&CommunityKey::CommunityCount, &0u64);
+        env.storage()
+            .instance()
+            .set(&CommunityKey::CommunityCount, &0u64);
     }
 
     /// Set the config contract address (called from registry)
@@ -209,11 +217,14 @@ impl BoardsCommunity {
     fn is_community_admin(env: &Env, community_id: u64, user: &Address) -> bool {
         let perms_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
         if let Some(perms) = perms_opt {
-            let args: Vec<Val> = Vec::from_array(env, [
-                community_id.into_val(env),
-                user.clone().into_val(env),
-                (Role::Admin as u32).into_val(env),
-            ]);
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [
+                    community_id.into_val(env),
+                    user.clone().into_val(env),
+                    (Role::Admin as u32).into_val(env),
+                ],
+            );
             env.try_invoke_contract::<bool, soroban_sdk::Error>(
                 &perms,
                 &Symbol::new(env, "has_community_role"),
@@ -298,7 +309,8 @@ impl BoardsCommunity {
                 .instance()
                 .get::<_, Address>(&CommunityKey::Config)
             {
-                let user_community_count = Self::count_user_communities(env.clone(), caller.clone());
+                let user_community_count =
+                    Self::count_user_communities(env.clone(), caller.clone());
 
                 // Get account age from permissions contract
                 let perms: Address = env
@@ -318,12 +330,12 @@ impl BoardsCommunity {
                 let check_args: Vec<Val> = Vec::from_array(
                     &env,
                     [
-                        1u32.into_val(&env),  // CreationType::Community = 1
+                        1u32.into_val(&env), // CreationType::Community = 1
                         caller.clone().into_val(&env),
                         user_community_count.into_val(&env),
-                        0i64.into_val(&env),  // user_karma (TODO: get from voting contract)
+                        0i64.into_val(&env), // user_karma (TODO: get from voting contract)
                         user_account_age.into_val(&env),
-                        0u32.into_val(&env),  // user_post_count (TODO: get from content)
+                        0u32.into_val(&env), // user_post_count (TODO: get from content)
                         false.into_val(&env), // has_profile (TODO: get from profile contract)
                     ],
                 );
@@ -339,7 +351,8 @@ impl BoardsCommunity {
                     let mut buf = [0u8; 64];
                     let len = core::cmp::min(result.1.len() as usize, 64);
                     result.1.copy_into_slice(&mut buf[..len]);
-                    let reason = core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
+                    let reason =
+                        core::str::from_utf8(&buf[..len]).unwrap_or("Threshold check failed");
                     panic!("{}", reason);
                 }
             }
@@ -376,9 +389,10 @@ impl BoardsCommunity {
             .set(&CommunityKey::CommunityByName(name_lower), &community_id);
 
         // Store listed status
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityListed(community_id), &is_listed_bool);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityListed(community_id),
+            &is_listed_bool,
+        );
 
         // Initialize empty boards list
         let boards: Vec<u64> = Vec::new(&env);
@@ -400,9 +414,10 @@ impl BoardsCommunity {
             default_board_private: false,
             max_grantable_role: Role::Admin,
         };
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityPermDefaults(community_id), &perm_defaults);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityPermDefaults(community_id),
+            &perm_defaults,
+        );
 
         // Update count
         env.storage()
@@ -411,9 +426,10 @@ impl BoardsCommunity {
 
         // Increment user's community count for threshold tracking
         let user_count = Self::count_user_communities(env.clone(), caller.clone());
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::UserCommunityCount(caller.clone()), &(user_count + 1));
+        env.storage().persistent().set(
+            &CommunityKey::UserCommunityCount(caller.clone()),
+            &(user_count + 1),
+        );
 
         // Record first-seen timestamp for the user (idempotent if already recorded)
         let permissions: Address = env
@@ -479,11 +495,7 @@ impl BoardsCommunity {
         let end = core::cmp::min(start + limit, count);
 
         for i in start..end {
-            if let Some(community) = env
-                .storage()
-                .persistent()
-                .get(&CommunityKey::Community(i))
-            {
+            if let Some(community) = env.storage().persistent().get(&CommunityKey::Community(i)) {
                 communities.push_back(community);
             }
         }
@@ -518,10 +530,7 @@ impl BoardsCommunity {
                 if collected >= limit {
                     break;
                 }
-                if let Some(community) = env
-                    .storage()
-                    .persistent()
-                    .get(&CommunityKey::Community(i))
+                if let Some(community) = env.storage().persistent().get(&CommunityKey::Community(i))
                 {
                     communities.push_back(community);
                     collected += 1;
@@ -557,10 +566,7 @@ impl BoardsCommunity {
         let mut community = community_opt.unwrap();
 
         // Get registry for checks
-        let registry_opt: Option<Address> = env
-            .storage()
-            .instance()
-            .get(&CommunityKey::Registry);
+        let registry_opt: Option<Address> = env.storage().instance().get(&CommunityKey::Registry);
 
         if registry_opt.is_none() {
             panic!("Community contract not initialized (no registry)");
@@ -582,7 +588,8 @@ impl BoardsCommunity {
         // Verify caller is community owner/admin OR board owner OR registry admin
         let is_community_owner_or_admin = Self::is_owner_or_admin(&env, &community, &caller);
         let is_board_owner = {
-            let alias_args: Vec<Val> = Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
+            let alias_args: Vec<Val> =
+                Vec::from_array(&env, [Symbol::new(&env, "board").into_val(&env)]);
             let board_contract: Option<Address> = env.invoke_contract(
                 &registry,
                 &Symbol::new(&env, "get_contract_by_alias"),
@@ -591,11 +598,14 @@ impl BoardsCommunity {
             if let Some(ref bc) = board_contract {
                 // Get board metadata to check owner
                 let board_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env)]);
-                let board_meta: Option<BoardMeta> = env.try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
-                    bc,
-                    &Symbol::new(&env, "get_board"),
-                    board_args,
-                ).ok().and_then(|r| r.ok());
+                let board_meta: Option<BoardMeta> = env
+                    .try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
+                        bc,
+                        &Symbol::new(&env, "get_board"),
+                        board_args,
+                    )
+                    .ok()
+                    .and_then(|r| r.ok());
                 board_meta.map_or(false, |b| b.creator == caller)
             } else {
                 false
@@ -607,7 +617,11 @@ impl BoardsCommunity {
         }
 
         // Check if board is already in a community
-        if env.storage().persistent().has(&CommunityKey::BoardCommunity(board_id)) {
+        if env
+            .storage()
+            .persistent()
+            .has(&CommunityKey::BoardCommunity(board_id))
+        {
             panic!("Board is already in a community");
         }
 
@@ -640,9 +654,10 @@ impl BoardsCommunity {
 
         // Store slug -> board_id index in community scope
         if let Some(slug) = board_slug {
-            env.storage()
-                .persistent()
-                .set(&CommunityKey::CommunityBoardBySlug(community_id, slug), &board_id);
+            env.storage().persistent().set(
+                &CommunityKey::CommunityBoardBySlug(community_id, slug),
+                &board_id,
+            );
         }
 
         // Remove from standalone slug index (board is now in a community)
@@ -746,17 +761,18 @@ impl BoardsCommunity {
 
     /// Get board slug from the board contract
     fn get_board_slug_from_contract(env: &Env, board_id: u64) -> Option<String> {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&CommunityKey::Registry)?;
+        let registry: Address = env.storage().instance().get(&CommunityKey::Registry)?;
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         let board_contract = board_contract?;
 
@@ -765,30 +781,37 @@ impl BoardsCommunity {
             &board_contract,
             &Symbol::new(env, "get_board_slug"),
             slug_args,
-        ).ok().and_then(|r| r.ok()).flatten()
+        )
+        .ok()
+        .and_then(|r| r.ok())
+        .flatten()
     }
 
     /// Check if a slug is available in the community scope
     fn is_community_slug_available(env: &Env, community_id: u64, slug: &String) -> bool {
         !env.storage()
             .persistent()
-            .has(&CommunityKey::CommunityBoardBySlug(community_id, slug.clone()))
+            .has(&CommunityKey::CommunityBoardBySlug(
+                community_id,
+                slug.clone(),
+            ))
     }
 
     /// Request the board contract to update a board's slug (returns new slug)
     /// This is called when the board's current slug conflicts with another board in the community.
     fn request_board_slug_update(env: &Env, board_id: u64) -> Option<String> {
-        let registry: Address = env
-            .storage()
-            .instance()
-            .get(&CommunityKey::Registry)?;
+        let registry: Address = env.storage().instance().get(&CommunityKey::Registry)?;
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         let board_contract = board_contract?;
 
@@ -802,16 +825,21 @@ impl BoardsCommunity {
         let community_contract = env.current_contract_address();
 
         // Call update_board_slug with all 3 required arguments: board_id, new_slug, caller
-        let update_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            new_slug.clone().into_val(env),
-            community_contract.into_val(env),
-        ]);
+        let update_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                new_slug.clone().into_val(env),
+                community_contract.into_val(env),
+            ],
+        );
         env.try_invoke_contract::<(), soroban_sdk::Error>(
             &board_contract,
             &Symbol::new(env, "update_board_slug"),
             update_args,
-        ).ok().and_then(|r| r.ok());
+        )
+        .ok()
+        .and_then(|r| r.ok());
 
         Some(new_slug)
     }
@@ -855,18 +883,22 @@ impl BoardsCommunity {
         };
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         if let Some(board_contract) = board_contract_opt {
             let community_contract = env.current_contract_address();
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                community_contract.into_val(env),
-            ]);
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [board_id.into_val(env), community_contract.into_val(env)],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &board_contract,
                 &Symbol::new(env, "remove_standalone_slug_index"),
@@ -884,23 +916,31 @@ impl BoardsCommunity {
         };
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         if let Some(board_contract) = board_contract_opt {
             let community_contract = env.current_contract_address();
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                community_contract.into_val(env),
-            ]);
-            return env.try_invoke_contract::<Option<String>, soroban_sdk::Error>(
-                &board_contract,
-                &Symbol::new(env, "add_standalone_slug_index"),
-                args,
-            ).ok().and_then(|r| r.ok()).flatten();
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [board_id.into_val(env), community_contract.into_val(env)],
+            );
+            return env
+                .try_invoke_contract::<Option<String>, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "add_standalone_slug_index"),
+                    args,
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .flatten();
         }
         None
     }
@@ -914,19 +954,26 @@ impl BoardsCommunity {
         };
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         if let Some(board_contract) = board_contract_opt {
             let community_contract = env.current_contract_address();
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                community_slug.into_val(env),
-                community_contract.into_val(env),
-            ]);
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [
+                    board_id.into_val(env),
+                    community_slug.into_val(env),
+                    community_contract.into_val(env),
+                ],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &board_contract,
                 &Symbol::new(env, "set_board_community_slug"),
@@ -944,18 +991,22 @@ impl BoardsCommunity {
         };
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         if let Some(board_contract) = board_contract_opt {
             let community_contract = env.current_contract_address();
-            let args: Vec<Val> = Vec::from_array(env, [
-                board_id.into_val(env),
-                community_contract.into_val(env),
-            ]);
+            let args: Vec<Val> = Vec::from_array(
+                env,
+                [board_id.into_val(env), community_contract.into_val(env)],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &board_contract,
                 &Symbol::new(env, "clear_board_community_slug"),
@@ -1043,13 +1094,17 @@ impl BoardsCommunity {
             panic!("Only community owner or admin can set permission defaults");
         }
 
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityPermDefaults(community_id), &defaults);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityPermDefaults(community_id),
+            &defaults,
+        );
     }
 
     /// Get permission defaults
-    pub fn get_permission_defaults(env: Env, community_id: u64) -> Option<CommunityPermissionDefaults> {
+    pub fn get_permission_defaults(
+        env: Env,
+        community_id: u64,
+    ) -> Option<CommunityPermissionDefaults> {
         env.storage()
             .persistent()
             .get(&CommunityKey::CommunityPermDefaults(community_id))
@@ -1095,9 +1150,10 @@ impl BoardsCommunity {
             message,
         });
 
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityJoinRequests(community_id), &requests);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityJoinRequests(community_id),
+            &requests,
+        );
     }
 
     /// Accept a join request (owner/admin only)
@@ -1135,9 +1191,10 @@ impl BoardsCommunity {
             panic!("No pending join request from this user");
         }
 
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityJoinRequests(community_id), &new_requests);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityJoinRequests(community_id),
+            &new_requests,
+        );
 
         // Add to members
         let mut members: Vec<Address> = env
@@ -1179,8 +1236,8 @@ impl BoardsCommunity {
     pub fn add_admin(env: Env, community_id: u64, user: Address, caller: Address) {
         caller.require_auth();
 
-        let community = Self::get_community(env.clone(), community_id)
-            .expect("Community not found");
+        let community =
+            Self::get_community(env.clone(), community_id).expect("Community not found");
 
         // Owner or existing admin can add admins
         if !Self::is_owner_or_admin(&env, &community, &caller) {
@@ -1194,12 +1251,15 @@ impl BoardsCommunity {
             .get(&CommunityKey::Permissions)
             .expect("Permissions not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            user.into_val(&env),
-            (Role::Admin as u32).into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                community_id.into_val(&env),
+                user.into_val(&env),
+                (Role::Admin as u32).into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(&perms, &Symbol::new(&env, "set_community_role"), args);
     }
 
@@ -1207,8 +1267,8 @@ impl BoardsCommunity {
     pub fn remove_admin(env: Env, community_id: u64, user: Address, caller: Address) {
         caller.require_auth();
 
-        let community = Self::get_community(env.clone(), community_id)
-            .expect("Community not found");
+        let community =
+            Self::get_community(env.clone(), community_id).expect("Community not found");
 
         // Only owner can remove admins
         if caller != community.owner {
@@ -1222,12 +1282,15 @@ impl BoardsCommunity {
             .get(&CommunityKey::Permissions)
             .expect("Permissions not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            community_id.into_val(&env),
-            user.into_val(&env),
-            (Role::Guest as u32).into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                community_id.into_val(&env),
+                user.into_val(&env),
+                (Role::Guest as u32).into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(&perms, &Symbol::new(&env, "set_community_role"), args);
     }
 
@@ -1255,13 +1318,20 @@ impl BoardsCommunity {
         let count = Self::community_count(env.clone());
 
         // Check if user is a registry admin (they can manage all communities)
-        let is_registry_admin = if let Some(registry) = env.storage().instance().get::<CommunityKey, Address>(&CommunityKey::Registry) {
+        let is_registry_admin = if let Some(registry) = env
+            .storage()
+            .instance()
+            .get::<CommunityKey, Address>(&CommunityKey::Registry)
+        {
             let admin_args: Vec<Val> = Vec::from_array(&env, [user.clone().into_val(&env)]);
             env.try_invoke_contract::<bool, soroban_sdk::Error>(
                 &registry,
                 &Symbol::new(&env, "is_admin"),
                 admin_args,
-            ).ok().and_then(|r| r.ok()).unwrap_or(false)
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
         } else {
             false
         };
@@ -1338,19 +1408,15 @@ impl BoardsCommunity {
         // Parse and update is_listed
         let is_listed_bool = is_listed.len() == 0 || is_listed != String::from_str(&env, "false");
 
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::CommunityListed(community_id), &is_listed_bool);
+        env.storage().persistent().set(
+            &CommunityKey::CommunityListed(community_id),
+            &is_listed_bool,
+        );
     }
 
     /// Initiate ownership transfer (current owner only)
     /// Creates a pending transfer request that the new owner must accept
-    pub fn initiate_transfer(
-        env: Env,
-        community_id: u64,
-        new_owner: Address,
-        caller: Address,
-    ) {
+    pub fn initiate_transfer(env: Env, community_id: u64, new_owner: Address, caller: Address) {
         caller.require_auth();
 
         let community: CommunityMeta = env
@@ -1375,9 +1441,10 @@ impl BoardsCommunity {
             initiator: caller,
         };
 
-        env.storage()
-            .persistent()
-            .set(&CommunityKey::PendingOwnershipTransfer(community_id), &pending);
+        env.storage().persistent().set(
+            &CommunityKey::PendingOwnershipTransfer(community_id),
+            &pending,
+        );
     }
 
     /// Cancel pending ownership transfer (current owner only)
@@ -1565,7 +1632,12 @@ impl BoardsCommunity {
                     }
                     // Handle /c/{community}/b/{board-slug}/* - delegate to board contract
                     if sub_path.starts_with(b"/b/") {
-                        return Self::delegate_to_board_by_slug(&env, &community_name, &buf[name_end..copy_len], viewer);
+                        return Self::delegate_to_board_by_slug(
+                            &env,
+                            &community_name,
+                            &buf[name_end..copy_len],
+                            viewer,
+                        );
                     }
                 }
 
@@ -1580,7 +1652,12 @@ impl BoardsCommunity {
     // === Render Helper Functions ===
 
     /// Delegate rendering to board contract using board slug within community scope
-    fn delegate_to_board_by_slug(env: &Env, community_name: &String, board_path: &[u8], viewer: Option<Address>) -> Bytes {
+    fn delegate_to_board_by_slug(
+        env: &Env,
+        community_name: &String,
+        board_path: &[u8],
+        viewer: Option<Address>,
+    ) -> Bytes {
         // Look up community by name
         let community = match Self::get_community_by_name(env.clone(), community_name.clone()) {
             Some(c) => c,
@@ -1612,7 +1689,11 @@ impl BoardsCommunity {
         let board_slug = Self::bytes_to_string(env, slug_slice);
 
         // Look up board ID by slug within this community
-        let board_id = match Self::get_community_board_by_slug(env.clone(), community.id, board_slug.clone()) {
+        let board_id = match Self::get_community_board_by_slug(
+            env.clone(),
+            community.id,
+            board_slug.clone(),
+        ) {
             Some(id) => id,
             None => {
                 return MarkdownBuilder::new(env)
@@ -1640,11 +1721,15 @@ impl BoardsCommunity {
         };
 
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         let board_contract = match board_contract_opt {
             Some(c) => c,
@@ -1668,12 +1753,15 @@ impl BoardsCommunity {
         let community_slug: Option<String> = Some(community.name.clone());
 
         // Delegate to board contract
-        let render_args: Vec<Val> = Vec::from_array(env, [
-            board_id.into_val(env),
-            path_opt.into_val(env),
-            viewer.into_val(env),
-            community_slug.into_val(env),
-        ]);
+        let render_args: Vec<Val> = Vec::from_array(
+            env,
+            [
+                board_id.into_val(env),
+                path_opt.into_val(env),
+                viewer.into_val(env),
+                community_slug.into_val(env),
+            ],
+        );
 
         env.try_invoke_contract::<Bytes, soroban_sdk::Error>(
             &board_contract,
@@ -1707,7 +1795,9 @@ impl BoardsCommunity {
         builder = builder.paragraph("Explore communities or create your own.");
 
         // Create community button
-        builder = builder.raw_str("<p><a class=\"soroban-action\" href=\"render:/new\">Create Community</a></p>\n");
+        builder = builder.raw_str(
+            "<p><a class=\"soroban-action\" href=\"render:/new\">Create Community</a></p>\n",
+        );
 
         if communities.is_empty() {
             builder = builder.paragraph("No communities yet. Be the first to create one!");
@@ -1723,14 +1813,20 @@ impl BoardsCommunity {
         builder.build()
     }
 
-    fn append_community_card<'a>(_env: &'a Env, mut builder: MarkdownBuilder<'a>, community: &CommunityMeta) -> MarkdownBuilder<'a> {
+    fn append_community_card<'a>(
+        _env: &'a Env,
+        mut builder: MarkdownBuilder<'a>,
+        community: &CommunityMeta,
+    ) -> MarkdownBuilder<'a> {
         // Build the URL for the link
         let mut url_buf = [0u8; 64];
         let prefix = b"render:/c/";
         url_buf[0..10].copy_from_slice(prefix);
         let name_len = community.name.len() as usize;
         let name_copy_len = core::cmp::min(name_len, 50);
-        community.name.copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
+        community
+            .name
+            .copy_into_slice(&mut url_buf[10..10 + name_copy_len]);
         let url = core::str::from_utf8(&url_buf[0..10 + name_copy_len]).unwrap_or("");
 
         // Wrap entire card in an <a> tag like board-card and thread-card
@@ -1797,18 +1893,25 @@ impl BoardsCommunity {
                 &registry,
                 &Symbol::new(env, "is_admin"),
                 admin_args,
-            ).ok().and_then(|r| r.ok()).unwrap_or(false)
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .unwrap_or(false)
         } else {
             false
         };
 
         // Get single board contract via registry alias
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
-        let board_contract_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &registry,
-            &Symbol::new(env, "get_contract_by_alias"),
-            alias_args,
-        ).ok().and_then(|r| r.ok()).flatten();
+        let board_contract_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &registry,
+                &Symbol::new(env, "get_contract_by_alias"),
+                alias_args,
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         let board_contract = match board_contract_opt {
             Some(c) => c,
@@ -1821,11 +1924,14 @@ impl BoardsCommunity {
 
         for board_id in board_ids.iter() {
             // Get board metadata (includes is_listed and thread_count)
-            let board_opt: Option<BoardMeta> = env.try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
-                &board_contract,
-                &Symbol::new(env, "get_board"),
-                Vec::from_array(env, [board_id.into_val(env)]),
-            ).ok().and_then(|r| r.ok());
+            let board_opt: Option<BoardMeta> = env
+                .try_invoke_contract::<BoardMeta, soroban_sdk::Error>(
+                    &board_contract,
+                    &Symbol::new(env, "get_board"),
+                    Vec::from_array(env, [board_id.into_val(env)]),
+                )
+                .ok()
+                .and_then(|r| r.ok());
 
             if let Some(board) = board_opt {
                 // Check if viewer can see hidden boards
@@ -1835,7 +1941,8 @@ impl BoardsCommunity {
                     false
                 };
 
-                let can_see_hidden = viewer_is_community_admin || viewer_is_registry_admin || viewer_is_board_owner;
+                let can_see_hidden =
+                    viewer_is_community_admin || viewer_is_registry_admin || viewer_is_board_owner;
 
                 // Skip hidden boards unless viewer has permission
                 if !board.is_listed && !can_see_hidden {
@@ -1843,7 +1950,8 @@ impl BoardsCommunity {
                 }
 
                 // Board card with link wrapper - use slug-based URL: /c/{community}/b/{slug}
-                builder = builder.raw_str("<a href=\"render:/c/")
+                builder = builder
+                    .raw_str("<a href=\"render:/c/")
                     .text_string(&community.name)
                     .raw_str("/b/")
                     .text_string(&board.slug)
@@ -1897,21 +2005,27 @@ impl BoardsCommunity {
         let mut display_buf = [0u8; 128];
         let display_len = community.display_name.len() as usize;
         let display_copy_len = core::cmp::min(display_len, 128);
-        community.display_name.copy_into_slice(&mut display_buf[0..display_copy_len]);
-        let display = core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
+        community
+            .display_name
+            .copy_into_slice(&mut display_buf[0..display_copy_len]);
+        let display =
+            core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
 
         // Description
         let mut desc_buf = [0u8; 256];
         let desc_len = community.description.len() as usize;
         let desc_copy_len = core::cmp::min(desc_len, 256);
-        community.description.copy_into_slice(&mut desc_buf[0..desc_copy_len]);
+        community
+            .description
+            .copy_into_slice(&mut desc_buf[0..desc_copy_len]);
         let desc = core::str::from_utf8(&desc_buf[0..desc_copy_len]).unwrap_or("");
 
         let mut builder = MarkdownBuilder::new(env);
 
         // Back navigation
         builder = builder.raw_str("<div class=\"back-nav\">");
-        builder = builder.raw_str("<a href=\"render:/communities\" class=\"back-link\">← Communities</a>");
+        builder = builder
+            .raw_str("<a href=\"render:/communities\" class=\"back-link\">← Communities</a>");
         builder = builder.raw_str("</div>\n");
 
         builder = builder.newline();
@@ -1928,13 +2042,20 @@ impl BoardsCommunity {
         // Actions based on viewer (owner, community admin, or registry admin)
         // Check if viewer is a registry admin
         let viewer_is_registry_admin = if let Some(ref v) = viewer {
-            if let Some(registry) = env.storage().instance().get::<CommunityKey, Address>(&CommunityKey::Registry) {
+            if let Some(registry) = env
+                .storage()
+                .instance()
+                .get::<CommunityKey, Address>(&CommunityKey::Registry)
+            {
                 let admin_args: Vec<Val> = Vec::from_array(env, [v.clone().into_val(env)]);
                 env.try_invoke_contract::<bool, soroban_sdk::Error>(
                     &registry,
                     &Symbol::new(env, "is_admin"),
                     admin_args,
-                ).ok().and_then(|r| r.ok()).unwrap_or(false)
+                )
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false)
             } else {
                 false
             }
@@ -1950,11 +2071,14 @@ impl BoardsCommunity {
                 settings_url_buf[0..10].copy_from_slice(settings_prefix);
                 let name_len = community.name.len() as usize;
                 let name_copy_len = core::cmp::min(name_len, 50);
-                community.name.copy_into_slice(&mut settings_url_buf[10..10 + name_copy_len]);
+                community
+                    .name
+                    .copy_into_slice(&mut settings_url_buf[10..10 + name_copy_len]);
                 let settings_suffix = b"/settings";
                 let suffix_start = 10 + name_copy_len;
                 settings_url_buf[suffix_start..suffix_start + 9].copy_from_slice(settings_suffix);
-                let settings_url = core::str::from_utf8(&settings_url_buf[0..suffix_start + 9]).unwrap_or("");
+                let settings_url =
+                    core::str::from_utf8(&settings_url_buf[0..suffix_start + 9]).unwrap_or("");
 
                 builder = builder.raw_str("<div class=\"community-actions\">");
                 builder = builder.raw_str("<a class=\"soroban-action\" href=\"");
@@ -1962,7 +2086,8 @@ impl BoardsCommunity {
                 builder = builder.raw_str("\">Settings</a>");
 
                 // Create Board link - goes to /create?community=ID
-                builder = builder.raw_str(" | <a class=\"soroban-action\" href=\"render:/create?community=");
+                builder = builder
+                    .raw_str(" | <a class=\"soroban-action\" href=\"render:/create?community=");
                 builder = builder.number(community.id as u32);
                 builder = builder.raw_str("\">+ Create Board</a>");
 
@@ -1981,7 +2106,9 @@ impl BoardsCommunity {
             let mut rules_buf = [0u8; 512];
             let rules_len = rules.rules_text.len() as usize;
             let rules_copy_len = core::cmp::min(rules_len, 512);
-            rules.rules_text.copy_into_slice(&mut rules_buf[0..rules_copy_len]);
+            rules
+                .rules_text
+                .copy_into_slice(&mut rules_buf[0..rules_copy_len]);
             let rules_text = core::str::from_utf8(&rules_buf[0..rules_copy_len]).unwrap_or("");
             builder = builder.h2("Community Rules");
             builder = builder.paragraph(rules_text);
@@ -2004,8 +2131,11 @@ impl BoardsCommunity {
         let mut display_buf = [0u8; 128];
         let display_len = community.display_name.len() as usize;
         let display_copy_len = core::cmp::min(display_len, 128);
-        community.display_name.copy_into_slice(&mut display_buf[0..display_copy_len]);
-        let display = core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
+        community
+            .display_name
+            .copy_into_slice(&mut display_buf[0..display_copy_len]);
+        let display =
+            core::str::from_utf8(&display_buf[0..display_copy_len]).unwrap_or("Community");
 
         let mut builder = MarkdownBuilder::new(env);
         builder = builder.h1(display);
@@ -2038,7 +2168,8 @@ impl BoardsCommunity {
         // Check if viewer is a site admin (bypass owner check)
         let is_site_admin = if let Some(ref user) = viewer {
             // Check permissions contract first
-            let permissions: Option<Address> = env.storage().instance().get(&CommunityKey::Permissions);
+            let permissions: Option<Address> =
+                env.storage().instance().get(&CommunityKey::Permissions);
             let perms_admin = if let Some(ref perms) = permissions {
                 let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
                 env.try_invoke_contract::<bool, soroban_sdk::Error>(
@@ -2056,7 +2187,11 @@ impl BoardsCommunity {
             // Also check registry's is_admin for backwards compatibility
             if perms_admin {
                 true
-            } else if let Some(registry) = env.storage().instance().get::<_, Address>(&CommunityKey::Registry) {
+            } else if let Some(registry) = env
+                .storage()
+                .instance()
+                .get::<_, Address>(&CommunityKey::Registry)
+            {
                 let admin_args: Vec<Val> = Vec::from_array(env, [user.clone().into_val(env)]);
                 env.try_invoke_contract::<bool, soroban_sdk::Error>(
                     &registry,
@@ -2133,8 +2268,10 @@ impl BoardsCommunity {
         builder = builder.h2("Visibility");
 
         // Private checkbox
-        builder = builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
-        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_private\" value=\"true\"");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<label><input type=\"checkbox\" name=\"is_private\" value=\"true\"");
         if community.is_private {
             builder = builder.raw_str(" checked");
         }
@@ -2142,7 +2279,8 @@ impl BoardsCommunity {
 
         // Listed checkbox (inverted - checkbox means unlisted)
         builder = builder.raw_str("<input type=\"hidden\" name=\"is_listed\" value=\"true\" />\n");
-        builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_listed\" value=\"false\"");
+        builder =
+            builder.raw_str("<label><input type=\"checkbox\" name=\"is_listed\" value=\"false\"");
         if !is_listed {
             builder = builder.raw_str(" checked");
         }
@@ -2157,7 +2295,9 @@ impl BoardsCommunity {
         builder = builder.raw_str("/settings\" />\n");
 
         builder = builder.newline();
-        builder = builder.raw_str("<a href=\"form:update_community\" class=\"soroban-action\">Save Changes</a>\n");
+        builder = builder.raw_str(
+            "<a href=\"form:update_community\" class=\"soroban-action\">Save Changes</a>\n",
+        );
 
         // Ownership Transfer Section
         builder = builder.newline();
@@ -2182,15 +2322,20 @@ impl BoardsCommunity {
             builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/c/");
             builder = builder.text_string(&community.name);
             builder = builder.raw_str("/settings\" />\n");
-            builder = builder.raw_str("<a href=\"form:cancel_transfer\" class=\"soroban-action\">Cancel Transfer</a>\n");
+            builder = builder.raw_str(
+                "<a href=\"form:cancel_transfer\" class=\"soroban-action\">Cancel Transfer</a>\n",
+            );
         } else {
-            builder = builder.paragraph("Transfer ownership to another user. They will need to accept the transfer.");
+            builder = builder.paragraph(
+                "Transfer ownership to another user. They will need to accept the transfer.",
+            );
 
             builder = builder.raw_str("<input type=\"hidden\" name=\"community_id\" value=\"");
             builder = builder.number(community.id as u32);
             builder = builder.raw_str("\" />\n");
             builder = builder.raw_str("<label>New Owner Address:</label>\n");
-            builder = builder.raw_str("<input type=\"text\" name=\"new_owner\" placeholder=\"G...\" />\n");
+            builder = builder
+                .raw_str("<input type=\"text\" name=\"new_owner\" placeholder=\"G...\" />\n");
             builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
             builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
             builder = builder.raw_str("\" />\n");
@@ -2247,7 +2392,8 @@ impl BoardsCommunity {
             builder = builder.number(community.id as u32);
             builder = builder.raw_str("\" />\n");
             builder = builder.raw_str("<label>Admin Address to Remove:</label>\n");
-            builder = builder.raw_str("<input type=\"text\" name=\"user\" placeholder=\"G...\" />\n");
+            builder =
+                builder.raw_str("<input type=\"text\" name=\"user\" placeholder=\"G...\" />\n");
             builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
             builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
             builder = builder.raw_str("\" />\n");
@@ -2263,7 +2409,8 @@ impl BoardsCommunity {
         builder = builder.h2("Danger Zone");
 
         // Fix board count - useful for data inconsistencies
-        builder = builder.paragraph("If your board count appears incorrect, you can recalculate it:");
+        builder =
+            builder.paragraph("If your board count appears incorrect, you can recalculate it:");
         builder = builder.raw_str("<a href=\"render:/c/");
         builder = builder.text_string(&community.name);
         builder = builder.raw_str("/fix-count\">Fix Board Count</a>\n");
@@ -2323,7 +2470,8 @@ impl BoardsCommunity {
             builder = builder.warning("Cannot delete community with boards.");
             builder = builder.paragraph("This community has ");
             builder = builder.number(community.board_count as u32);
-            builder = builder.text(" board(s). Remove all boards from this community before deleting it.");
+            builder = builder
+                .text(" board(s). Remove all boards from this community before deleting it.");
             builder = builder.newline();
             builder = builder.newline();
             builder = builder.raw_str("<a href=\"render:/c/");
@@ -2344,10 +2492,13 @@ impl BoardsCommunity {
             builder = builder.raw_str("<input type=\"hidden\" name=\"caller\" value=\"");
             builder = builder.text_string(&viewer.as_ref().unwrap().to_string());
             builder = builder.raw_str("\" />\n");
-            builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
+            builder = builder
+                .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
 
             builder = builder.newline();
-            builder = builder.raw_str("<a href=\"form:delete_community\" class=\"soroban-action\">Delete Community</a>\n");
+            builder = builder.raw_str(
+                "<a href=\"form:delete_community\" class=\"soroban-action\">Delete Community</a>\n",
+            );
             builder = builder.text(" | ");
             builder = builder.raw_str("<a href=\"render:/c/");
             builder = builder.text_string(&community.name);
@@ -2459,14 +2610,17 @@ impl BoardsCommunity {
 
         // Display name field
         builder = builder.raw_str("<label for=\"display_name\">Display Name:</label>\n");
-        builder = builder.raw_str("<input type=\"text\" name=\"display_name\" placeholder=\"My Community\" />\n");
+        builder = builder.raw_str(
+            "<input type=\"text\" name=\"display_name\" placeholder=\"My Community\" />\n",
+        );
 
         // Description field
         builder = builder.raw_str("<label for=\"description\">Description:</label>\n");
         builder = builder.textarea_markdown("description", 3, "Describe your community...");
 
         // Private checkbox - hidden default + checkbox override
-        builder = builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
+        builder =
+            builder.raw_str("<input type=\"hidden\" name=\"is_private\" value=\"false\" />\n");
         builder = builder.raw_str("<label><input type=\"checkbox\" name=\"is_private\" value=\"true\" /> Private (members only)</label>\n");
 
         // Listed checkbox - hidden default + checkbox override
@@ -2479,11 +2633,14 @@ impl BoardsCommunity {
         builder = builder.raw_str("\" />\n");
 
         // Hidden redirect - go to communities list after creation
-        builder = builder.raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
+        builder = builder
+            .raw_str("<input type=\"hidden\" name=\"_redirect\" value=\"/communities\" />\n");
 
         // Submit button using form: protocol link (collects all inputs on page)
         builder = builder.newline();
-        builder = builder.raw_str("<a href=\"form:create_community\" class=\"soroban-action\">Create Community</a>\n");
+        builder = builder.raw_str(
+            "<a href=\"form:create_community\" class=\"soroban-action\">Create Community</a>\n",
+        );
 
         // Cancel link
         builder = builder.raw_str(" | ");
@@ -2514,9 +2671,7 @@ impl BoardsCommunity {
         // All characters must be lowercase alphanumeric or hyphen
         for i in 0..copy_len {
             let c = buf[i];
-            let valid = (c >= b'a' && c <= b'z')
-                || (c >= b'0' && c <= b'9')
-                || c == b'-';
+            let valid = (c >= b'a' && c <= b'z') || (c >= b'0' && c <= b'9') || c == b'-';
             if !valid {
                 panic!("Community name can only contain lowercase letters, numbers, and hyphens");
             }
@@ -2600,14 +2755,26 @@ mod test {
     }
 
     /// Helper to create a public community
-    fn create_test_community(env: &Env, client: &BoardsCommunityClient, owner: &Address, name_str: &str) -> u64 {
+    fn create_test_community(
+        env: &Env,
+        client: &BoardsCommunityClient,
+        owner: &Address,
+        name_str: &str,
+    ) -> u64 {
         let name = String::from_str(env, name_str);
         let display_name = String::from_str(env, "Test Community");
         let description = String::from_str(env, "Test description");
         let is_private = String::from_str(env, "false");
         let is_listed = String::from_str(env, "true");
 
-        client.create_community(&name, &display_name, &description, &is_private, &is_listed, owner)
+        client.create_community(
+            &name,
+            &display_name,
+            &description,
+            &is_private,
+            &is_listed,
+            owner,
+        )
     }
 
     #[test]
@@ -2703,7 +2870,14 @@ mod test {
         let is_private = String::from_str(&env, "false");
         let is_listed = String::from_str(&env, "true");
 
-        client.create_community(&name, &display_name, &description, &is_private, &is_listed, &owner);
+        client.create_community(
+            &name,
+            &display_name,
+            &description,
+            &is_private,
+            &is_listed,
+            &owner,
+        );
 
         // Lookup by exact name
         let community = client.get_community_by_name(&name).unwrap();
@@ -2734,13 +2908,16 @@ mod test {
 
         // Create multiple communities
         for i in 0..5 {
-            let name = String::from_str(&env, match i {
-                0 => "community-a",
-                1 => "community-b",
-                2 => "community-c",
-                3 => "community-d",
-                _ => "community-e",
-            });
+            let name = String::from_str(
+                &env,
+                match i {
+                    0 => "community-a",
+                    1 => "community-b",
+                    2 => "community-c",
+                    3 => "community-d",
+                    _ => "community-e",
+                },
+            );
             let display = String::from_str(&env, "Community");
             let desc = String::from_str(&env, "Description");
             client.create_community(&name, &display, &desc, &is_private, &is_listed, &owner);
@@ -2910,7 +3087,14 @@ mod test {
         let is_private = String::from_str(&env, "false");
         let is_listed = String::from_str(&env, "true");
 
-        let id = client.create_community(&name, &display_name, &description, &is_private, &is_listed, &owner);
+        let id = client.create_community(
+            &name,
+            &display_name,
+            &description,
+            &is_private,
+            &is_listed,
+            &owner,
+        );
 
         // Update the community
         let new_display = String::from_str(&env, "Updated Name");
@@ -2918,7 +3102,14 @@ mod test {
         let new_private = String::from_str(&env, "false");
         let new_listed = String::from_str(&env, "false");
 
-        client.update_community(&id, &new_display, &new_desc, &new_private, &new_listed, &owner);
+        client.update_community(
+            &id,
+            &new_display,
+            &new_desc,
+            &new_private,
+            &new_listed,
+            &owner,
+        );
 
         let community = client.get_community(&id).unwrap();
         assert_eq!(community.display_name, new_display);

@@ -2,7 +2,8 @@
 
 use soroban_chonk::prelude::*;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec,
+    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal,
+    String, Symbol, Val, Vec,
 };
 
 /// Errors that can occur in the content contract
@@ -113,7 +114,7 @@ pub enum FlaggedType {
 pub struct FlaggedItem {
     pub board_id: u64,
     pub thread_id: u64,
-    pub reply_id: u64,       // 0 for threads
+    pub reply_id: u64, // 0 for threads
     pub item_type: FlaggedType,
     pub flag_count: u32,
     pub first_flagged_at: u64,
@@ -275,7 +276,11 @@ impl BoardsContent {
 
         // Record first-seen timestamp for the user (for account age tracking)
         // and increment post count
-        if let Some(perms) = env.storage().instance().get::<_, Address>(&ContentKey::Permissions) {
+        if let Some(perms) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&ContentKey::Permissions)
+        {
             let record_args: Vec<Val> = Vec::from_array(&env, [caller.clone().into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
@@ -284,10 +289,13 @@ impl BoardsContent {
             );
 
             // Increment user's post count
-            let inc_args: Vec<Val> = Vec::from_array(&env, [
-                caller.into_val(&env),
-                env.current_contract_address().into_val(&env),
-            ]);
+            let inc_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    caller.into_val(&env),
+                    env.current_contract_address().into_val(&env),
+                ],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
                 &Symbol::new(&env, "increment_post_count"),
@@ -302,7 +310,11 @@ impl BoardsContent {
 
     /// Check if board is readonly - returns error if so
     /// Queries the board contract directly for its readonly status
-    fn check_board_not_readonly(env: &Env, _registry: &Address, board_id: u64) -> Result<(), ContentError> {
+    fn check_board_not_readonly(
+        env: &Env,
+        _registry: &Address,
+        board_id: u64,
+    ) -> Result<(), ContentError> {
         // Get board contract (single contract for all boards)
         // If board contract is not available (e.g., in tests), skip the check
         let board_contract = match Self::get_board_contract_address(env) {
@@ -328,7 +340,12 @@ impl BoardsContent {
 
     /// Check if thread is locked - returns error if so
     /// Gracefully handles missing function for backwards compatibility
-    fn check_thread_not_locked(env: &Env, _registry: &Address, board_id: u64, thread_id: u64) -> Result<(), ContentError> {
+    fn check_thread_not_locked(
+        env: &Env,
+        _registry: &Address,
+        board_id: u64,
+        thread_id: u64,
+    ) -> Result<(), ContentError> {
         // Get board contract (single contract for all boards)
         // If board contract is not available (e.g., in tests), skip the check
         let board_contract = match Self::get_board_contract_address(env) {
@@ -337,7 +354,8 @@ impl BoardsContent {
         };
 
         // Query the board contract's is_thread_locked function (now requires board_id)
-        let thread_args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
+        let thread_args: Vec<Val> =
+            Vec::from_array(env, [board_id.into_val(env), thread_id.into_val(env)]);
         let is_locked: bool = env
             .try_invoke_contract::<bool, soroban_sdk::Error>(
                 &board_contract,
@@ -365,10 +383,7 @@ impl BoardsContent {
             .get(&ContentKey::Permissions)
             .unwrap();
 
-        let args: Vec<Val> = Vec::from_array(
-            env,
-            [board_id.into_val(env), user.into_val(env)],
-        );
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
         let fn_name = Symbol::new(env, "can_reply");
         let can_reply: bool = env.invoke_contract(&permissions, &fn_name, args);
 
@@ -389,10 +404,7 @@ impl BoardsContent {
             .get(&ContentKey::Permissions)
             .unwrap();
 
-        let args: Vec<Val> = Vec::from_array(
-            env,
-            [board_id.into_val(env), user.into_val(env)],
-        );
+        let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
         let fn_name = Symbol::new(env, "can_moderate");
         let can_moderate: bool = env.invoke_contract(&permissions, &fn_name, args);
 
@@ -403,7 +415,13 @@ impl BoardsContent {
 
     /// Store thread body content
     /// Note: Auth is handled by the calling contract (theme).
-    pub fn set_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, _author: Address) {
+    pub fn set_thread_body(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        content: Bytes,
+        _author: Address,
+    ) {
         // Note: require_auth() removed - called by theme which handles auth
 
         let key = Self::get_or_create_thread_body_chonk(&env, board_id, thread_id);
@@ -423,7 +441,12 @@ impl BoardsContent {
     }
 
     /// Get a chunk of thread body (for progressive loading)
-    pub fn get_thread_body_chunk(env: Env, board_id: u64, thread_id: u64, index: u32) -> Option<Bytes> {
+    pub fn get_thread_body_chunk(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        index: u32,
+    ) -> Option<Bytes> {
         if let Some(key) = Self::get_thread_body_chonk(&env, board_id, thread_id) {
             let chonk = Chonk::open(&env, key);
             chonk.get(index)
@@ -443,7 +466,13 @@ impl BoardsContent {
     }
 
     /// Edit thread body content (takes Bytes, for internal use)
-    pub fn edit_thread_body(env: Env, board_id: u64, thread_id: u64, content: Bytes, caller: Address) {
+    pub fn edit_thread_body(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        content: Bytes,
+        caller: Address,
+    ) {
         caller.require_auth();
         // TODO: Verify caller is author or moderator via permissions contract
 
@@ -598,9 +627,10 @@ impl BoardsContent {
             .get(&ContentKey::ThreadReplies(board_id, thread_id))
             .unwrap_or(Vec::new(&env));
         thread_replies.push_back(reply_id);
-        env.storage()
-            .persistent()
-            .set(&ContentKey::ThreadReplies(board_id, thread_id), &thread_replies);
+        env.storage().persistent().set(
+            &ContentKey::ThreadReplies(board_id, thread_id),
+            &thread_replies,
+        );
 
         // If this is a nested reply, add to parent's child list
         if parent_id > 0 || depth > 0 {
@@ -610,9 +640,10 @@ impl BoardsContent {
                 .get(&ContentKey::ChildReplies(board_id, thread_id, parent_id))
                 .unwrap_or(Vec::new(&env));
             child_replies.push_back(reply_id);
-            env.storage()
-                .persistent()
-                .set(&ContentKey::ChildReplies(board_id, thread_id, parent_id), &child_replies);
+            env.storage().persistent().set(
+                &ContentKey::ChildReplies(board_id, thread_id, parent_id),
+                &child_replies,
+            );
         }
 
         // Increment reply count (local)
@@ -626,15 +657,17 @@ impl BoardsContent {
             .set(&ContentKey::ReplyCount(board_id, thread_id), &(count + 1));
 
         // Update next ID
-        env.storage()
-            .persistent()
-            .set(&ContentKey::NextReplyId(board_id, thread_id), &(reply_id + 1));
+        env.storage().persistent().set(
+            &ContentKey::NextReplyId(board_id, thread_id),
+            &(reply_id + 1),
+        );
 
         // Increment reply count in board contract (for ThreadMeta.reply_count)
         // Get board contract (single contract for all boards) - skip if not available
         if let Some(board_contract) = Self::get_board_contract_address(&env) {
             // Call increment_reply_count with board_id
-            let incr_args: Vec<Val> = Vec::from_array(&env, [board_id.into_val(&env), thread_id.into_val(&env)]);
+            let incr_args: Vec<Val> =
+                Vec::from_array(&env, [board_id.into_val(&env), thread_id.into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &board_contract,
                 &Symbol::new(&env, "increment_reply_count"),
@@ -644,7 +677,11 @@ impl BoardsContent {
 
         // Record first-seen timestamp for the user (for account age tracking)
         // and increment post count
-        if let Some(perms) = env.storage().instance().get::<_, Address>(&ContentKey::Permissions) {
+        if let Some(perms) = env
+            .storage()
+            .instance()
+            .get::<_, Address>(&ContentKey::Permissions)
+        {
             let record_args: Vec<Val> = Vec::from_array(&env, [creator.clone().into_val(&env)]);
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
@@ -653,10 +690,13 @@ impl BoardsContent {
             );
 
             // Increment user's post count
-            let inc_args: Vec<Val> = Vec::from_array(&env, [
-                creator.into_val(&env),
-                env.current_contract_address().into_val(&env),
-            ]);
+            let inc_args: Vec<Val> = Vec::from_array(
+                &env,
+                [
+                    creator.into_val(&env),
+                    env.current_contract_address().into_val(&env),
+                ],
+            );
             let _ = env.try_invoke_contract::<(), soroban_sdk::Error>(
                 &perms,
                 &Symbol::new(&env, "increment_post_count"),
@@ -685,7 +725,13 @@ impl BoardsContent {
     }
 
     /// Get reply content chunk (for progressive loading)
-    pub fn get_reply_content_chunk(env: Env, board_id: u64, thread_id: u64, reply_id: u64, index: u32) -> Option<Bytes> {
+    pub fn get_reply_content_chunk(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        index: u32,
+    ) -> Option<Bytes> {
         if let Some(key) = Self::get_reply_chonk(&env, board_id, thread_id, reply_id) {
             let chonk = Chonk::open(&env, key);
             chonk.get(index)
@@ -703,7 +749,13 @@ impl BoardsContent {
     }
 
     /// List all replies for a thread with pagination
-    pub fn list_replies(env: Env, board_id: u64, thread_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
+    pub fn list_replies(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Vec<ReplyMeta> {
         let reply_ids: Vec<u64> = env
             .storage()
             .persistent()
@@ -729,7 +781,13 @@ impl BoardsContent {
     }
 
     /// List top-level replies only (replies to the thread itself, not nested)
-    pub fn list_top_level_replies(env: Env, board_id: u64, thread_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
+    pub fn list_top_level_replies(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Vec<ReplyMeta> {
         let reply_ids: Vec<u64> = env
             .storage()
             .persistent()
@@ -766,7 +824,14 @@ impl BoardsContent {
     }
 
     /// List child replies of a specific reply with pagination
-    pub fn list_children_replies(env: Env, board_id: u64, thread_id: u64, parent_id: u64, start: u32, limit: u32) -> Vec<ReplyMeta> {
+    pub fn list_children_replies(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        parent_id: u64,
+        start: u32,
+        limit: u32,
+    ) -> Vec<ReplyMeta> {
         let child_ids: Vec<u64> = env
             .storage()
             .persistent()
@@ -803,7 +868,14 @@ impl BoardsContent {
 
     /// Edit reply content (takes Bytes, for internal use)
     /// Returns an error if not authorized or if the board is read-only/thread is locked
-    pub fn edit_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, content: Bytes, caller: Address) -> Result<(), ContentError> {
+    pub fn edit_reply(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        content: Bytes,
+        caller: Address,
+    ) -> Result<(), ContentError> {
         caller.require_auth();
 
         let reply_opt = env
@@ -961,7 +1033,14 @@ impl BoardsContent {
     }
 
     /// Flag a reply
-    pub fn flag_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, reason: String, flagger: Address) {
+    pub fn flag_reply(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        reason: String,
+        flagger: Address,
+    ) {
         flagger.require_auth();
 
         let flag = Flag {
@@ -1017,7 +1096,14 @@ impl BoardsContent {
         if is_first_flag {
             Self::add_to_flagged_content(&env, board_id, thread_id, reply_id, FlaggedType::Reply);
         } else {
-            Self::update_flagged_content_count(&env, board_id, thread_id, reply_id, FlaggedType::Reply, flag_count);
+            Self::update_flagged_content_count(
+                &env,
+                board_id,
+                thread_id,
+                reply_id,
+                FlaggedType::Reply,
+                flag_count,
+            );
         }
     }
 
@@ -1054,15 +1140,23 @@ impl BoardsContent {
         env.storage()
             .persistent()
             .set(&ContentKey::ThreadFlags(board_id, thread_id), &flags);
-        env.storage()
-            .persistent()
-            .set(&ContentKey::ThreadFlagCount(board_id, thread_id), &flag_count);
+        env.storage().persistent().set(
+            &ContentKey::ThreadFlagCount(board_id, thread_id),
+            &flag_count,
+        );
 
         // Add to flagged content list
         if is_first_flag {
             Self::add_to_flagged_content(&env, board_id, thread_id, 0, FlaggedType::Thread);
         } else {
-            Self::update_flagged_content_count(&env, board_id, thread_id, 0, FlaggedType::Thread, flag_count);
+            Self::update_flagged_content_count(
+                &env,
+                board_id,
+                thread_id,
+                0,
+                FlaggedType::Thread,
+                flag_count,
+            );
         }
 
         // Note: Auto-hide for threads is handled by board contract
@@ -1093,7 +1187,13 @@ impl BoardsContent {
     }
 
     /// Clear/resolve flags on a reply (moderator action)
-    pub fn clear_reply_flags(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
+    pub fn clear_reply_flags(
+        env: Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        caller: Address,
+    ) {
         caller.require_auth();
         Self::check_can_moderate(&env, board_id, &caller);
 
@@ -1184,7 +1284,13 @@ impl BoardsContent {
     }
 
     /// Helper: Add item to flagged content list
-    fn add_to_flagged_content(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType) {
+    fn add_to_flagged_content(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        item_type: FlaggedType,
+    ) {
         let mut flagged: Vec<FlaggedItem> = env
             .storage()
             .persistent()
@@ -1206,7 +1312,14 @@ impl BoardsContent {
     }
 
     /// Helper: Update flag count in flagged content list
-    fn update_flagged_content_count(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType, count: u32) {
+    fn update_flagged_content_count(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        item_type: FlaggedType,
+        count: u32,
+    ) {
         if let Some(mut flagged) = env
             .storage()
             .persistent()
@@ -1214,7 +1327,10 @@ impl BoardsContent {
         {
             for i in 0..flagged.len() {
                 let mut item = flagged.get(i).unwrap();
-                if item.thread_id == thread_id && item.reply_id == reply_id && item.item_type == item_type {
+                if item.thread_id == thread_id
+                    && item.reply_id == reply_id
+                    && item.item_type == item_type
+                {
                     item.flag_count = count;
                     flagged.set(i, item);
                     break;
@@ -1227,7 +1343,13 @@ impl BoardsContent {
     }
 
     /// Helper: Remove item from flagged content list
-    fn remove_from_flagged_content(env: &Env, board_id: u64, thread_id: u64, reply_id: u64, item_type: FlaggedType) {
+    fn remove_from_flagged_content(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+        item_type: FlaggedType,
+    ) {
         if let Some(flagged) = env
             .storage()
             .persistent()
@@ -1236,7 +1358,10 @@ impl BoardsContent {
             let mut new_flagged = Vec::new(env);
             for i in 0..flagged.len() {
                 let item = flagged.get(i).unwrap();
-                if !(item.thread_id == thread_id && item.reply_id == reply_id && item.item_type == item_type) {
+                if !(item.thread_id == thread_id
+                    && item.reply_id == reply_id
+                    && item.item_type == item_type)
+                {
                     new_flagged.push_back(item);
                 }
             }
@@ -1404,7 +1529,13 @@ impl BoardsContent {
             .ok_or(ContentError::BoardContractNotAvailable)?;
 
         // Get original thread metadata (now requires board_id)
-        let thread_args: Vec<Val> = Vec::from_array(&env, [original_board_id.into_val(&env), original_thread_id.into_val(&env)]);
+        let thread_args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                original_board_id.into_val(&env),
+                original_thread_id.into_val(&env),
+            ],
+        );
         let original_thread: Option<(String, Address)> = env
             .try_invoke_contract::<Option<(String, Address)>, soroban_sdk::Error>(
                 &board_contract,
@@ -1430,7 +1561,11 @@ impl BoardsContent {
         // Create thread in target board (now requires board_id)
         let create_args: Vec<Val> = Vec::from_array(
             &env,
-            [target_board_id.into_val(&env), original_title.clone().into_val(&env), caller.clone().into_val(&env)],
+            [
+                target_board_id.into_val(&env),
+                original_title.clone().into_val(&env),
+                caller.clone().into_val(&env),
+            ],
         );
         let new_thread_id: u64 = env.invoke_contract(
             &board_contract,
@@ -1448,9 +1583,10 @@ impl BoardsContent {
             crossposted_at: env.ledger().timestamp(),
         };
 
-        env.storage()
-            .persistent()
-            .set(&ContentKey::CrosspostRef(target_board_id, new_thread_id), &crosspost_ref);
+        env.storage().persistent().set(
+            &ContentKey::CrosspostRef(target_board_id, new_thread_id),
+            &crosspost_ref,
+        );
 
         // Store comment as thread body if provided
         if comment.len() > 0 {
@@ -1473,25 +1609,33 @@ impl BoardsContent {
         let count: u32 = env
             .storage()
             .persistent()
-            .get(&ContentKey::CrosspostCount(original_board_id, original_thread_id))
+            .get(&ContentKey::CrosspostCount(
+                original_board_id,
+                original_thread_id,
+            ))
             .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&ContentKey::CrosspostCount(original_board_id, original_thread_id), &(count + 1));
+        env.storage().persistent().set(
+            &ContentKey::CrosspostCount(original_board_id, original_thread_id),
+            &(count + 1),
+        );
 
         let mut crosspost_list: Vec<CrosspostLocation> = env
             .storage()
             .persistent()
-            .get(&ContentKey::CrosspostList(original_board_id, original_thread_id))
+            .get(&ContentKey::CrosspostList(
+                original_board_id,
+                original_thread_id,
+            ))
             .unwrap_or(Vec::new(&env));
         crosspost_list.push_back(CrosspostLocation {
             board_id: target_board_id,
             thread_id: new_thread_id,
             created_at: env.ledger().timestamp(),
         });
-        env.storage()
-            .persistent()
-            .set(&ContentKey::CrosspostList(original_board_id, original_thread_id), &crosspost_list);
+        env.storage().persistent().set(
+            &ContentKey::CrosspostList(original_board_id, original_thread_id),
+            &crosspost_list,
+        );
 
         Ok(new_thread_id)
     }
@@ -1546,7 +1690,12 @@ impl BoardsContent {
     }
 
     /// Get or create a unique chonk symbol for reply content
-    fn get_or_create_reply_chonk(env: &Env, board_id: u64, thread_id: u64, reply_id: u64) -> Symbol {
+    fn get_or_create_reply_chonk(
+        env: &Env,
+        board_id: u64,
+        thread_id: u64,
+        reply_id: u64,
+    ) -> Symbol {
         let key = ContentKey::ReplyChonk(board_id, thread_id, reply_id);
         if let Some(symbol) = env.storage().persistent().get(&key) {
             symbol
@@ -1712,7 +1861,10 @@ mod test {
         assert!(reply.is_deleted);
 
         let deleted_content = client.get_reply_content(&0, &0, &reply_id);
-        assert_eq!(deleted_content, Bytes::from_slice(&env, b"[This reply has been deleted]"));
+        assert_eq!(
+            deleted_content,
+            Bytes::from_slice(&env, b"[This reply has been deleted]")
+        );
     }
 
     #[test]

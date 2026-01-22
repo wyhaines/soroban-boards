@@ -1,7 +1,10 @@
 #![no_std]
 
 use soroban_render_sdk::prelude::*;
-use soroban_sdk::{contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol, Val, Vec};
+use soroban_sdk::{
+    contract, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Symbol,
+    Val, Vec,
+};
 
 // Declare render capabilities
 soroban_render!(markdown, styles);
@@ -203,12 +206,21 @@ pub struct BoardsAdmin;
 #[contractimpl]
 impl BoardsAdmin {
     /// Initialize the admin contract
-    pub fn init(env: Env, registry: Address, permissions: Address, content: Address, theme: Address, config: Address) {
+    pub fn init(
+        env: Env,
+        registry: Address,
+        permissions: Address,
+        content: Address,
+        theme: Address,
+        config: Address,
+    ) {
         if env.storage().instance().has(&AdminKey::Registry) {
             panic!("Already initialized");
         }
         env.storage().instance().set(&AdminKey::Registry, &registry);
-        env.storage().instance().set(&AdminKey::Permissions, &permissions);
+        env.storage()
+            .instance()
+            .set(&AdminKey::Permissions, &permissions);
         env.storage().instance().set(&AdminKey::Content, &content);
         env.storage().instance().set(&AdminKey::Theme, &theme);
         env.storage().instance().set(&AdminKey::Config, &config);
@@ -253,7 +265,11 @@ impl BoardsAdmin {
 
     /// Get board contract address from registry (single contract for all boards)
     fn get_board_contract_address(env: &Env) -> Address {
-        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
         let alias_args: Vec<Val> = Vec::from_array(env, [Symbol::new(env, "board").into_val(env)]);
         let board_contract: Option<Address> = env.invoke_contract(
             &registry,
@@ -266,7 +282,11 @@ impl BoardsAdmin {
     /// Set config address (registry admin only)
     pub fn set_config(env: Env, config: Address, caller: Address) {
         caller.require_auth();
-        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
         let is_admin: bool = env.invoke_contract(
             &registry,
             &Symbol::new(&env, "is_admin"),
@@ -366,16 +386,12 @@ impl BoardsAdmin {
                 Self::render_voting(&env, board_id, &viewer)
             })
             // Registry admin routes
-            .or_handle(b"/registry", |_| {
-                Self::render_registry_admin(&env, &viewer)
-            })
+            .or_handle(b"/registry", |_| Self::render_registry_admin(&env, &viewer))
             .or_handle(b"/admin/registry", |_| {
                 Self::render_registry_admin(&env, &viewer)
             })
             // Site settings routes (global admin)
-            .or_handle(b"/settings", |_| {
-                Self::render_site_settings(&env, &viewer)
-            })
+            .or_handle(b"/settings", |_| Self::render_site_settings(&env, &viewer))
             .or_handle(b"/admin/settings", |_| {
                 Self::render_site_settings(&env, &viewer)
             })
@@ -408,7 +424,7 @@ impl BoardsAdmin {
         let aliases = Self::fetch_aliases(env);
         let site_name_include = Self::config_include(env, b"site_name");
         MarkdownBuilder::new(env)
-            .raw(aliases)  // Emit aliases for include resolution
+            .raw(aliases) // Emit aliases for include resolution
             .raw_str("<a href=\"render:/\">")
             .raw(site_name_include)
             .raw_str("</a>")
@@ -425,7 +441,7 @@ impl BoardsAdmin {
         let aliases = Self::fetch_aliases(env);
         let site_name_include = Self::config_include(env, b"site_name");
         MarkdownBuilder::new(env)
-            .raw(aliases)  // Emit aliases for include resolution
+            .raw(aliases) // Emit aliases for include resolution
             .raw_str("<a href=\"render:/\">")
             .raw(site_name_include)
             .raw_str("</a>")
@@ -535,17 +551,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Board Members");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Board Members");
 
         // Check if viewer has permission to view members (moderator+)
         let can_view = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_moderate
         } else {
             false
@@ -588,7 +600,9 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Demote button (for owner only)
-                md = md.text(" ").tx_link_to("[Demote]", "admin", "remove_admin", "");
+                md = md
+                    .text(" ")
+                    .tx_link_to("[Demote]", "admin", "remove_admin", "");
                 md = md.newline();
             }
         }
@@ -609,7 +623,9 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Demote button (for admin+)
-                md = md.text(" ").tx_link_to("[Demote]", "admin", "remove_moderator", "");
+                md = md
+                    .text(" ")
+                    .tx_link_to("[Demote]", "admin", "remove_moderator", "");
                 md = md.newline();
             }
         }
@@ -630,14 +646,19 @@ impl BoardsAdmin {
                 let addr_str = Self::format_address(env, &addr);
                 md = md.text("- `").text_string(&addr_str).text("`");
                 // Promote/Remove buttons
-                md = md.text(" ").tx_link_to("[Promote to Mod]", "admin", "set_moderator", "");
-                md = md.text(" ").tx_link_to("[Remove]", "admin", "remove_member", "");
+                md = md
+                    .text(" ")
+                    .tx_link_to("[Promote to Mod]", "admin", "set_moderator", "");
+                md = md
+                    .text(" ")
+                    .tx_link_to("[Remove]", "admin", "remove_member", "");
                 md = md.newline();
             }
         }
 
         // Add member form
-        md = md.hr()
+        md = md
+            .hr()
             .h3("Add Member")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
@@ -661,17 +682,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Banned Users");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Banned Users");
 
         // Check if viewer has permission (moderator+)
         let can_view = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_moderate
         } else {
             false
@@ -697,20 +714,34 @@ impl BoardsAdmin {
                 let user_str = Self::format_address(env, &ban.user);
                 let issuer_str = Self::format_address(env, &ban.issuer);
 
-                md = md.hr()
-                    .h3("").text("`").text_string(&user_str).text("`")
+                md = md
+                    .hr()
+                    .h3("")
+                    .text("`")
+                    .text_string(&user_str)
+                    .text("`")
                     .newline()
-                    .text("**Reason:** ").text_string(&ban.reason).newline()
-                    .text("**Issued by:** `").text_string(&issuer_str).text("`").newline();
+                    .text("**Reason:** ")
+                    .text_string(&ban.reason)
+                    .newline()
+                    .text("**Issued by:** `")
+                    .text_string(&issuer_str)
+                    .text("`")
+                    .newline();
 
                 if let Some(expires) = ban.expires_at {
-                    md = md.text("**Expires:** ").number(expires as u32).text(" (timestamp)").newline();
+                    md = md
+                        .text("**Expires:** ")
+                        .number(expires as u32)
+                        .text(" (timestamp)")
+                        .newline();
                 } else {
                     md = md.text("**Expires:** *Permanent*").newline();
                 }
 
                 // Unban link with hidden fields
-                md = md.raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                md = md
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                     .number(board_id as u32)
                     .raw_str("\" />\n")
                     .tx_link_to("Unban User", "admin", "unban_user", "")
@@ -719,7 +750,8 @@ impl BoardsAdmin {
         }
 
         // Ban user form
-        md = md.hr()
+        md = md
+            .hr()
             .h3("Ban a User")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
@@ -748,17 +780,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Content)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Flag Queue");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Flag Queue");
 
         // Check if viewer has permission (moderator+)
         let can_view = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_moderate
         } else {
             false
@@ -786,25 +814,38 @@ impl BoardsAdmin {
 
                 md = md.hr();
 
-                let type_str = if item.item_type == FlaggedType::Thread { "Thread" } else { "Reply" };
-                md = md.h3("").text(type_str).text(" #").number(item.thread_id as u32);
+                let type_str = if item.item_type == FlaggedType::Thread {
+                    "Thread"
+                } else {
+                    "Reply"
+                };
+                md = md
+                    .h3("")
+                    .text(type_str)
+                    .text(" #")
+                    .number(item.thread_id as u32);
 
                 if item.item_type == FlaggedType::Reply {
                     md = md.text(" / Reply #").number(item.reply_id as u32);
                 }
 
-                md = md.newline()
-                    .text("**Flags:** ").number(item.flag_count).newline();
+                md = md
+                    .newline()
+                    .text("**Flags:** ")
+                    .number(item.flag_count)
+                    .newline();
 
                 // View link
                 if item.item_type == FlaggedType::Thread {
-                    md = md.raw_str("[View Thread](render:/b/")
+                    md = md
+                        .raw_str("[View Thread](render:/b/")
                         .number(board_id as u32)
                         .raw_str("/t/")
                         .number(item.thread_id as u32)
                         .raw_str(")");
                 } else {
-                    md = md.raw_str("[View Reply](render:/b/")
+                    md = md
+                        .raw_str("[View Reply](render:/b/")
                         .number(board_id as u32)
                         .raw_str("/t/")
                         .number(item.thread_id as u32)
@@ -814,7 +855,8 @@ impl BoardsAdmin {
                 }
 
                 // Hidden fields for actions
-                md = md.raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
+                md = md
+                    .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                     .number(board_id as u32)
                     .raw_str("\" />\n")
                     .raw_str("<input type=\"hidden\" name=\"thread_id\" value=\"")
@@ -822,20 +864,31 @@ impl BoardsAdmin {
                     .raw_str("\" />\n");
 
                 if item.item_type == FlaggedType::Reply {
-                    md = md.raw_str("<input type=\"hidden\" name=\"reply_id\" value=\"")
+                    md = md
+                        .raw_str("<input type=\"hidden\" name=\"reply_id\" value=\"")
                         .number(item.reply_id as u32)
                         .raw_str("\" />\n");
                 }
 
                 // Actions
                 if item.item_type == FlaggedType::Thread {
-                    md = md.text(" | ").tx_link_to("Hide Thread", "admin", "hide_thread", "");
-                    md = md.text(" | ").tx_link_to("Delete Thread", "admin", "delete_thread", "");
+                    md = md
+                        .text(" | ")
+                        .tx_link_to("Hide Thread", "admin", "hide_thread", "");
+                    md = md
+                        .text(" | ")
+                        .tx_link_to("Delete Thread", "admin", "delete_thread", "");
                 } else {
-                    md = md.text(" | ").tx_link_to("Hide Reply", "admin", "hide_reply", "");
-                    md = md.text(" | ").tx_link_to("Delete Reply", "admin", "delete_reply", "");
+                    md = md
+                        .text(" | ")
+                        .tx_link_to("Hide Reply", "admin", "hide_reply", "");
+                    md = md
+                        .text(" | ")
+                        .tx_link_to("Delete Reply", "admin", "delete_reply", "");
                 }
-                md = md.text(" | ").tx_link_to("Clear Flags", "admin", "clear_flags", "");
+                md = md
+                    .text(" | ")
+                    .tx_link_to("Clear Flags", "admin", "clear_flags", "");
                 md = md.newline();
             }
         }
@@ -851,17 +904,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Invite Requests");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Invite Requests");
 
         // Check if viewer has permission (moderator+)
         let can_view = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_moderate
         } else {
             false
@@ -888,10 +937,16 @@ impl BoardsAdmin {
                 let request = requests.get(i).unwrap();
                 let user_str = Self::format_address(env, &request.user);
 
-                md = md.hr()
-                    .h3("").text("`").text_string(&user_str).text("`")
+                md = md
+                    .hr()
+                    .h3("")
+                    .text("`")
+                    .text_string(&user_str)
+                    .text("`")
                     .newline()
-                    .text("**Requested:** ").number(request.created_at as u32).text(" (timestamp)")
+                    .text("**Requested:** ")
+                    .number(request.created_at as u32)
+                    .text(" (timestamp)")
                     .newline()
                     // Hidden fields for actions
                     .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
@@ -909,7 +964,8 @@ impl BoardsAdmin {
         }
 
         // Direct invite form
-        md = md.hr()
+        md = md
+            .hr()
             .h3("Directly Invite a User")
             .paragraph("Invite a user without requiring them to request access.")
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
@@ -924,7 +980,8 @@ impl BoardsAdmin {
             .form_link_to("Invite as Admin", "admin", "invite_admin");
 
         // Link back to members page
-        md = md.hr()
+        md = md
+            .hr()
             .raw_str("[View All Members](render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/members)");
@@ -947,21 +1004,32 @@ impl BoardsAdmin {
         let mut md = Self::render_nav(env, board_id);
 
         // Get board config from board contract (now requires board_id)
-        let config_opt: Option<BoardConfig> = env.try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
-            &board_contract,
-            &Symbol::new(env, "get_config"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        ).ok().and_then(|r| r.ok());
+        let config_opt: Option<BoardConfig> = env
+            .try_invoke_contract::<BoardConfig, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_config"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            )
+            .ok()
+            .and_then(|r| r.ok());
 
         // Get board creator for ownership checks (now requires board_id)
-        let creator_opt: Option<Address> = env.try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
-            &board_contract,
-            &Symbol::new(env, "get_creator"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        ).ok().and_then(|r| r.ok()).flatten();
+        let creator_opt: Option<Address> = env
+            .try_invoke_contract::<Option<Address>, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_creator"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            )
+            .ok()
+            .and_then(|r| r.ok())
+            .flatten();
 
         if let Some(ref config) = config_opt {
-            md = md.h1("Settings: ").text_string(&config.name).newline().newline();
+            md = md
+                .h1("Settings: ")
+                .text_string(&config.name)
+                .newline()
+                .newline();
         } else {
             md = md.h1("Board Settings");
         }
@@ -969,11 +1037,8 @@ impl BoardsAdmin {
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_admin
         } else {
             false
@@ -985,14 +1050,20 @@ impl BoardsAdmin {
         }
 
         if let Some(ref config) = config_opt {
-            md = md.h2("Board Name")
-                .text("**Current name:** ").text_string(&config.name).newline()
+            md = md
+                .h2("Board Name")
+                .text("**Current name:** ")
+                .text_string(&config.name)
+                .newline()
                 .newline()
                 .note("Board name can be changed by updating the board configuration.")
                 .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                 .number(board_id as u32)
                 .raw_str("\" />\n")
-                .input("new_name", "New board name (3-50 chars, letters/numbers/-/_)")
+                .input(
+                    "new_name",
+                    "New board name (3-50 chars, letters/numbers/-/_)",
+                )
                 .newline()
                 .form_link_to("Rename Board", "admin", "rename_board")
                 .newline()
@@ -1006,8 +1077,11 @@ impl BoardsAdmin {
             Vec::from_array(env, [board_id.into_val(env)]),
         );
 
-        md = md.h2("Moderation Settings")
-            .text("**Flag threshold for auto-hide:** ").number(threshold).newline()
+        md = md
+            .h2("Moderation Settings")
+            .text("**Flag threshold for auto-hide:** ")
+            .number(threshold)
+            .newline()
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
             .number(board_id as u32)
             .raw_str("\" />\n")
@@ -1065,13 +1139,18 @@ impl BoardsAdmin {
         );
 
         // Convert seconds to hours for display
-        let edit_hours = if edit_window == 0 { 0 } else { edit_window / 3600 };
+        let edit_hours = if edit_window == 0 {
+            0
+        } else {
+            edit_window / 3600
+        };
 
-        md = md.h2("Content Editing")
-            .text("**Edit window:** ");
+        md = md.h2("Content Editing").text("**Edit window:** ");
 
         if edit_window == 0 {
-            md = md.text("No limit (users can always edit their content)").newline();
+            md = md
+                .text("No limit (users can always edit their content)")
+                .newline();
         } else {
             md = md.number(edit_hours as u32).text(" hours").newline();
         }
@@ -1088,19 +1167,23 @@ impl BoardsAdmin {
             .newline();
 
         // Board visibility setting - query board contract
-        let is_listed: bool = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-            &board_contract,
-            &Symbol::new(env, "get_board_listed"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        ).unwrap_or(Ok(false)).unwrap_or(false);
+        let is_listed: bool = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "get_board_listed"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false);
 
-        md = md.h2("Board Visibility")
-            .text("**Listed publicly:** ");
+        md = md.h2("Board Visibility").text("**Listed publicly:** ");
 
         if is_listed {
             md = md.text("Yes (appears on home page)").newline();
         } else {
-            md = md.text("No (hidden from home page, accessible via direct link)").newline();
+            md = md
+                .text("No (hidden from home page, accessible via direct link)")
+                .newline();
         }
 
         md = md.newline()
@@ -1115,14 +1198,12 @@ impl BoardsAdmin {
             md = md.form_link_to("Show on Public List", "admin", "list_board");
         }
 
-        md = md.newline()
-            .newline();
+        md = md.newline().newline();
 
         // Board access control (public/private) - get from config
         let is_private = config_opt.as_ref().map(|c| c.is_private).unwrap_or(false);
 
-        md = md.h2("Access Control")
-            .text("**Board type:** ");
+        md = md.h2("Access Control").text("**Board type:** ");
 
         if is_private {
             md = md.text("Private (members only)").newline();
@@ -1142,18 +1223,19 @@ impl BoardsAdmin {
             md = md.form_link_to("Make Private", "admin", "make_private");
         }
 
-        md = md.newline()
-            .newline();
+        md = md.newline().newline();
 
         // Board read-only status
-        let is_readonly = env.try_invoke_contract::<bool, soroban_sdk::Error>(
-            &board_contract,
-            &Symbol::new(env, "is_readonly"),
-            Vec::from_array(env, [board_id.into_val(env)]),
-        ).unwrap_or(Ok(false)).unwrap_or(false);
+        let is_readonly = env
+            .try_invoke_contract::<bool, soroban_sdk::Error>(
+                &board_contract,
+                &Symbol::new(env, "is_readonly"),
+                Vec::from_array(env, [board_id.into_val(env)]),
+            )
+            .unwrap_or(Ok(false))
+            .unwrap_or(false);
 
-        md = md.h2("Posting Status")
-            .text("**Current status:** ");
+        md = md.h2("Posting Status").text("**Current status:** ");
 
         if is_readonly {
             md = md.text("Read-only (no new posts allowed)").newline();
@@ -1173,14 +1255,17 @@ impl BoardsAdmin {
             md = md.form_link_to("Make Read-Only", "admin", "make_readonly");
         }
 
-        md = md.newline()
-            .newline();
+        md = md.newline().newline();
 
         // Community Management Section
         md = md.h2("Community");
 
         // Get community contract address via alias lookup
-        let registry: Address = env.storage().instance().get(&AdminKey::Registry).expect("Not initialized");
+        let registry: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Registry)
+            .expect("Not initialized");
         let community_contract_opt: Option<Address> = env.invoke_contract(
             &registry,
             &Symbol::new(env, "get_contract_by_alias"),
@@ -1205,7 +1290,8 @@ impl BoardsAdmin {
                 );
 
                 if let Some(community) = comm_opt {
-                    md = md.text("**Current Community:** ")
+                    md = md
+                        .text("**Current Community:** ")
                         .raw_str("<a href=\"render:/c/")
                         .text_string(&community.name)
                         .raw_str("\">")
@@ -1231,14 +1317,16 @@ impl BoardsAdmin {
                         .raw_str("\n</div>\n")
                         .newline();
                 } else {
-                    md = md.text("**Status:** In community (ID: ")
+                    md = md
+                        .text("**Status:** In community (ID: ")
                         .number(community_id as u32)
                         .text(")")
                         .newline();
                 }
             } else {
                 // Board is standalone - show option to move to a community
-                md = md.text("**Status:** Standalone board (not in a community)")
+                md = md
+                    .text("**Status:** Standalone board (not in a community)")
                     .newline()
                     .newline();
 
@@ -1265,27 +1353,31 @@ impl BoardsAdmin {
                 }
 
                 if user_communities.is_empty() {
-                    md = md.tip("Create a community to organize your boards together.")
+                    md = md
+                        .tip("Create a community to organize your boards together.")
                         .raw_str("<a href=\"render:/new\">Create Community</a>\n");
                 } else {
                     // Note: Form inputs ordered to match function signature:
                     // add_board(community_id, board_id, caller)
                     // Wrap in data-form div to create form boundary (isolates from other forms on page)
-                    md = md.note("Move this board to one of your communities.")
+                    md = md
+                        .note("Move this board to one of your communities.")
                         .raw_str("<div data-form>\n")
                         .raw_str("<label>Select Community:</label>\n")
                         .raw_str("<select name=\"community_id\">\n");
 
                     for i in 0..user_communities.len() {
                         let comm = user_communities.get(i).unwrap();
-                        md = md.raw_str("<option value=\"")
+                        md = md
+                            .raw_str("<option value=\"")
                             .number(comm.id as u32)
                             .raw_str("\">")
                             .text_string(&comm.display_name)
                             .raw_str("</option>\n");
                     }
 
-                    md = md.raw_str("</select>\n")
+                    md = md
+                        .raw_str("</select>\n")
                         .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                         .number(board_id as u32)
                         .raw_str("\" />\n")
@@ -1302,13 +1394,13 @@ impl BoardsAdmin {
                 }
             }
         } else {
-            md = md.text("Community features not available.")
-                .newline();
+            md = md.text("Community features not available.").newline();
         }
 
         md = md.newline();
 
-        md = md.h2("Quick Links")
+        md = md
+            .h2("Quick Links")
             .raw_str("[View Members](render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/members)")
@@ -1342,7 +1434,8 @@ impl BoardsAdmin {
         // Danger Zone - only show to board owner
         if let (Some(v), Some(ref creator)) = (viewer, &creator_opt) {
             if v == creator {
-                md = md.h2("Danger Zone")
+                md = md
+                    .h2("Danger Zone")
                     .warning("These actions are irreversible.")
                     .raw_str("[Delete Board](render:/admin/b/")
                     .number(board_id as u32)
@@ -1362,7 +1455,8 @@ impl BoardsAdmin {
         let mut md = MarkdownBuilder::new(env);
 
         // Back navigation
-        md = md.div_start("back-nav")
+        md = md
+            .div_start("back-nav")
             .raw_str("<a href=\"render:/admin/b/")
             .number(board_id as u32)
             .raw_str("/settings\" class=\"back-link\">← Back to Settings</a>")
@@ -1400,7 +1494,10 @@ impl BoardsAdmin {
         let viewer_addr = viewer.as_ref().unwrap();
 
         // Check if viewer is the board owner
-        let is_owner = creator_opt.as_ref().map(|c| c == viewer_addr).unwrap_or(false);
+        let is_owner = creator_opt
+            .as_ref()
+            .map(|c| c == viewer_addr)
+            .unwrap_or(false);
         if !is_owner {
             return md
                 .warning("Only the board owner can delete this board.")
@@ -1423,10 +1520,13 @@ impl BoardsAdmin {
             .newline();
 
         if thread_count > 0 {
-            md = md.note("This board contains threads. All threads and replies will be permanently deleted.");
+            md = md.note(
+                "This board contains threads. All threads and replies will be permanently deleted.",
+            );
         }
 
-        md = md.newline()
+        md = md
+            .newline()
             .paragraph("To confirm deletion, click the button below:")
             .newline()
             .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
@@ -1455,17 +1555,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Flair Management");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Flair Management");
 
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_admin
         } else {
             false
@@ -1515,7 +1611,8 @@ impl BoardsAdmin {
 
                 // Disable button (only for enabled flairs) - wrapped in data-form to isolate inputs
                 if flair.enabled {
-                    md = md.text(" | ")
+                    md = md
+                        .text(" | ")
                         .raw_str("<div data-form>\n")
                         .raw_str("<input type=\"hidden\" name=\"board_id\" value=\"")
                         .number(board_id as u32)
@@ -1557,24 +1654,25 @@ impl BoardsAdmin {
     }
 
     /// Render flair edit page
-    fn render_flair_edit(env: &Env, board_id: u64, flair_id: u32, viewer: &Option<Address>) -> Bytes {
+    fn render_flair_edit(
+        env: &Env,
+        board_id: u64,
+        flair_id: u32,
+        viewer: &Option<Address>,
+    ) -> Bytes {
         let permissions: Address = env
             .storage()
             .instance()
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Edit Flair");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Edit Flair");
 
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_admin
         } else {
             false
@@ -1625,29 +1723,31 @@ impl BoardsAdmin {
             let name_copy_len = if name_len > 64 { 64 } else { name_len };
             flair.name.copy_into_slice(&mut name_buf[..name_copy_len]);
 
-            md = md.raw_str("<div class=\"form-group\">\n")
+            md = md
+                .raw_str("<div class=\"form-group\">\n")
                 .raw_str("<label for=\"name\">Name</label>\n")
                 .raw_str("<input type=\"text\" name=\"name\" id=\"name\" value=\"");
             for j in 0..name_copy_len {
-                md = md.raw_str(core::str::from_utf8(&name_buf[j..j+1]).unwrap_or(""));
+                md = md.raw_str(core::str::from_utf8(&name_buf[j..j + 1]).unwrap_or(""));
             }
-            md = md.raw_str("\" />\n")
-                .raw_str("</div>\n\n");
+            md = md.raw_str("\" />\n").raw_str("</div>\n\n");
 
             // Color field
             let color_len = flair.color.len() as usize;
             let mut color_buf = [0u8; 32];
             let color_copy_len = if color_len > 32 { 32 } else { color_len };
-            flair.color.copy_into_slice(&mut color_buf[..color_copy_len]);
+            flair
+                .color
+                .copy_into_slice(&mut color_buf[..color_copy_len]);
 
-            md = md.raw_str("<div class=\"form-group\">\n")
+            md = md
+                .raw_str("<div class=\"form-group\">\n")
                 .raw_str("<label for=\"color\">Text color</label>\n")
                 .raw_str("<input type=\"text\" name=\"color\" id=\"color\" value=\"");
             for j in 0..color_copy_len {
-                md = md.raw_str(core::str::from_utf8(&color_buf[j..j+1]).unwrap_or(""));
+                md = md.raw_str(core::str::from_utf8(&color_buf[j..j + 1]).unwrap_or(""));
             }
-            md = md.raw_str("\" />\n")
-                .raw_str("</div>\n\n");
+            md = md.raw_str("\" />\n").raw_str("</div>\n\n");
 
             // Background color field
             let bg_len = flair.bg_color.len() as usize;
@@ -1655,14 +1755,14 @@ impl BoardsAdmin {
             let bg_copy_len = if bg_len > 32 { 32 } else { bg_len };
             flair.bg_color.copy_into_slice(&mut bg_buf[..bg_copy_len]);
 
-            md = md.raw_str("<div class=\"form-group\">\n")
+            md = md
+                .raw_str("<div class=\"form-group\">\n")
                 .raw_str("<label for=\"bg_color\">Background color</label>\n")
                 .raw_str("<input type=\"text\" name=\"bg_color\" id=\"bg_color\" value=\"");
             for j in 0..bg_copy_len {
-                md = md.raw_str(core::str::from_utf8(&bg_buf[j..j+1]).unwrap_or(""));
+                md = md.raw_str(core::str::from_utf8(&bg_buf[j..j + 1]).unwrap_or(""));
             }
-            md = md.raw_str("\" />\n")
-                .raw_str("</div>\n\n");
+            md = md.raw_str("\" />\n").raw_str("</div>\n\n");
 
             // Checkboxes with current values
             md = md.raw_str("<input type=\"hidden\" name=\"required\" value=\"false\" />\n");
@@ -1686,7 +1786,8 @@ impl BoardsAdmin {
                 md = md.raw_str("<label><input type=\"checkbox\" name=\"enabled\" value=\"true\" /> Enabled</label>\n");
             }
 
-            md = md.newline()
+            md = md
+                .newline()
                 .form_link_to("Update Flair", "admin", "update_flair")
                 .newline()
                 .newline()
@@ -1708,17 +1809,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Permissions)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Board Rules Editor");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Board Rules Editor");
 
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_admin
         } else {
             false
@@ -1743,7 +1840,8 @@ impl BoardsAdmin {
 
         if let Some(ref rules) = current_rules {
             if rules.len() > 0 {
-                md = md.div_start("rules-content")
+                md = md
+                    .div_start("rules-content")
                     .text_string(rules)
                     .div_end()
                     .newline()
@@ -1775,12 +1873,14 @@ impl BoardsAdmin {
         if let Some(rules) = current_rules {
             if rules.len() > 0 {
                 // Note: Can't pre-fill textarea in this setup, user needs to re-enter
-                md = md.newline()
-                    .note("Copy existing rules above and paste into the text area if you want to edit.");
+                md = md.newline().note(
+                    "Copy existing rules above and paste into the text area if you want to edit.",
+                );
             }
         }
 
-        md = md.newline()
+        md = md
+            .newline()
             .form_link_to("Save Rules", "admin", "set_rules");
 
         Self::render_footer_into(env, md).build()
@@ -1799,17 +1899,13 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        let mut md = Self::render_nav_subpage(env, board_id)
-            .h1("Voting Configuration");
+        let mut md = Self::render_nav_subpage(env, board_id).h1("Voting Configuration");
 
         // Check if viewer has admin permission
         let can_admin = if let Some(user) = viewer {
             let args: Vec<Val> = Vec::from_array(env, [board_id.into_val(env), user.into_val(env)]);
-            let perms: PermissionSet = env.invoke_contract(
-                &permissions,
-                &Symbol::new(env, "get_permissions"),
-                args,
-            );
+            let perms: PermissionSet =
+                env.invoke_contract(&permissions, &Symbol::new(env, "get_permissions"), args);
             perms.can_admin
         } else {
             false
@@ -1842,12 +1938,21 @@ impl BoardsAdmin {
 
             if let Some(cfg) = config {
                 md = md
-                    .raw_str("- **Voting enabled:** ").text(if cfg.enabled { "Yes" } else { "No" }).newline()
-                    .raw_str("- **Allow downvotes:** ").text(if cfg.allow_downvotes { "Yes" } else { "No" }).newline()
-                    .raw_str("- **Karma tracking:** ").text(if cfg.karma_enabled { "Yes" } else { "No" }).newline()
-                    .raw_str("- **Karma multiplier:** ").number(cfg.karma_multiplier).newline();
+                    .raw_str("- **Voting enabled:** ")
+                    .text(if cfg.enabled { "Yes" } else { "No" })
+                    .newline()
+                    .raw_str("- **Allow downvotes:** ")
+                    .text(if cfg.allow_downvotes { "Yes" } else { "No" })
+                    .newline()
+                    .raw_str("- **Karma tracking:** ")
+                    .text(if cfg.karma_enabled { "Yes" } else { "No" })
+                    .newline()
+                    .raw_str("- **Karma multiplier:** ")
+                    .number(cfg.karma_multiplier)
+                    .newline();
             } else {
-                md = md.paragraph("Using default configuration (voting enabled, downvotes allowed).");
+                md = md
+                    .paragraph("Using default configuration (voting enabled, downvotes allowed).");
             }
 
             // Update form
@@ -1866,7 +1971,9 @@ impl BoardsAdmin {
                 .newline()
                 .form_link_to("Update Configuration", "admin", "set_voting_config");
         } else {
-            md = md.note("Voting contract is not configured for this board. Voting features are disabled.");
+            md = md.note(
+                "Voting contract is not configured for this board. Voting features are disabled.",
+            );
         }
 
         Self::render_footer_into(env, md).build()
@@ -1894,11 +2001,8 @@ impl BoardsAdmin {
         let viewer_addr = viewer.as_ref().unwrap();
 
         // Get all admins
-        let admins: Vec<Address> = env.invoke_contract(
-            &registry,
-            &Symbol::new(env, "get_admins"),
-            Vec::new(env),
-        );
+        let admins: Vec<Address> =
+            env.invoke_contract(&registry, &Symbol::new(env, "get_admins"), Vec::new(env));
 
         // Check if viewer is an admin
         let viewer_is_admin: bool = env.invoke_contract(
@@ -1907,9 +2011,7 @@ impl BoardsAdmin {
             Vec::from_array(env, [viewer_addr.into_val(env)]),
         );
 
-        md = md
-            .h2("Current Admins")
-            .raw_str("<ul>\n");
+        md = md.h2("Current Admins").raw_str("<ul>\n");
 
         for i in 0..admins.len() {
             let admin = admins.get(i).unwrap();
@@ -1957,9 +2059,7 @@ impl BoardsAdmin {
         md = md.raw_str("</p>");
 
         // Add link back to home
-        md = md
-            .newline()
-            .render_link("← Back to Home", "/");
+        md = md.newline().render_link("← Back to Home", "/");
 
         Self::render_footer_into(env, md).build()
     }
@@ -1972,7 +2072,7 @@ impl BoardsAdmin {
     fn render_settings_nav(env: &Env) -> MarkdownBuilder<'_> {
         let aliases = Self::fetch_aliases(env);
         MarkdownBuilder::new(env)
-            .raw(aliases)  // Emit aliases for include resolution
+            .raw(aliases) // Emit aliases for include resolution
             .render_link("Soroban Boards", "/")
             .text(" | ")
             .render_link("Admin", "/admin/registry")
@@ -2002,8 +2102,7 @@ impl BoardsAdmin {
 
     /// Render main site settings page
     fn render_site_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_settings_nav(env)
-            .h1("Site Settings");
+        let mut md = Self::render_settings_nav(env).h1("Site Settings");
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
@@ -2044,8 +2143,7 @@ impl BoardsAdmin {
 
     /// Render branding settings page
     fn render_branding_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_settings_nav(env)
-            .h1("Branding Settings");
+        let mut md = Self::render_settings_nav(env).h1("Branding Settings");
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
@@ -2061,17 +2159,18 @@ impl BoardsAdmin {
         }
 
         let config = config_opt.unwrap();
-        let branding: Branding = env.invoke_contract(
-            &config,
-            &Symbol::new(env, "get_branding"),
-            Vec::new(env),
-        );
+        let branding: Branding =
+            env.invoke_contract(&config, &Symbol::new(env, "get_branding"), Vec::new(env));
 
         md = md
             .h2("Current Branding")
             .newline()
-            .text("- **Site Name:** ").text_string(&branding.site_name).newline()
-            .text("- **Home Content:** ").text_string(&branding.tagline).newline()
+            .text("- **Site Name:** ")
+            .text_string(&branding.site_name)
+            .newline()
+            .text("- **Home Content:** ")
+            .text_string(&branding.tagline)
+            .newline()
             // Color swatch: inline span with background color and contrasting text
             .raw_str("- **Primary Color:** <span style=\"background-color:")
             .text_string(&branding.primary_color)
@@ -2080,19 +2179,28 @@ impl BoardsAdmin {
             .raw_str("</span>\n");
 
         if branding.logo_url.len() > 0 {
-            md = md.text("- **Logo URL:** ").text_string(&branding.logo_url).newline();
+            md = md
+                .text("- **Logo URL:** ")
+                .text_string(&branding.logo_url)
+                .newline();
         } else {
             md = md.text("- **Logo URL:** *(not set)*").newline();
         }
 
         if branding.favicon_url.len() > 0 {
-            md = md.text("- **Favicon URL:** ").text_string(&branding.favicon_url).newline();
+            md = md
+                .text("- **Favicon URL:** ")
+                .text_string(&branding.favicon_url)
+                .newline();
         } else {
             md = md.text("- **Favicon URL:** *(not set)*").newline();
         }
 
         if branding.footer_text.len() > 0 {
-            md = md.text("- **Footer Text:** ").text_string(&branding.footer_text).newline();
+            md = md
+                .text("- **Footer Text:** ")
+                .text_string(&branding.footer_text)
+                .newline();
         } else {
             md = md.text("- **Footer Text:** *(using default)*").newline();
         }
@@ -2113,14 +2221,23 @@ impl BoardsAdmin {
             // Home Content form
             .raw_str("<div data-form>\n\n")
             .h3("Home Content")
-            .textarea_markdown_with_value_string("tagline", 3, "Home content (markdown)", &branding.tagline)
+            .textarea_markdown_with_value_string(
+                "tagline",
+                3,
+                "Home content (markdown)",
+                &branding.tagline,
+            )
             .newline()
             .form_link_to("Update Home Content", "admin", "set_tagline")
             .raw_str("\n</div>\n\n")
             // Primary Color form
             .raw_str("<div data-form>\n\n")
             .h3("Primary Color")
-            .input_with_value_string("primary_color", "CSS color (e.g., #7857e1)", &branding.primary_color)
+            .input_with_value_string(
+                "primary_color",
+                "CSS color (e.g., #7857e1)",
+                &branding.primary_color,
+            )
             .newline()
             .form_link_to("Update Primary Color", "admin", "set_primary_color")
             .raw_str("\n</div>\n\n")
@@ -2141,7 +2258,12 @@ impl BoardsAdmin {
             // Footer Text form
             .raw_str("<div data-form>\n\n")
             .h3("Footer Text")
-            .textarea_markdown_with_value_noparse_string("footer_text", 3, "Custom footer text", &branding.footer_text)
+            .textarea_markdown_with_value_noparse_string(
+                "footer_text",
+                3,
+                "Custom footer text",
+                &branding.footer_text,
+            )
             .newline()
             .form_link_to("Update Footer Text", "admin", "set_footer_text")
             .raw_str("\n</div>\n\n")
@@ -2152,8 +2274,7 @@ impl BoardsAdmin {
 
     /// Render threshold settings page
     fn render_threshold_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_settings_nav(env)
-            .h1("Creation Thresholds");
+        let mut md = Self::render_settings_nav(env).h1("Creation Thresholds");
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
@@ -2178,34 +2299,67 @@ impl BoardsAdmin {
 
         md = md
             .h2("Board Creation Thresholds")
-            .text("- **Minimum Karma:** ").number(board_thresholds.min_karma as u32)
-            .text("\n- **Minimum Account Age (seconds):** ").number(board_thresholds.min_account_age_secs as u32)
-            .text("\n- **Minimum Post Count:** ").number(board_thresholds.min_post_count)
-            .text("\n- **Require Profile:** ").text(if board_thresholds.require_profile { "Yes" } else { "No" })
-            .text("\n- **Per-User Limit:** ").number(board_thresholds.per_user_limit).text(" (0 = unlimited)")
-            .text("\n- **XLM Lock (stroops):** ").number(board_thresholds.xlm_lock_stroops as u32)
+            .text("- **Minimum Karma:** ")
+            .number(board_thresholds.min_karma as u32)
+            .text("\n- **Minimum Account Age (seconds):** ")
+            .number(board_thresholds.min_account_age_secs as u32)
+            .text("\n- **Minimum Post Count:** ")
+            .number(board_thresholds.min_post_count)
+            .text("\n- **Require Profile:** ")
+            .text(if board_thresholds.require_profile {
+                "Yes"
+            } else {
+                "No"
+            })
+            .text("\n- **Per-User Limit:** ")
+            .number(board_thresholds.per_user_limit)
+            .text(" (0 = unlimited)")
+            .text("\n- **XLM Lock (stroops):** ")
+            .number(board_thresholds.xlm_lock_stroops as u32)
             .newline()
             .newline()
             .raw_str("<div data-form>\n\n")
             .h3("Update Board Thresholds")
             .raw_str("<input type=\"hidden\" name=\"threshold_type\" value=\"board\" />\n\n")
-            .text("**Min Karma** (0 = none):").newline()
+            .text("**Min Karma** (0 = none):")
+            .newline()
             .input_with_value_number("min_karma", "Min Karma", board_thresholds.min_karma as u32)
             .newline()
-            .text("**Min Account Age** (seconds, 0 = none):").newline()
-            .input_with_value_number("min_account_age_secs", "Min Account Age", board_thresholds.min_account_age_secs as u32)
+            .text("**Min Account Age** (seconds, 0 = none):")
             .newline()
-            .text("**Min Post Count** (0 = none):").newline()
-            .input_with_value_number("min_post_count", "Min Post Count", board_thresholds.min_post_count)
+            .input_with_value_number(
+                "min_account_age_secs",
+                "Min Account Age",
+                board_thresholds.min_account_age_secs as u32,
+            )
             .newline()
-            .text("**Require Profile:**").newline()
+            .text("**Min Post Count** (0 = none):")
+            .newline()
+            .input_with_value_number(
+                "min_post_count",
+                "Min Post Count",
+                board_thresholds.min_post_count,
+            )
+            .newline()
+            .text("**Require Profile:**")
+            .newline()
             .select_bool("require_profile", board_thresholds.require_profile)
             .newline()
-            .text("**Per-User Limit** (0 = unlimited):").newline()
-            .input_with_value_number("per_user_limit", "Per-User Limit", board_thresholds.per_user_limit)
+            .text("**Per-User Limit** (0 = unlimited):")
             .newline()
-            .text("**XLM Lock** (stroops, 0 = none):").newline()
-            .input_with_value_number("xlm_lock_stroops", "XLM Lock", board_thresholds.xlm_lock_stroops as u32)
+            .input_with_value_number(
+                "per_user_limit",
+                "Per-User Limit",
+                board_thresholds.per_user_limit,
+            )
+            .newline()
+            .text("**XLM Lock** (stroops, 0 = none):")
+            .newline()
+            .input_with_value_number(
+                "xlm_lock_stroops",
+                "XLM Lock",
+                board_thresholds.xlm_lock_stroops as u32,
+            )
             .newline()
             .form_link_to("Update Board Thresholds", "admin", "update_thresholds")
             .raw_str("\n</div>\n\n");
@@ -2220,34 +2374,71 @@ impl BoardsAdmin {
         md = md
             .newline()
             .h2("Community Creation Thresholds")
-            .text("- **Minimum Karma:** ").number(community_thresholds.min_karma as u32)
-            .text("\n- **Minimum Account Age (seconds):** ").number(community_thresholds.min_account_age_secs as u32)
-            .text("\n- **Minimum Post Count:** ").number(community_thresholds.min_post_count)
-            .text("\n- **Require Profile:** ").text(if community_thresholds.require_profile { "Yes" } else { "No" })
-            .text("\n- **Per-User Limit:** ").number(community_thresholds.per_user_limit).text(" (0 = unlimited)")
-            .text("\n- **XLM Lock (stroops):** ").number(community_thresholds.xlm_lock_stroops as u32)
+            .text("- **Minimum Karma:** ")
+            .number(community_thresholds.min_karma as u32)
+            .text("\n- **Minimum Account Age (seconds):** ")
+            .number(community_thresholds.min_account_age_secs as u32)
+            .text("\n- **Minimum Post Count:** ")
+            .number(community_thresholds.min_post_count)
+            .text("\n- **Require Profile:** ")
+            .text(if community_thresholds.require_profile {
+                "Yes"
+            } else {
+                "No"
+            })
+            .text("\n- **Per-User Limit:** ")
+            .number(community_thresholds.per_user_limit)
+            .text(" (0 = unlimited)")
+            .text("\n- **XLM Lock (stroops):** ")
+            .number(community_thresholds.xlm_lock_stroops as u32)
             .newline()
             .newline()
             .raw_str("<div data-form>\n\n")
             .h3("Update Community Thresholds")
             .raw_str("<input type=\"hidden\" name=\"threshold_type\" value=\"community\" />\n\n")
-            .text("**Min Karma** (0 = none):").newline()
-            .input_with_value_number("min_karma", "Min Karma", community_thresholds.min_karma as u32)
+            .text("**Min Karma** (0 = none):")
             .newline()
-            .text("**Min Account Age** (seconds, 0 = none):").newline()
-            .input_with_value_number("min_account_age_secs", "Min Account Age", community_thresholds.min_account_age_secs as u32)
+            .input_with_value_number(
+                "min_karma",
+                "Min Karma",
+                community_thresholds.min_karma as u32,
+            )
             .newline()
-            .text("**Min Post Count** (0 = none):").newline()
-            .input_with_value_number("min_post_count", "Min Post Count", community_thresholds.min_post_count)
+            .text("**Min Account Age** (seconds, 0 = none):")
             .newline()
-            .text("**Require Profile:**").newline()
+            .input_with_value_number(
+                "min_account_age_secs",
+                "Min Account Age",
+                community_thresholds.min_account_age_secs as u32,
+            )
+            .newline()
+            .text("**Min Post Count** (0 = none):")
+            .newline()
+            .input_with_value_number(
+                "min_post_count",
+                "Min Post Count",
+                community_thresholds.min_post_count,
+            )
+            .newline()
+            .text("**Require Profile:**")
+            .newline()
             .select_bool("require_profile", community_thresholds.require_profile)
             .newline()
-            .text("**Per-User Limit** (0 = unlimited):").newline()
-            .input_with_value_number("per_user_limit", "Per-User Limit", community_thresholds.per_user_limit)
+            .text("**Per-User Limit** (0 = unlimited):")
             .newline()
-            .text("**XLM Lock** (stroops, 0 = none):").newline()
-            .input_with_value_number("xlm_lock_stroops", "XLM Lock", community_thresholds.xlm_lock_stroops as u32)
+            .input_with_value_number(
+                "per_user_limit",
+                "Per-User Limit",
+                community_thresholds.per_user_limit,
+            )
+            .newline()
+            .text("**XLM Lock** (stroops, 0 = none):")
+            .newline()
+            .input_with_value_number(
+                "xlm_lock_stroops",
+                "XLM Lock",
+                community_thresholds.xlm_lock_stroops as u32,
+            )
             .newline()
             .form_link_to("Update Community Thresholds", "admin", "update_thresholds")
             .raw_str("\n</div>\n")
@@ -2260,8 +2451,7 @@ impl BoardsAdmin {
 
     /// Render operational settings page
     fn render_operational_settings(env: &Env, viewer: &Option<Address>) -> Bytes {
-        let mut md = Self::render_settings_nav(env)
-            .h1("Operational Settings");
+        let mut md = Self::render_settings_nav(env).h1("Operational Settings");
 
         if !Self::is_registry_admin(env, viewer) {
             md = md.warning("You must be a registry admin to access site settings.");
@@ -2311,8 +2501,12 @@ impl BoardsAdmin {
 
         md = md
             .h2("Reply Settings")
-            .text("**Max Reply Depth:** ").number(max_reply_depth).newline()
-            .text("**Reply Chunk Size:** ").number(reply_chunk_size).newline()
+            .text("**Max Reply Depth:** ")
+            .number(max_reply_depth)
+            .newline()
+            .text("**Reply Chunk Size:** ")
+            .number(reply_chunk_size)
+            .newline()
             .newline()
             .input("max_reply_depth", "Max Reply Depth")
             .newline()
@@ -2324,8 +2518,15 @@ impl BoardsAdmin {
             .newline()
             .newline()
             .h2("Content Settings")
-            .text("**Default Edit Window:** ").number(default_edit_window as u32).text(" seconds (").number((default_edit_window / 3600) as u32).text(" hours)").newline()
-            .text("**Thread Body Max Bytes:** ").number(thread_body_max_bytes).newline()
+            .text("**Default Edit Window:** ")
+            .number(default_edit_window as u32)
+            .text(" seconds (")
+            .number((default_edit_window / 3600) as u32)
+            .text(" hours)")
+            .newline()
+            .text("**Thread Body Max Bytes:** ")
+            .number(thread_body_max_bytes)
+            .newline()
             .newline()
             .input("default_edit_window", "Edit Window (seconds)")
             .newline()
@@ -2337,8 +2538,18 @@ impl BoardsAdmin {
             .newline()
             .newline()
             .h2("Name Length Limits")
-            .text("**Board Name:** ").number(board_name_limits.min_length).text("-").number(board_name_limits.max_length).text(" characters").newline()
-            .text("**Community Name:** ").number(community_name_limits.min_length).text("-").number(community_name_limits.max_length).text(" characters").newline()
+            .text("**Board Name:** ")
+            .number(board_name_limits.min_length)
+            .text("-")
+            .number(board_name_limits.max_length)
+            .text(" characters")
+            .newline()
+            .text("**Community Name:** ")
+            .number(community_name_limits.min_length)
+            .text("-")
+            .number(community_name_limits.max_length)
+            .text(" characters")
+            .newline()
             .newline()
             .h3("Update Board Name Limits")
             .raw_str("<input type=\"hidden\" name=\"limit_type\" value=\"board\" />\n")
@@ -2368,13 +2579,7 @@ impl BoardsAdmin {
     // ========================================================================
 
     /// Set a user's role on a board (admin+)
-    pub fn set_role(
-        env: Env,
-        board_id: u64,
-        user: Address,
-        role: Role,
-        caller: Address,
-    ) {
+    pub fn set_role(env: Env, board_id: u64, user: Address, role: Role, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2395,17 +2600,16 @@ impl BoardsAdmin {
         }
 
         // Set the role
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            role.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "set_role"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                role.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "set_role"), args);
     }
 
     /// Add a user as Member (convenience function for forms)
@@ -2449,16 +2653,15 @@ impl BoardsAdmin {
         }
 
         // Accept the invite
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "accept_invite"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "accept_invite"), args);
     }
 
     /// Revoke/reject a pending invite request (moderator+)
@@ -2483,16 +2686,15 @@ impl BoardsAdmin {
         }
 
         // Revoke the invite
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "revoke_invite"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "revoke_invite"), args);
     }
 
     /// Directly invite a user as Member (moderator+)
@@ -2521,17 +2723,16 @@ impl BoardsAdmin {
             .expect("Not initialized");
 
         // The permissions contract handles authorization checks
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            role.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "invite_member"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                role.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "invite_member"), args);
     }
 
     /// Ban a user from a board (moderator+)
@@ -2571,27 +2772,21 @@ impl BoardsAdmin {
 
         // Ban the user
         // Permissions expects: (board_id, user, reason, duration_hours, caller)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            reason.into_val(&env),
-            expires_at.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "ban_user"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                reason.into_val(&env),
+                expires_at.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "ban_user"), args);
     }
 
     /// Unban a user from a board (moderator+)
-    pub fn unban_user(
-        env: Env,
-        board_id: u64,
-        user: Address,
-        caller: Address,
-    ) {
+    pub fn unban_user(env: Env, board_id: u64, user: Address, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2612,25 +2807,19 @@ impl BoardsAdmin {
         }
 
         // Unban the user
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            user.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "unban_user"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                user.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "unban_user"), args);
     }
 
     /// Hide a thread (moderator+)
-    pub fn hide_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn hide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2654,11 +2843,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Hide the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            true.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                true.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_hidden"),
@@ -2667,12 +2859,7 @@ impl BoardsAdmin {
     }
 
     /// Unhide a thread (moderator+)
-    pub fn unhide_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn unhide_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2696,11 +2883,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Unhide the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            false.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                false.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_hidden"),
@@ -2709,13 +2899,7 @@ impl BoardsAdmin {
     }
 
     /// Hide a reply (moderator+)
-    pub fn hide_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reply_id: u64,
-        caller: Address,
-    ) {
+    pub fn hide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2741,27 +2925,20 @@ impl BoardsAdmin {
         }
 
         // Hide the reply
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            true.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "set_reply_hidden"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                reply_id.into_val(&env),
+                true.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&content, &Symbol::new(&env, "set_reply_hidden"), args);
     }
 
     /// Unhide a reply (moderator+)
-    pub fn unhide_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reply_id: u64,
-        caller: Address,
-    ) {
+    pub fn unhide_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -2787,17 +2964,16 @@ impl BoardsAdmin {
         }
 
         // Unhide the reply
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            false.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "set_reply_hidden"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                reply_id.into_val(&env),
+                false.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&content, &Symbol::new(&env, "set_reply_hidden"), args);
     }
 
     /// Clear flags on content (moderator+)
@@ -2833,26 +3009,20 @@ impl BoardsAdmin {
         }
 
         // Clear flags
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "clear_flags"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                reply_id.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&content, &Symbol::new(&env, "clear_flags"), args);
     }
 
     /// Update flag threshold for a board (admin+)
     /// Accepts threshold as String since HTML forms submit strings
-    pub fn set_flag_threshold(
-        env: Env,
-        board_id: u64,
-        threshold: String,
-        caller: Address,
-    ) {
+    pub fn set_flag_threshold(env: Env, board_id: u64, threshold: String, caller: Address) {
         caller.require_auth();
 
         // Parse string to u32
@@ -2876,26 +3046,20 @@ impl BoardsAdmin {
         }
 
         // Set the threshold
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            threshold_u32.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &permissions,
-            &Symbol::new(&env, "set_flag_threshold"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                threshold_u32.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&permissions, &Symbol::new(&env, "set_flag_threshold"), args);
     }
 
     /// Update reply chunk size for waterfall loading (admin+)
     /// Accepts chunk_size as String since HTML forms submit strings
-    pub fn set_chunk_size(
-        env: Env,
-        board_id: u64,
-        chunk_size: String,
-        caller: Address,
-    ) {
+    pub fn set_chunk_size(env: Env, board_id: u64, chunk_size: String, caller: Address) {
         caller.require_auth();
 
         // Parse string to u32
@@ -2927,26 +3091,20 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Set the chunk size (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            chunk_size_u32.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "set_chunk_size"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                chunk_size_u32.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "set_chunk_size"), args);
     }
 
     /// Update maximum reply depth for a board (admin+)
     /// Accepts max_depth as String since HTML forms submit strings
-    pub fn set_max_reply_depth(
-        env: Env,
-        board_id: u64,
-        max_depth: String,
-        caller: Address,
-    ) {
+    pub fn set_max_reply_depth(env: Env, board_id: u64, max_depth: String, caller: Address) {
         caller.require_auth();
 
         // Parse string to u32
@@ -2962,7 +3120,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -2978,11 +3139,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Set the max reply depth (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            max_depth_u32.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                max_depth_u32.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_max_reply_depth"),
@@ -2993,12 +3157,7 @@ impl BoardsAdmin {
     /// Update edit window for a board (admin+)
     /// Accepts edit_hours as String since HTML forms submit strings
     /// Input is in hours, stored as seconds
-    pub fn set_edit_window(
-        env: Env,
-        board_id: u64,
-        edit_hours: String,
-        caller: Address,
-    ) {
+    pub fn set_edit_window(env: Env, board_id: u64, edit_hours: String, caller: Address) {
         caller.require_auth();
 
         // Parse string to u32 (hours)
@@ -3014,7 +3173,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3028,26 +3190,20 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Set the edit window (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            seconds.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "set_edit_window"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                seconds.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "set_edit_window"), args);
     }
 
     /// Rename a board (admin+)
     /// The old name becomes an alias that continues to resolve
-    pub fn rename_board(
-        env: Env,
-        board_id: u64,
-        new_name: String,
-        caller: Address,
-    ) {
+    pub fn rename_board(env: Env, board_id: u64, new_name: String, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3060,7 +3216,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3074,57 +3233,46 @@ impl BoardsAdmin {
             .get(&AdminKey::Registry)
             .expect("Not initialized");
 
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            new_name.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &registry,
-            &Symbol::new(&env, "rename_board"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                new_name.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&registry, &Symbol::new(&env, "rename_board"), args);
     }
 
     /// List a board publicly (admin+)
     /// Makes the board appear on the home page
-    pub fn list_board(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn list_board(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_listed(env, board_id, true, caller);
     }
 
     /// Unlist a board (admin+)
     /// Hides the board from the home page but keeps it accessible via direct link
-    pub fn unlist_board(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn unlist_board(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_listed(env, board_id, false, caller);
     }
 
     /// Helper to set board listed status
-    fn set_board_listed(
-        env: Env,
-        board_id: u64,
-        is_listed: bool,
-        caller: Address,
-    ) {
+    fn set_board_listed(env: Env, board_id: u64, is_listed: bool, caller: Address) {
         // Get board contract (single contract for all boards)
         let board_contract = Self::get_board_contract_address(&env);
 
         // Call board contract's set_board_listed function (now requires board_id)
         // (The board contract handles permission checking internally)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            is_listed.into_val(&env),
-            caller.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                is_listed.into_val(&env),
+                caller.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_board_listed"),
@@ -3133,76 +3281,49 @@ impl BoardsAdmin {
     }
 
     /// Make a board public (admin+)
-    pub fn make_public(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn make_public(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_private(env, board_id, false, caller);
     }
 
     /// Make a board private (admin+)
-    pub fn make_private(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn make_private(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_private(env, board_id, true, caller);
     }
 
     /// Helper to set board private status
-    fn set_board_private(
-        env: Env,
-        board_id: u64,
-        is_private: bool,
-        caller: Address,
-    ) {
+    fn set_board_private(env: Env, board_id: u64, is_private: bool, caller: Address) {
         // Get board contract (single contract for all boards)
         let board_contract = Self::get_board_contract_address(&env);
 
         // Call board contract's set_private function (now requires board_id)
         // (The board contract handles permission checking internally)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            is_private.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "set_private"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                is_private.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "set_private"), args);
     }
 
     /// Enable posting on a board (admin+)
-    pub fn enable_posting(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn enable_posting(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_readonly(env, board_id, false, caller);
     }
 
     /// Make a board read-only (admin+)
-    pub fn make_readonly(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn make_readonly(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
         Self::set_board_readonly(env, board_id, true, caller);
     }
 
     /// Helper to set board readonly status
-    fn set_board_readonly(
-        env: Env,
-        board_id: u64,
-        is_readonly: bool,
-        caller: Address,
-    ) {
+    fn set_board_readonly(env: Env, board_id: u64, is_readonly: bool, caller: Address) {
         let permissions: Address = env
             .storage()
             .instance()
@@ -3213,7 +3334,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3224,25 +3348,19 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Call board contract's set_readonly function (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            is_readonly.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "set_readonly"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                is_readonly.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "set_readonly"), args);
     }
 
     /// Pin a thread (moderator+)
-    pub fn pin_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn pin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3266,11 +3384,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Pin the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            true.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                true.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_pinned"),
@@ -3279,12 +3400,7 @@ impl BoardsAdmin {
     }
 
     /// Unpin a thread (moderator+)
-    pub fn unpin_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn unpin_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3308,11 +3424,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Unpin the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            false.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                false.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_pinned"),
@@ -3321,12 +3440,7 @@ impl BoardsAdmin {
     }
 
     /// Lock a thread (moderator+)
-    pub fn lock_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn lock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3350,11 +3464,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Lock the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            true.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                true.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_locked"),
@@ -3363,12 +3480,7 @@ impl BoardsAdmin {
     }
 
     /// Unlock a thread (moderator+)
-    pub fn unlock_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn unlock_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3392,11 +3504,14 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Unlock the thread (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            false.into_val(&env),
-        ]);
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                false.into_val(&env),
+            ],
+        );
         env.invoke_contract::<()>(
             &board_contract,
             &Symbol::new(&env, "set_thread_locked"),
@@ -3405,12 +3520,7 @@ impl BoardsAdmin {
     }
 
     /// Delete a thread (moderator+)
-    pub fn delete_thread(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        caller: Address,
-    ) {
+    pub fn delete_thread(env: Env, board_id: u64, thread_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3423,7 +3533,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_moderate {
@@ -3434,26 +3547,19 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Delete the thread (soft delete) - now requires board_id
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "delete_thread"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "delete_thread"), args);
     }
 
     /// Delete a reply (moderator+)
-    pub fn delete_reply(
-        env: Env,
-        board_id: u64,
-        thread_id: u64,
-        reply_id: u64,
-        caller: Address,
-    ) {
+    pub fn delete_reply(env: Env, board_id: u64, thread_id: u64, reply_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3471,7 +3577,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_moderate {
@@ -3479,17 +3588,16 @@ impl BoardsAdmin {
         }
 
         // Delete the reply (soft delete via content contract)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            thread_id.into_val(&env),
-            reply_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &content,
-            &Symbol::new(&env, "delete_reply"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                thread_id.into_val(&env),
+                reply_id.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&content, &Symbol::new(&env, "delete_reply"), args);
     }
 
     // ========================================================================
@@ -3520,7 +3628,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3543,29 +3654,23 @@ impl BoardsAdmin {
             .unwrap_or(false);
 
         // Create the flair (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            name.into_val(&env),
-            final_color.into_val(&env),
-            final_bg_color.into_val(&env),
-            is_required.into_val(&env),
-            is_mod_only.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<u32>(
-            &board_contract,
-            &Symbol::new(&env, "create_flair"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                name.into_val(&env),
+                final_color.into_val(&env),
+                final_bg_color.into_val(&env),
+                is_required.into_val(&env),
+                is_mod_only.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<u32>(&board_contract, &Symbol::new(&env, "create_flair"), args);
     }
 
     /// Disable a flair (admin+)
-    pub fn disable_flair(
-        env: Env,
-        board_id: u64,
-        flair_id: String,
-        caller: Address,
-    ) {
+    pub fn disable_flair(env: Env, board_id: u64, flair_id: String, caller: Address) {
         caller.require_auth();
 
         let flair_id_u32 = string_to_u32(&env, &flair_id).expect("Invalid number");
@@ -3580,7 +3685,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3591,16 +3699,15 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Disable the flair (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            flair_id_u32.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "disable_flair"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                flair_id_u32.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "disable_flair"), args);
     }
 
     /// Update an existing flair (admin+)
@@ -3630,7 +3737,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3663,17 +3773,16 @@ impl BoardsAdmin {
         };
 
         // Update the flair (board_id is required by boards-board.update_flair)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            flair_id_u32.into_val(&env),
-            flair.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "update_flair"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                flair_id_u32.into_val(&env),
+                flair.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "update_flair"), args);
     }
 
     // ========================================================================
@@ -3681,12 +3790,7 @@ impl BoardsAdmin {
     // ========================================================================
 
     /// Set board rules (admin+)
-    pub fn set_rules(
-        env: Env,
-        board_id: u64,
-        rules: String,
-        caller: Address,
-    ) {
+    pub fn set_rules(env: Env, board_id: u64, rules: String, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3699,7 +3803,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3710,24 +3817,19 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Set the rules (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            rules.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "set_rules"),
-            args,
+        let args: Vec<Val> = Vec::from_array(
+            &env,
+            [
+                board_id.into_val(&env),
+                rules.into_val(&env),
+                caller.into_val(&env),
+            ],
         );
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "set_rules"), args);
     }
 
     /// Clear board rules (admin+)
-    pub fn clear_rules(
-        env: Env,
-        board_id: u64,
-        caller: Address,
-    ) {
+    pub fn clear_rules(env: Env, board_id: u64, caller: Address) {
         caller.require_auth();
 
         let permissions: Address = env
@@ -3740,7 +3842,10 @@ impl BoardsAdmin {
         let caller_perms: PermissionSet = env.invoke_contract(
             &permissions,
             &Symbol::new(&env, "get_permissions"),
-            Vec::from_array(&env, [board_id.into_val(&env), caller.clone().into_val(&env)]),
+            Vec::from_array(
+                &env,
+                [board_id.into_val(&env), caller.clone().into_val(&env)],
+            ),
         );
 
         if !caller_perms.can_admin {
@@ -3751,15 +3856,9 @@ impl BoardsAdmin {
         let board_contract = Self::get_board_contract_address(&env);
 
         // Clear the rules (now requires board_id)
-        let args: Vec<Val> = Vec::from_array(&env, [
-            board_id.into_val(&env),
-            caller.into_val(&env),
-        ]);
-        env.invoke_contract::<()>(
-            &board_contract,
-            &Symbol::new(&env, "clear_rules"),
-            args,
-        );
+        let args: Vec<Val> =
+            Vec::from_array(&env, [board_id.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(&board_contract, &Symbol::new(&env, "clear_rules"), args);
     }
 
     // ========================================================================
@@ -3798,11 +3897,8 @@ impl BoardsAdmin {
             .expect("Config not set");
 
         // Get current branding
-        let mut branding: Branding = env.invoke_contract(
-            &config,
-            &Symbol::new(env, "get_branding"),
-            Vec::new(env),
-        );
+        let mut branding: Branding =
+            env.invoke_contract(&config, &Symbol::new(env, "get_branding"), Vec::new(env));
 
         // Apply the update
         updater(&mut branding);
@@ -3891,9 +3987,17 @@ impl BoardsAdmin {
 
         // Get current thresholds
         let mut thresholds: CreationThresholds = if is_board {
-            env.invoke_contract(&config, &Symbol::new(&env, "get_board_thresholds"), Vec::new(&env))
+            env.invoke_contract(
+                &config,
+                &Symbol::new(&env, "get_board_thresholds"),
+                Vec::new(&env),
+            )
         } else {
-            env.invoke_contract(&config, &Symbol::new(&env, "get_community_thresholds"), Vec::new(&env))
+            env.invoke_contract(
+                &config,
+                &Symbol::new(&env, "get_community_thresholds"),
+                Vec::new(&env),
+            )
         };
 
         // Update fields
@@ -3904,7 +4008,8 @@ impl BoardsAdmin {
         }
         if let Some(s) = min_account_age_secs {
             if s.len() > 0 {
-                thresholds.min_account_age_secs = string_to_u32(&env, &s).expect("Invalid number") as u64;
+                thresholds.min_account_age_secs =
+                    string_to_u32(&env, &s).expect("Invalid number") as u64;
             }
         }
         if let Some(s) = min_post_count {
@@ -3922,20 +4027,30 @@ impl BoardsAdmin {
         }
         if let Some(s) = xlm_lock_stroops {
             if s.len() > 0 {
-                thresholds.xlm_lock_stroops = string_to_u32(&env, &s).expect("Invalid number") as i128;
+                thresholds.xlm_lock_stroops =
+                    string_to_u32(&env, &s).expect("Invalid number") as i128;
             }
         }
 
         // Save updated thresholds
-        let func_name = if is_board { "set_board_thresholds" } else { "set_community_thresholds" };
-        let args: Vec<Val> = Vec::from_array(&env, [thresholds.into_val(&env), caller.into_val(&env)]);
+        let func_name = if is_board {
+            "set_board_thresholds"
+        } else {
+            "set_community_thresholds"
+        };
+        let args: Vec<Val> =
+            Vec::from_array(&env, [thresholds.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, func_name), args);
     }
 
     /// Set site-wide max reply depth (registry admin only)
     pub fn config_set_max_reply_depth(env: Env, max_reply_depth: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
-        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
         let depth = string_to_u32(&env, &max_reply_depth).expect("Invalid number");
         let args: Vec<Val> = Vec::from_array(&env, [depth.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_max_reply_depth"), args);
@@ -3944,7 +4059,11 @@ impl BoardsAdmin {
     /// Set site-wide reply chunk size (registry admin only)
     pub fn config_set_reply_chunk_size(env: Env, reply_chunk_size: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
-        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
         let size = string_to_u32(&env, &reply_chunk_size).expect("Invalid number");
         let args: Vec<Val> = Vec::from_array(&env, [size.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_reply_chunk_size"), args);
@@ -3953,19 +4072,36 @@ impl BoardsAdmin {
     /// Set default edit window (registry admin only)
     pub fn config_set_default_edit_window(env: Env, default_edit_window: String, caller: Address) {
         Self::require_registry_admin(&env, &caller);
-        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
         let seconds = string_to_u32(&env, &default_edit_window).expect("Invalid number") as u64;
         let args: Vec<Val> = Vec::from_array(&env, [seconds.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_default_edit_window"), args);
     }
 
     /// Set thread body max bytes (registry admin only)
-    pub fn config_set_thread_body_max_bytes(env: Env, thread_body_max_bytes: String, caller: Address) {
+    pub fn config_set_thread_body_max_bytes(
+        env: Env,
+        thread_body_max_bytes: String,
+        caller: Address,
+    ) {
         Self::require_registry_admin(&env, &caller);
-        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
         let max_bytes = string_to_u32(&env, &thread_body_max_bytes).expect("Invalid number");
-        let args: Vec<Val> = Vec::from_array(&env, [max_bytes.into_val(&env), caller.into_val(&env)]);
-        env.invoke_contract::<()>(&config, &Symbol::new(&env, "set_thread_body_max_bytes"), args);
+        let args: Vec<Val> =
+            Vec::from_array(&env, [max_bytes.into_val(&env), caller.into_val(&env)]);
+        env.invoke_contract::<()>(
+            &config,
+            &Symbol::new(&env, "set_thread_body_max_bytes"),
+            args,
+        );
     }
 
     /// Set name limits (registry admin only)
@@ -3977,7 +4113,11 @@ impl BoardsAdmin {
         caller: Address,
     ) {
         Self::require_registry_admin(&env, &caller);
-        let config: Address = env.storage().instance().get(&AdminKey::Config).expect("Config not set");
+        let config: Address = env
+            .storage()
+            .instance()
+            .get(&AdminKey::Config)
+            .expect("Config not set");
 
         let is_board = {
             let len = limit_type.len() as usize;
@@ -3992,7 +4132,11 @@ impl BoardsAdmin {
             max_length: string_to_u32(&env, &max_length).expect("Invalid number"),
         };
 
-        let func_name = if is_board { "set_board_name_limits" } else { "set_community_name_limits" };
+        let func_name = if is_board {
+            "set_board_name_limits"
+        } else {
+            "set_community_name_limits"
+        };
         let args: Vec<Val> = Vec::from_array(&env, [limits.into_val(&env), caller.into_val(&env)]);
         env.invoke_contract::<()>(&config, &Symbol::new(&env, func_name), args);
     }
@@ -4017,7 +4161,16 @@ mod test {
     use soroban_sdk::Env;
 
     /// Helper to setup a boards-admin contract with all dependencies
-    fn setup_admin(env: &Env) -> (BoardsAdminClient, Address, Address, Address, Address, Address) {
+    fn setup_admin(
+        env: &Env,
+    ) -> (
+        BoardsAdminClient,
+        Address,
+        Address,
+        Address,
+        Address,
+        Address,
+    ) {
         env.mock_all_auths();
 
         let contract_id = env.register(BoardsAdmin, ());
